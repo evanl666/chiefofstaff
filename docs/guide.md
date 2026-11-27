@@ -1,2177 +1,548 @@
 # Guide
 
-How Chief of Staff works from your side: what you see, what it does on its own, and what it
-asks you. For how it is built, see [ARCHITECTURE.md](ARCHITECTURE.md). For what keeps agents in
-bounds, see [SECURITY.md](../SECURITY.md).
+How to use Chief of Staff, from the first start to a full day of work. Every behavior and setting
+in detail, with its edge cases, is in the [Reference](reference.md); this page links to it where
+you may want more.
 
-- [Home](#home)
-- [Giving work](#giving-work)
-- [Send to Chief](#send-to-chief)
-- [Tasks and workers](#tasks-and-workers)
-- [Where workers work](#where-workers-work)
-- [Receipts](#receipts)
-- [Reviewing changes](#reviewing-changes)
-- [When a session needs you](#when-a-session-needs-you)
-- [Decisions](#decisions)
-- [How you work: learned, and kept up to date](#how-you-work-learned-and-kept-up-to-date)
-- [Checks learned from mistakes](#checks-learned-from-mistakes)
-- [Focus](#focus)
-- [Autopilot](#autopilot)
-- [Slack](#slack)
-- [GitHub reviews](#github-reviews)
-- [Prepared for you: keeping your PRs moving](#prepared-for-you-keeping-your-prs-moving)
-- [Following threads](#following-threads)
-- [Watchdog](#watchdog)
-- [What runs without asking](#what-runs-without-asking)
-- [Models and usage](#models-and-usage)
-- [Daily summary and your profile](#daily-summary-and-your-profile)
-- [Settings and environment variables](#settings-and-environment-variables)
-- [Updating](#updating)
-- [Data](#data)
+- [Quickstart](#quickstart)
+- [Concepts](#concepts): the Router, workers and tasks, *Needs you*, teams, decisions, receipts
+- [Daily use](#daily-use): giving work, reviewing, Slack, GitHub, watches, away, Send to Chief
+- [Agents: Copilot, Codex and Claude](#agents-copilot-codex-and-claude)
+- [Settings](#settings)
+- [Safety and privacy](#safety-and-privacy)
+- [Sharing](#sharing)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
 
-## Home
+## Quickstart
 
-Home is the one screen you work from. On the left is your conversation with the Router: what
-you asked, its short answers, and one line for each thing that happened on the way (*Started
-“Fix the flaky login test”*, *Fix the flaky login test finished · View*; a worker that could not
-go on says why, *Slack couldn't go on: …*). **View** brings up the
-task's card on the right instead of repeating its report in the chat; lines from Slack, the
-Watchdog and other sessions open in place, as does a report's line (to read all of it). Two or
-more such lines in a row of the same kind are one: the Router's routing (*4 routing updates*,
-with each started worker's agent mark when more than one coding agent is on) and what workers
-that work together told each other (*↔ 5 team messages*, below); click it to see them.
+**1. Try the demo.** No account, no sign-in, nothing leaves your machine:
 
-On the right, everything has one place:
+```bash
+uvx chiefofstaff@latest --demo
+```
+
+Your browser opens on Home. The demo plays a short scenario on scripted agents: a request
+becomes three tasks on Copilot, Codex and Claude, one worker tells another what it changed, one
+of them asks you a decision, a Slack message gets a reply drafted for you, a teammate's PR gets
+a review drafted, and the Watchdog nudges a worker that stalled. Click around: answer the card,
+open a report, accept a result, share it. Anything you type gets a simple scripted run too.
+
+**2. Install it.** You need macOS or Linux (Windows is experimental, on Copilot only), Python
+3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/) or pipx, and one coding
+agent signed in: the GitHub Copilot CLI, the Codex CLI or Claude Code.
+
+```bash
+npm install -g @github/copilot && copilot login   # or: codex login, or: claude auth login
+uv tool install chiefofstaff && chiefofstaff       # or: pipx install chiefofstaff
+```
+
+Without installing, `uvx chiefofstaff@latest` runs the newest version (plain `uvx chiefofstaff`
+runs whatever version uv cached first).
+
+**3. First start.** The terminal prints a private link and opens it in your browser; keep the
+link to yourself. Chief of Staff runs on the first agent it finds ready (Copilot, then Codex,
+then Claude Code) and says which in your chat. Home asks for your **code folder**, where your
+repositories live (`~/workspace`, say). Then type what you need:
+
+- "Fix the flaky login test in acme-api, then add rate limiting to login attempts."
+- "Review acme/api PR #1529 and approve it if nothing blocks merging."
+- "Compare three feature-flag services for a team of ten: price, SDKs, self-hosting."
+
+**4. Optional sign-ins.**
+
+- **GitHub:** `gh auth login`, with every account you use, so workers can open PRs and you can
+  review them.
+- **Slack:** a user token in Settings → Connections → *Slack* (see [Slack](#slack)), for
+  drafted replies and 🤖 delegation.
+- **Other services** (docs, issue trackers): a sign-in card shows up when a worker needs one.
+
+Ctrl+C stops Chief of Staff; sessions pick up where they left off next time. Closing the browser
+stops nothing. Options: `--port`, `--data-dir`, `--no-browser`, `--demo`.
+
+## Concepts
+
+### The Router
+
+You talk to one session, the **Router**, on Home. It reads your request, splits it into tasks,
+starts a worker for each (or gives it to a worker that already knows the subject), and answers
+in a line. It does no work itself: it routes, keeps your decisions, and tells you what needs
+you. Ask it anything about your work ("how is it going?", "what is the login fix waiting on?")
+and it answers from what the workers are doing now, without interrupting them.
+
+### Workers and tasks
+
+A **worker** is a real session of a coding agent (Copilot, Codex or Claude Code) with a folder of
+its own. A **task** is something you asked for, with a goal, a status and a result. A worker can
+take several tasks over time, so later work on the same subject reuses what it knows.
+
+- Each worker works in its own **git worktree** of each repository it changes, on a branch
+  `chief/<task>` from the latest default branch. Your own checkouts are never written.
+- A task goes *queued* → *running* → *review* (a result for you) → *done* (you accepted it).
+  It may wait on you (*waiting*), fail (with why, and *Retry*), or be cancelled.
+- A task that needs another's result starts once that one is done, with its result.
+- *Workers at once* (Settings → General) caps how many run at the same time; the rest queue.
+  While memory or disk is low, new work waits and running work goes on.
+- Finished workers close after a day idle and can be reopened with their conversation and
+  checkout: talk to one, or press *Reopen*.
+
+Every worker shows its agent: a small diamond on its sidebar row (purple Copilot, green Codex,
+orange Claude), a chip on its line in your chat, its name in its header.
+
+### Needs you
+
+The right side of Home has one place for everything:
 
 | Section | What is there |
 | --- | --- |
-| **Needs you** | Questions and forms from workers, sign-ins, decisions, a folder to pick, Slack replies, PR reviews and replies to approve, PRs of yours ready to merge (*Merge* merges it as shown; anything pushed since stops it: the card says so and goes, and the PR comes back once its new commits are ready. A PR in a stack on GitHub merges through GitHub's merge for stacks, in the background: the card says *Merging…* and goes once it's merged. One above open PRs of its stack first says those merge with it, as GitHub merges a stack from the bottom, and *Merge all 3* then merges them as they were shown; a PR below changed since is shown again first), sends a restart interrupted, failed or blocked tasks. A Slack reply someone answered before you sent it is not sent: its card shows what they wrote, marked new, and its one action is *Send anyway* (held again only if someone writes after that); a reply you emptied is not sent either. A draft its worker withdrew or replaced leaves, and its line in the chat says so (after a reload too). A worker's (or the Slack session's) question stays here until you answer or dismiss it, also when its task was cancelled or finished meanwhile: answering means you want the work, and that task goes on with your answer. One it asked on a card and went on without, as no answer came in time, says so, and leaves once its task ends (see *Questions* below). One the Router answers for you (from what you said before) leaves, and its task goes on; a message of the Router's to that worker about something else leaves it here. Each of the Slack session's questions has a card of its own (a new one does not replace the last), and your answer reaches it with the question it answers. A note of the Router's that needs you (*The Router*, marked *Urgent* when it cannot wait) stays here until you say *Got it* or *Open* it (it shows in the chat), or write to the Router after it. The approvals that only need your OK (habits, checks, a changed decision, a folder, a PR ready to merge, a sign-in) are one card, *Your OK*, a line each, and what was handled for you is one quiet line under it (see [Your OK and Handled for you](#your-ok-and-handled-for-you)). Each card has one main action (*Send*, *Answer*, *Accept*…); the rest is behind **⋯**. A card leaves as soon as you act and a short note confirms it; if that did not work, it comes back with the reason. While the page is open, a short note at the bottom also tells you what comes for you (click it to go there): what needs you, and away from Home news too; not what the session you are looking at says itself, and while you [focus](#focus) only what is urgent. |
-| **Tasks** | Task by task, in four areas after *Needs you*, then *Artifacts*. Every area folds (click its title; its count stays in sight, and it stays as you left it; *Needs you* opens again by itself when something new comes). Every task is one row, the same in every area: its title (click it to open the row into its whole card; **▴** or Esc folds it back), where it stands and why, its latest progress (the step it is in and for how long, *Waiting for background process* when its turn is over and a command it left running goes on, or its latest report), its worker as a small link (its current name, or *Worker chat*; an icon on a narrow panel;
-opens its chat at that task), what it made, and the one action that matters now. A task is finished only once you accepted it and nothing is left to run or monitor. *Needs you*: every finished result (*Awaiting acceptance*; a report that changed no code, opened no PR and has nothing failing is accepted for you a few minutes after you read it, or a day after it finished, and listed under [Handled for you](#your-ok-and-handled-for-you) with *Undo*; otherwise nothing accepts it for you, not time, its worker going on to other work, nor its PR being merged), with *Accept*, *View report*, *Follow up* and *Request changes* (say what to change: its worker is told you did not accept it, and its next report is a new result to accept); questions (why it asks, its choices as buttons, what it does next), tasks stopped, failed or blocked, and news on finished work (*Update*). A row's dot is its place's color, amber under *Needs you* and blue under *Running*; a result you have not opened yet says *New* before its title until you open it. *Running*: the tasks being worked on now (a worker does one at a time; a result you asked more about shows here, *Following up*, while its worker is at it). *Monitoring*: tasks nobody has to act on now that something still has to come for: a review, CI or the merge of a PR it made (also once you accepted it), a reply on a thread it follows, a time it checks back (`check_back`, for a long run), a run it started, a slot (*Queued*), its turn (*Up next*) or its worker's return (*Paused*). A row says what it waits for and on what (*Waiting for approval · app#594*), when it was last checked and when next (a run Chief of Staff does not read itself: when its worker said where it stands, *reported running 3h ago*), and, hover it, what wakes it; long quiet it says so (*No updates for 26h*) and stays here: it is never taken for finished. A check-back is on the runs it names (`runs`, by link or name), else on those its worker declared or updated in the turn it set it; it is kept when the task is reported done while one of them still goes on. On accepted work, its worker's report on a check-back that says each run again as it stood, still going, is what the row says (*reported running just now · next in 59 min*), not an *Update*; anything else is (a run ended, failed or new, a failure said in words only), timed as itself. A run nothing has told of for a day (its worker is not at it and no check-back is on it) is *Status unknown · reported running 2d ago* (since the last word on it, its worker's or GitHub's). Such a run is *status unknown* on Artifacts and on its task's chips too (amber, never folded away; hover: how old the last word is), as one you stopped tracking is *not tracked*, a run on your computer among its task's links included. A finished task with nothing else to wait on then comes to *Needs you* (*Status unknown*), with *Mark ended* and *Stop tracking* on its row (of several such runs, *Mark ended…* and *Stop tracking…* let you pick which), and says so when its worker's later report no longer lists the run (until a report names it again); otherwise **⋯** has them, whatever the task's state. The task leaves *Monitoring* once none of its runs is followed; a run no longer tracked is *not tracked* on Artifacts, gray, never counted as running. A GitHub Actions run (its link may carry *?pr=…*) is read on GitHub every few minutes until it ends; while reading it fails, its tooltip says so, why, and when it was last read. A PR of yours to fix (*CI failing*, *changes requested*, *merge conflicts*) is under *Needs you*; one ready to merge is offered on a *Merge* card there. *Overdue*: no activity for *Overdue after* hours (Settings → General, 4 by default) and nothing to wait on: its worker is asked once where it stands, *Nudge* asks again (at once: its worker, reopened if it was closed, is asked right after; if it can't be, its row says why); no answer within the hour brings it to *Needs you*. A button you press on a card shows a small spinner at once, and what it does beside it when that takes a moment. *Recently finished*: accepted tasks with nothing left to monitor (a PR you reviewed for someone else ends here once your review is in: news on it comes back as an *Update*; accepted work its worker goes on with as a new task watching all it waits on is that task's row, and *Still following* here), and tasks cancelled or set aside, which say so, never *Done*; the newest first, 30 at a time (*Show more*), for three days. *Monitoring* and *Recently finished* scroll on their own and do not move while the mouse is over them. *Artifacts* (last, so it never pushes your tasks down): the PRs, documents and runs your tasks delivered, by their real names, each PR with what the task did to it (*Created*, *Modified*, *Reviewed*) and where it stands now as GitHub has it (*draft*, *in review*, *changes requested*, *CI failing*, *awaiting approval*, *ready to merge*, *merged*…; a document or run as its worker last said); a PR is listed for the task that made, changed or reviewed it, never for one that only mentions it. What needs a look (failing CI, changes asked for, a failed, waiting or unknown run) comes first, whichever task it is of, each task's together; then the rest, the task with what needs a look first first: one task's merged PRs never push another's failing one out of sight. Three runs of a task or more are one line with the latest, the failed, the waiting and the unknown ones under it in the same card, one line each (its name, then its status in a word, *failed*, *waiting*, *unknown*, *running*, *pending*, *done*, *ended* or *not tracked*, and since when it stands so: *ended · just now* once you marked it; its own words on hover), the rest behind *+N*; the line counts them in the same words, what needs a look most first (*9 runs · 1 failed · 1 waiting · 3 running*; all done, *9 done*). A CI build its worker declared (Jenkins, Buildkite, GitLab, CircleCI, Azure DevOps) is a run; on your computer, where a dev server's page can be called anything (*/pipelines/new*), only one that says which it is (Airflow, Flyte, a Prefect flow run, GitLab's */-/pipelines/*, a Jenkins named so). Files, mockups, screenshots, CSVs, logs, links it only mentions, a document site's home page and a page of this computer (*localhost*, a loopback address, *0.0.0.0* or *[::]*, a *.localhost* name or one your hosts file maps there) are not listed, nor one on your network or on a port of its own said to be serving (a dev server's): they stay on its card, in its report, files and links. A document or a run is listed wherever it is served: anything that can bring a task under *Needs you* is on Artifacts too. **✕** takes one off the list (on a task's runs line, all its runs, with *Undo*); *Show … taken off* brings each back. A PR a task follows that cannot be read says why on its row: no access, not found, GitHub's rate limit or GitHub not answering (with *Retry*); *Stop following* there stops it for that task only. Hover anything for more (its id, worker, credits): the tip goes as soon as the list changes. *Copy report* (markdown for a PR description), *Create PR* (for commits on a branch of its own, a *chief/…* one or one you named, that no PR is from yet), *Rename…* and, when its latest result is about something else, *Move the latest result to a new task…* (with *Undo split* for ten minutes) are under **⋯**. Every count counts tasks. |
-
-When a finished task's worker drafted something for you (a Slack reply, a PR review, a reply on
-your own PR), the draft is the one card: the task's own card is in it (*Result of …*: what it
-came to, its receipts and news, *Follow up*, *Request changes*, and **⋯** with *Create PR*),
-and the card has one action, which sends the draft and accepts the task (*Copy & accept*, *Send
-& accept*; news on accepted work is seen with it): one decision for both.
-
-Click a task's title (or *Open worker*) to see its worker's full timeline at that task's report
-(the worker may have gone on to other work since), every step, report and message, and to talk
-to it directly; **← Home** goes back. *Stop*, next to *Thinking…* at
-the end of a timeline (*Waiting for background process* when its turn is over but a command it
-left running goes on), interrupts what a session is doing (and a command it left running in
-the background): the task its worker was on waits under *Needs you* as *Stopped* until you say
-*Go on* (or *Go on with a note…*), tell it in its chat, or cancel it, and what it was sent
-during that turn goes out again with its next message. Ask the Router to stop ("stop all my
-work") and it does the same (*Stopped by the Router*, with *Go on*): it cancels only when you
-say cancel. Cancelling a stopped task lets the worker go on with its other tasks at once (also
-after a restart); its replies and reviews still waiting for you go with it. Cancelling a task
-that had finished already (its result reported) stops nothing: it is done with its result, and
-the Router says it had finished. What you send shows in the chat at once, as you press Enter;
-when it takes a moment to reach Chief of Staff (a busy computer), *Sending…* under it. Sending
-the same words to the same chat again while it is on its way sends nothing more: its message
-stands out a moment instead (sent again once it went, it is a message of its own). If it cannot
-be sent, it goes from the chat and your words and images are back in the box, with why. If the
-page reloads while it is on its way, the page asks once it is back whether it was stored: if not,
-its words are back in the box (*Not sent — press Enter to send it*), and they still go once. Under
-your latest messages to a session its chat says where
-they stand: *Waiting to be sent*, *Sent*, *Received* (its conversation shows it), *Handled* (the
-turn it was in ended); one its conversation does not show within 20 seconds, and that Copilot
-does not hold for it either, is sent again (*Not received yet — sending again*), and after two
-tries it says *Not delivered* and tells you, so a message is never lost without a word. One
-that waits says why, in a line: *Not sent yet: you stopped this worker* (it went in during a
-turn you stopped) or *Not sent yet: waiting for a free worker slot*, each with *Send now* (over
-the parallel-worker limit if need be); *Not sent yet: waiting for memory* (disk space, another
-task) goes once that allows. Home's copy of what you wrote a worker (*→ worker*) says where that worker has it.
-*Go on* and replies show the same on the task's row. When you cancel a task, the Router hears of it with its next message, and it
-does not start that work again (nor a new Router after a handover) unless you ask. What you
-write in a worker's chat answers the task that asked you (or the question or decision card it
-waits on), and that task goes on at once; otherwise it is about the task you chose there: the
-one you opened its chat at (a task row's *Worker* link), or one you scrolled up to. At the
-chat's end, or written to it from Home (@), it is about the task it is on, its only one, or the
-one it was last given word of (your message, or the Router's on a task it had: a check-back, a
-note, a changed decision); when that word started a task of the Router's, with several
-finished, it is a task of its own, named from your message (the box says which: *Message about
-“…”*, *A new task for this worker…*; on Home, the *To* line: *as a new task*). Its worker is named for that task while it works on it; about finished work, its answer is an
-*Update* on the task, which keeps its result (whatever it adds in its chat), unless it changed
-code for you, or redid or corrected the work: then that is its new result (to review again when
-you had not accepted it), and the one before is under *Earlier reports* on its card. Either way
-it is a line in the Router's chat on Home too, once, so it stays in sight while its worker
-follows up on your next message (*Following up*, not under *Needs you*, then). Its answer
-to the Router's note about finished work never is. A message there that asks for something else ("New, separate task: add mod()
-on a new branch", another PR or question) is told apart by the worker that reads it, not by
-its words: it reports that work as a task of its own, with your message and what it ran for
-it, and the task it was on keeps its result (or, still at work, goes on). Reported on the task
-and then moved to a task of its own (*Move the latest result to a new task…*, or the Router
-doing so), the same: the PRs, links and commands of that work go with it, wherever its checkout
-was, and the result it followed up on is as you had it (seen, not *New*; accepted, if you had
-accepted it).
-More asked of a reported result (*Follow up…*, or the Router continuing it)
-comes back as the whole result, updated: its worker is told that its report replaces the
-result, and one that reports only what it added is asked once for the whole. Written to it from Home (@ in the Router chat), its answer shows there too
-(once: not when its report is there already). A worker's **⋯** (top right) has its
-model, its permission checks, its folder and *Close worker*. On a narrow window Home shows
-*Chat*, *Needs you* and *Tasks* one at a time, and narrower still (a phone) the sidebar folds
-away behind **☰** at the top left (with what needs you counted on it; Esc or a pick closes it).
-The sidebar has Home (its count is what needs
-you, the only count anywhere), your workers, running first, then *Closed* and *Other sessions*
-(your other Copilot CLI sessions on this computer, the ones Chief of Staff does not manage);
-Settings and Usage are the icons at the bottom.
-
-A file path in a report or message opens the file when it is in a worker's folders (a
-walkthrough, results, a log): Markdown shows formatted. Other paths are copied.
-
-The dot next to each worker says where it stands, in the same terms as Home (hover it for the
-words, or click *?* beside *Workers*): amber, one of its tasks needs you; pulsing blue, at work
-on one now; a blue ring, its tasks wait on something (a few words beside it: when it checks
-back, *↻ in 12 min* within the hour, else *↻ 3:28 PM*, what it checks on hover; *waits on “…”*
-for the worker it waits on; else *queued*, *up next*, *overdue*…); grey, nothing open: those
-fold away under *Nothing open*. The sidebar lists workers only, in one list by where they stand
-(no groups: teams are on Home); a worker started from another one's conversation has a small
-⑂ after its name (*Started from “…” with its conversation, because … was busy* on hover). A
-worker is listed by its work (the task it is on, else its newest), its first title in the
-tooltip, also in its header and under *Closed*.
-
-Until you set your code folder (see [Where workers work](#where-workers-work)), Home asks for
-it; *Not now* hides that card, and Settings still has it.
-
-## Giving work
-
-Type on Home. Several things at once is fine: the Router splits them into
-tasks and starts a worker for each, in parallel. When one task needs another's result, it
-waits and then starts with that result. The Router replies with one line; results come back
-as they finish: each worker's report comes to you whole, as a card, and the Router does not
-repeat it. When you write to the Router, its reply is the one answer you get.
-
-**To one worker:** type `@` on Home and pick a worker (a few letters of its name find it, words
-with spaces too: `@fix ch`; Esc closes the list); the message goes straight to it (`→
-worker` in the chat), and the Router hears of it with its next message. Or open the worker, or
-use *Add a note* in its card's **⋯**.
-
-**Images:** paste a screenshot, drop images on the chat, or use the paperclip (up to five, 5 MB
-each); they show small above the message until you send it. Long messages you sent fold, with
-*Show more*. A message holds up to 20,000 characters: near that the box counts them, and a
-longer one is not sent but stays for you to shorten.
-
-**Progress:** ask the Router ("how is it going?"). It reads what each worker is doing now and
-said last, and answers at once instead of waiting on the workers. Ask it to put a question to a
-worker and the worker's answer comes to Home once, a line marked *Answer* with the worker's
-short name; it changes nothing about its task.
-A worker's routine progress reports stay quiet, on its task's card: the latest, with the four
-before it folded under *Earlier updates*. A message you send a worker in
-a long step (a query, a build, a job) reaches it at once: Copilot moves the command it runs to
-the background, where it goes on; a note says so, with what it is doing.
-
-Instructions you give again and again ("run a small smoke job before the full one") are
-[learned](#how-you-work-learned-and-kept-up-to-date), so you do not have to repeat them.
-
-Try `chiefofstaff --demo` to see this without an account.
-
-## Tasks and workers
-
-A **worker** is a Copilot session with its own folder. A **task** is something you asked for,
-with a goal, a status and a result. A worker can take several tasks over time, so later work
-on the same subject reuses its context.
-
-Task states: *queued* (waiting for a slot or for tasks it depends on), *running*, *waiting*
-(it asked something or is blocked), *review* (done, ready for you), *done* (you accepted it),
-*failed* (it could not start, or its worker found it cannot be done and says why; retry it
-with an optional note) and *cancelled*. When the Router has another worker do a failed task
-instead, the failed one is marked replaced by the new one, so no *Retry* is left beside it.
-
-A task that needs another's result starts once that one reports done. When it must build on
-work you have checked (an API others code against), the Router makes it wait until you
-*Accept* the other one instead; its card says *waiting for your review of …*.
-
-**Workers that work together.** Some tasks run at the same time and need each other while they
-work: two sides of one change (an API and its client), a value one of them finds that the other
-uses, a schema or file format they share. The Router starts them together and says they work
-together; each is told about the others. They pass what the other needs straight to it
-(`tell_session`, or `ask_session` for a question), in their exact words and at once, without a
-Router turn in between. A worker waiting for another one's message waits quietly (its card
-says *waiting for “…”*, and so does the Router's list) and goes on when it arrives, whatever
-words it said it in, as long as it named that worker or its task said it waits for it; when the
-other one finishes, its result reaches the ones still at work. A worker's turn that ends without
-a report is never taken for a finished task: what it said is kept on the task's card as
-progress and it is asked once whether it is finished (or it goes to you for review when you
-asked to see that task); still silent, its words wait for your *Accept*, never accepted for you. What workers tell each other is information, never new work:
-when one should change course (scope, another approach, overlapping work), it asks the Router,
-which decides or asks you. Independent tasks started together are not linked.
-
-**Teams.** When the Router splits one of your requests into parts that work together (two
-sides of one change, a value one finds that another uses, a part that starts once others are
-done), those parts are a team, named for your request (*Ship checkout v2 for acme-shop*). Only
-the tasks made for that one message and linked on purpose (one works with or waits on another,
-or does another's instead) make one: workers that only talk, work on another of your requests or
-were started on their own never do. A part the Router replaces when it re-plans stays in its
-team; one it starts after a worker reports, waiting on or working with a request's parts, joins
-that request's team. A team's name is your own words for the request (*Nightly export*), its
-parts' names short and whole (*Login page*, *Token writer*; a word every part shares stays,
-*Glossary draft*), never cut inside a word.
-
-*Teams*, above *Running*, has a row per team: its request, a bar with a segment per part (the
-working ones gently alive), what needs you if anything does (*Waiting on you · answer UI*), else
-the newest change and when (*Email answered Order page · 3 min ago*, in stronger ink until you
-look) and, once every part is done, the outcome (*Done · 3 PRs merged · 1 h 13 min*); in the
-sidebar its workers are rows like any other. A team's page is where you run it:
-
-- *The brief*: where your request stands in a sentence and the one thing that moves it, done
-  right there: a part's question with its options (and your own answer), *Review* with *Accept*
-  and *Request changes* in place, *Retry* for a part that failed, *Nudge* for one held up by
-  another's answer. Its bar has a segment per part and how long it has taken.
-- *Since you looked*: what changed across the parts since you last had the page in sight (a
-  question for you, a part done, a PR merged, a question between parts once it holds a part up,
-  an answer between parts; never a note), on any tab; each jumps to its part.
-- *The plan*: the parts in the order work moves (*Then, side by side*), on a rail, each by a short
-  name and an avatar of its own, with its state in plain words, how long, what it made (its PR,
-  its documents), one action and **⋯** (*Tell it…*, *Open its chat*, *Stop*, *Follow up…*,
-  *Cancel this part…*). A part continued by a task for another of your requests says *Continued
-  in “…” outside this team*; one that waits on it *Waiting on “…” (outside this team)*.
-- *So far*: what the team made (PRs, documents), what was decided for this request (your
-  decisions made since you asked, answers between parts; one of yours from before that a part
-  relies on is under *Also applies*, folded, once) and what to watch out for (a question holding
-  a part up, a result that won't come, a change of yours a part hasn't confirmed). From 1100 px wide it takes Home's side panel while the page is open (Home's own panel,
-  with *Needs you*, *Teams*, *Running*, *Monitoring*, *Recently finished* and *Artifacts*, comes
-  back when you go Home); narrower, it is under the plan.
-- *Tell the team*: the composer on its page sends your word to the parts on its *To* line
-  (*Change ▾* chooses): a part at work reads it now, one not started gets it when it starts, a
-  done part only when you tick it (it reopens as a follow-up). Each is told who else got it; the
-  Router keeps one copy for its next turn, never a turn of its own. The line under the plan says
-  where each has it (*✓ read*, *when it starts*).
-- Done, the brief is *Delivered*: what it came to in a line (*Done in 1 h 13 min: 3 PRs merged
-  and 2 decisions kept.*) with *Copy summary* (Markdown: what it made, what was decided, a line
-  per part), and *So far* becomes *Delivered*.
-- What the parts told each other is folded at the bottom (*API → UI · note*, by the parts' short
-  names, titled by its first sentence).
-
-Things move only when something happens: a result travels down the rail to the part waiting on
-it, a changed line brightens for a moment; nothing moves when your system asks for less motion.
-A team's state is what Home's own rows say (a part waiting on your review or your answer has the
-team waiting on you), in the same words on its row and its page. A done team's row
-stays until you've seen it; it leaves ten minutes later (at once with its ×), and *Past teams ·
-N* lists the earlier ones. How workers are linked and what the Router is given are as before;
-what you tell a team reaches its workers as your own messages do.
-
-Workers are named in the Router's lines and in each other's chats by a short name (from their
-first task, *Token Scout*; yours in its **⋯** → *Short name*). In a worker's chat, *Work* shows
-what other workers told it in a line each; *Team* (for a part of a team, with *Open team*;
-*Notes* otherwise) shows those in full, *Tools* its steps and *Reports* its reports. In the Router
-chat, several such messages in a row are one line (*↔ 5 team messages · 1 waiting 9 min*), with
-its team's request when they are between its parts, opening to the last three, its *Open* to the
-team (or to the chat of the one last told). A question that holds its asker's task up for half
-an hour comes under *Needs you*, a card per question, in a team or not: *Nudge* tells the one
-asked that its asker waits (once every half hour), *Open* shows the team or the asker's chat. The
-Router is not handed the messages: its next turn gets a short digest (who told or asked whom,
-what waits), and it reads the workers' thread only when you ask about it or a question there
-holds a task up, so it never passes on what one worker handed another.
-
-**How a task is related.** A worker's *Team* or *Notes* tab starts with its task's lineage: where
-it came from and what came of it, in one line with a caption (*3 workers, one request · ready
-when 3 of 3 land*, *All 3 parts landed · 42 min*, *Checkout tests handed this to E2E Runner*,
-*Release Notes waits on Checkout UI · 9 min*): the task it waits on, the one that replaced it,
-the one it continues or branched from, a Compare's other side. Click any task in it for its
-title, worker, status and *Open*. When a wait clears while you look, its line draws itself solid
-(*Checkout UI delivered · Release Notes is unblocked*). With *Reduce motion* on in your system,
-nothing moves; the words say it.
-
-**Routing to the right worker** matters most. Your message reaches the Router together with
-the workers whose record matches it (title, task, files, branches, reports; keyword search,
-Chinese included). For work on a subject a worker already knows, the Router either:
-
-- **continues** that worker's task (a correction, more information, a follow-up question; a
-  finished task reopens),
-- gives the same worker a **new task** with its own result to review, or
-- starts a **new worker that builds on earlier results** (`context_from`): for an independent
-  change with its own branch and PR, or work that must run in parallel. It gets the earlier
-  tasks' results, folders and files, not their whole conversations.
-
-When you ask for a new worker in so many words ("a new worker", "one worker for exactly this",
-新开一个 worker), you get one, however related an earlier worker is; *new because* quotes you.
-
-The Router sees how loaded each worker is: whether it is at work and for how long, its open
-tasks and what it has not taken up yet. When the worker that knows the subject is **busy** (at
-work with two or more tasks open, or at work for twenty minutes without a break) and a worker slot
-is free, its new task goes to a
-**second worker** that starts at once with that worker's conversation so far (Copilot's session
-fork, up to its last finished turn) and a note from Chief of Staff on what the first one is
-doing now and where. It works in a folder and branch of its own (from the project's base); the
-busy worker goes on undisturbed; when you had just rejected its draft, it is told once that a
-second worker is doing the new request and to stop the old work unless told otherwise. Its task
-stays as it is until the Router or you cancel it. The Router chat says *⑂ Started a second worker
-from “…” (it was busy) for “…”*, a line of its own; in the sidebar the second worker has a small ⑂
-after its name, and its task's row says
-*Worker from “…”*; its *Notes* tab's lineage has it *⑂ forked from …*. With every slot taken, or
-when only that worker can do it (its branch or PR, or you asked for it), the task waits for it
-as before. Work you ask for in parallel (meanwhile, at the same time) with what a worker is
-doing goes to a second worker at once too, busy or not. When you ask for a new worker for
-something an earlier worker knows, the Router can start it from that worker's conversation
-the same way. A worker on Codex or Claude Code (whose conversations are not forked yet), or one
-whose fork fails, hands its second worker a brief of its work instead: its tasks, what the
-finished ones found, its folders and files. Turn it off in Settings → General (*A busy
-worker's new task starts at once*).
-
-`spawn_worker` refuses once when related workers exist, so the Router decides explicitly; so
-does a new task for a worker given one in the last half hour ("oh wait, one more thing" is
-more of that task), unless the Router says why it is another. The timeline shows *New task …
-for …*, *Continued in …* or *Started …* (or *New task …*) *· new because …*.
-
-Workers close themselves when their PR is merged or closed. Finished workers that follow
-nothing close after 24 hours idle (Settings → General → More, *Close finished workers after*),
-unless something of theirs is still under *Needs you* (a result to review, news, a question, a
-failed task, a card): those stay in the sidebar and the @ list until it is settled. Closing is reversible: talk to a
-closed worker, or open it and press *Reopen*, to continue with its conversation and checkout.
-Closing a worker at work stops it and cancels its open tasks, and the Router hears of it;
-*Reopen* (or writing to it) brings back the ones it had started, where they were: stopped,
-waiting for your *Go on* or *Cancel* (or still waiting for your answer).
-
-At most *Workers at once* (Settings → General) run at once (up to 1000); the rest queue.
-
-**Your computer stays responsive.** A Copilot session is light (an open, idle one takes about
-half a megabyte; one that has worked about ten, plus the MCP servers it starts for itself).
-What weighs is what workers run: test suites, builds, browsers. So:
-
-- While the computer is low on memory (less than 10% free, as macOS's memory pressure or
-  Linux's available memory says), new work waits; its card says *Waiting for memory: 6% free
-  on this computer*, and it starts once memory frees up. Work already running is never stopped.
-- A worker that has been quiet for ten minutes lets go of its Copilot session, which ends the
-  MCP servers it started; its next message (a follow-up, news on its PR, another worker's)
-  picks it up again where it was. Not one that is in a turn, waits in one for you, has a
-  command still running (a server it started), or is open in a terminal.
-
-How many workers to run at once depends on what they run: four builds of a large project need
-more than four searches.
-
-### Your other sessions
-
-*Other sessions* in the sidebar lists the sessions Chief of Staff does not manage, the
-ones you started in a terminal. Those open in a terminal right now come first, marked *open*.
-Opening one shows its latest conversation, and keeps it current while it works. Sessions a
-program made through Copilot's SDK (a script's, one per item of a batch, say) are not yours to
-continue and are not listed, unless you continued one in a terminal. Nor are one-shot
-`copilot -p` sessions (one prompt, then done) when something shows a program made them; when in
-doubt, a session is listed. That is: ten or more that start with the same words, each ended
-within 5 seconds of its answer (a script's call; you read an answer before closing a session)
-and begun within two minutes of the one before beginning or within 30 seconds of it ending,
-however long each took (a script's: it starts its next call at once; you take longer); two or
-more named alike `batch: …` with `copilot -p --name` (one even while it runs); or a worker's,
-made while it ran a command (for as long as it ran; one whose end was not seen, two hours, and
-longer only for sessions that are clearly its) in the folder Chief of Staff made for it, or,
-when the command runs `copilot -p` (or the session is one of its batch, or named `batch: …`),
-where the command ran: its folder, a folder it went to, `/tmp` or `$TMPDIR` if it ran there.
-The time and a folder alone are not enough: your questions in a project a worker also works
-in, or in `/tmp`, stay yours unless the worker was running `copilot -p` there then, and a
-session you name `batch: …` yourself is listed once it ends. Nothing in a session's files tells
-`copilot -p` from a question you asked in a terminal and left, so a few alike (from five to
-nine) stay listed as yours: `chiefofstaff tidy-sessions` names them. A single `copilot -p` you
-run yourself is listed, as is every session you typed more than one message in, resumed, or
-have open (unless it is named `batch: …`). After an upgrade, what an earlier version decided
-is decided again, the oldest sessions first; until every log is read (or, with a log it
-cannot read, until a round reads nothing new), a session it left out stays out.
-The Router does not see the others either. Workers name each call of a batch
-`batch: <their task>` and give it a Copilot home of their own (`COPILOT_HOME` in their folder),
-so its sessions do not reach yours at all.
-
-**Moving them out of the way.** Sessions left from before still take room in
-`~/.copilot/session-state` and in `copilot --resume`. `chiefofstaff tidy-sessions` shows those it
-would move: how many, how large, a few of each, who made them, and what was learned from them,
-then the few alike it leaves listed and does not move; it reads every log first (a line on how
-many are left as it goes, and how many it could not read, if any) and changes nothing. `chiefofstaff tidy-sessions --apply`, run in your own terminal, moves them to
-`~/.copilot/session-state-moved-by-chiefofstaff/<date>/` with a `manifest.json` saying what each
-was: move a folder back into `session-state` to have that session again. Nothing is deleted, and
-sessions open now or changed in the last hour stay where they are, as does one an earlier
-version left out that it could not check again (a log could not be read). What was read from them as
-your words and not learned from yet is dropped; a style or habit learned from them before stays
-until you undo or remove it in Settings → *You* (the command names them).
-
-**Where each stands.** Each row's dot says it, read from the log Copilot keeps on this computer
-(no model call; nothing stored or sent): amber when it asks you something or it is your turn, a
-pulsing ring while it works, dashed when it has made no progress for 15 minutes, a ring when
-idle, green once it finished; for a wait, how long replaces *open*. Hover a row for the question
-or its last answer; the first line of its view says it too. At most five rows show at once,
-those waiting for you first, the rest under *N more*. A row whose status cannot be told for
-sure looks as before, and its tooltip says why. Turn it off with *Show where my other sessions
-stand* in Settings → General → More (which says why, when none of them can say where it stands).
-
-**Send it a message to continue it here.** It becomes a worker, with its conversation so far in
-its timeline, and keeps working in its own folder, inside your code folder or not: nothing is
-moved or copied. *Copy resume command* gives `copilot --resume <id>` to continue it in a
-terminal instead.
-
-The Router knows these sessions too, one you open while it runs as well: ask it what one open
-in a terminal is doing, and it reads it. It cannot type into it: give such a session instructions there, or exit it there. To
-continue one that is not open anywhere, the Router asks you first: a *Continue a session here?*
-card shows the session and what the Router wants to give it.
-
-Chief of Staff never writes to a session another Copilot window has open: two programs writing
-to one session would mix up its history. Such a session (or a worker you opened in a terminal)
-is shown read-only, with *Working in a terminal* and its current step, from the log Copilot
-writes; the message box says to continue there, or exit it there (`/exit`) to message it here.
-The Watchdog and idle closing leave it alone meanwhile. What a worker did in a terminal shows in
-its timeline, also when Chief of Staff was not running then.
-
-In a timeline, what a session says on the way to its next steps ("Now the tests:") is folded
-into the line of steps, which shows the latest; its answers, reports and questions stand out.
-
-## Where workers work
-
-You set one **code folder**: where your repositories live, like `~/workspace`.
-
-```
-~/workspace/                 your code folder
-  aven/                      your repositories, one copy each; workers never touch them
-  racer/
-  .chief/                    Chief of Staff's task folders (hidden)
-    fix-login-a1b2/          one folder per task
-      aven/                  a git worktree of aven on branch chief/fix-login-a1b2
-    research-flags-e5f6/     research: an empty folder for notes
-```
-
-- Every git repository in the code folder (up to two levels down) is a project: the Router
-  matches a task to one by its name, git remote and README headline, and asks you on a card
-  when it is not sure.
-- A repository a task needs that is not there yet (a GitHub owner/name or a git URL) is cloned
-  into the code folder once and stays for later tasks.
-- A repository a worker clones or makes in its own folder counts as one of its checkouts at its
-  task's end. Chief of Staff reads it without its git config (through a git folder of its own),
-  with no filter: files git-lfs keeps there are not compared (a task's report says how many may
-  have changed: *2 LFS files not checked*). A clone the worker deleted and cloned again where it
-  was is read as it is now (its timeline says so once).
-- Each worker works in its own task folder, with a **git worktree** of each repository it
-  changes, on branch `chief/<task>`, started from the latest default branch of `origin`. Your
-  checkouts are never touched, and parallel workers never share one: two agents in one folder
-  would overwrite each other's files and switch each other's branches. A task that changes no
-  code may read your own checkout, but nothing it does writes there: its edits are refused, and
-  so are its commands that write there (a redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`,
-  `touch`, git that changes files, the index or branches, an install, a build or a test run),
-  with or without the sandbox, acting on its own or not, and so is a program Chief of Staff
-  can't read, run there on files there. Such a command (a test run, say) gets the worker a copy
-  of its own, made then and once: a worktree of your checkout's commit with your uncommitted
-  changes copied in (never through a link; files over 20 MB, links that lead out of it and
-  repositories in it are left out, and it is told which). It runs the command there, without
-  asking you. On Windows its PowerShell and cmd lines are read the same way, and anything else
-  run in your checkout, or naming it, goes to the copy too. A worker in its own worktree can't
-  write in your checkout it was made from either, whatever its agent: its edits there, and its
-  commands that write files there, are refused, and it is told to make them in its worktree. A
-  test run, a build or a program Chief of Staff can't read that it runs in your checkout runs in
-  such a copy too, on your files as they are, never in its worktree (its own branch, which may
-  be behind yours).
-  Ask in so many words for the work to be done directly in your folder (no worktree), and that
-  worker may change it: a worker of its own, started for it, never one you have that works in a
-  copy of that folder or only reads it (it couldn't).
-- Follow-ups on a task go to the same worker and folder. When a worker closes, its worktrees
-  are removed if they hold nothing uncommitted (in such a copy, your changes copied in are
-  yours, not its work; the branches stay); reopening it brings them
-  back (whole, also one whose removal Chief of Staff stopping cut short). A worktree with ignored files you may want (an edited `.env`, a report) is kept, with
-  its dependencies and build output deleted; those alone do not keep it (see
-  [Disk space](#disk-space)).
-
-A worktree is a fresh checkout: no dependencies installed, and none of the files git ignores.
-Workers are told to install what the project needs (per its README or `AGENTS.md`). Gitignored
-files a worktree needs, like `.env`, are copied in from your checkout: by default `.env` and
-`.env.*` files; a `.worktreeinclude` file at the repository root (gitignore syntax, as with
-Claude Code) lists others instead. Only files git ignores are copied, and never for workers that
-read Slack.
-
-Folders outside the code folder can be added under Settings → General → More → *Other project
-folders*, and *Task folders* there puts the task folders somewhere else. A worker's header opens its folder in
-Finder or VS Code.
-
-Workers run like the Copilot sessions you start in a terminal: they load your plugins, your MCP
-servers (yours, your company's, and a repository's own `.mcp.json`), skills and custom agents,
-and their commands can use what yours can (your tools, keychain, Docker, other repositories). A
-worker in a worktree of a repository you trust in Copilot is trusted too, so that repository's
-MCP servers load there as well. If you use Copilot's own sandbox, workers follow your settings
-for it. Copilot's extensions (its experimental mode) load for them too, but not while Chief of
-Staff runs Copilot's own version because your CLI is newer than it supports: that version can't
-run extensions, so workers there start without them.
-
-Without the worker sandbox (the default), a worker's folder settings are never held for your
-word: the worker already runs commands as you, so a hold would add friction, not protection, and
-Chief of Staff skips those checks entirely (nothing read before turns or tools). A hook or server a
-worker plants stays in that folder and loads in later sessions there, yours too: turn the worker
-sandbox on in Settings → General (*Sandbox*) for repositories you don't trust. The rest of this section is
-how it works with the sandbox on.
-
-A repository's own Copilot settings load for a worker only as you last let them: their hooks and
-MCP and language servers (`.github/hooks/`, `.mcp.json`, `.github/mcp.json`, `.github/lsp.json`,
-`.github/copilot/`, `.github/extensions/`, custom agents in `.github/agents/` and
-`.claude/agents/`, and the hooks of `.claude/settings.json` and `settings.local.json`, which
-Copilot runs too) would run outside Chief of Staff's checks (a hook can approve a command a
-check refuses; a server runs outside the worker's sandbox). Chief of Staff keeps what those
-files hold, and the scripts their hooks and servers run (a hook's `check.sh`, an MCP server's
-`tools/server.py`), when it makes a worker's worktree, clone or workspace, and when it first
-hands a worker your checkout (no worker that could write there had it before; your own session
-taken up from a terminal counts): the worker's timeline says once which ones workers there use
-("Workers in ~/code/app use the agent settings there: .mcp.json."). A file a worktree carries
-from your checkout (`.worktreeinclude`) counts only as your checkout holds it; once you've said
-to use carried ones, the same is never asked again. Any other folder it sees with such files in
-it (a folder of a checkout workers already had, one workers used before this version) waits for
-you to look once: "Copilot settings in a folder of this checkout workers haven't used yet
-(sub/.mcp.json); look at them once. Chief of Staff won't start the worker there until you say to
-use them." It reads them again before each turn and each start, and as each of the worker's
-tools starts when a quick look sees a change (with the sandbox on, before the tool runs). If one
-changed (a worker wrote it, a merge brought a teammate's change, you edited your local settings,
-a carried file isn't as your checkout holds it: "added since workers had this checkout"), the
-worker starts no turn there (one at work is stopped) and its timeline says what changed:
-"Copilot settings in this folder changed (added .mcp.json); Chief of Staff won't start the
-worker there until you say to use them." If the change is yours or you trust it, click **Use
-these settings** on that line: the worker goes on with what waited for it, and one the change
-stopped mid-task goes on with that task too. If you undo the change instead (delete what the
-worker wrote), the worker goes on by itself once it's as it was (or click the button). A worker
-waiting for this shows *waiting for you* and the Router hears it once. Settings too many or too
-large to check ("can't be checked") wait the same way, and the button lets the worker use them
-unchecked as they are; if they change, it asks again.
-
-Most changes never ask. Settings byte for byte as the commit the checkout was made from, or as
-your checkout's trusted copy holds them, are yours (also in checkouts workers had before Chief of
-Staff kept copies). A `settings.json` whose only change is in keys that run nothing (`model`,
-`theme`, `outputStyle`, `spinnerTipsEnabled`, `alwaysThinkingEnabled` in `.claude/`; `model`,
-`effortLevel`, `contextTier`, `respectGitignore` in `.github/copilot/`), or an `enabledPlugins`
-turning on only plugins you have on yourself (same marketplace, not redefined by the repository),
-is taken as it is. When a worker does wait, what you write in its chat shows that line's choices
-right under your message: **Use these settings**, **Start a new worker** (its task goes on in a
-fresh checkout, your message with it) or **Cancel message**. Saying it plainly there ("use these
-settings", "approve", 同意; a bare "ok" right after the line that asks) is the same as the button,
-for the settings that line showed: "Using these settings (added .mcp.json) because you said so ·
-Undo". A worker in its own worktree that waits 15 minutes goes on by itself: its task moves to a
-new worker in a fresh worktree from the same base, and Home says so in one line. If the task it
-waited on is cancelled or replaced, it closes, and what you wrote it goes to the worker that took
-the task over, or is dropped with a line on Home, never sent later.
-
-What a server runs is the worker's to build and edit (a repository that develops its own MCP
-server and runs its build, `node dist/index.js`, say): nothing waits for it. When it changed
-since you last let it be used, that server is off for the worker from its next turn (Copilot
-doesn't start it; a language server's or a custom agent's tool is denied), quietly: [Handled for
-you](#your-ok-and-handled-for-you) lists it, with *Turn on*. Only when the worker calls it does its
-timeline say so: "Its MCP server self changed in this worker's folder, so it runs without it."
-**Use these settings** there turns it on again too.
-
-A settings file that's a link out of its folder is compared by what it leads to, and is never
-used if that's a folder workers can write; a link to an agent's own folder (`~/.claude`), or a
-special file, is never used: the worker waits until it's removed. A program a setting runs
-through a link (a virtualenv's `python`) is like one on your PATH. When a setting runs project
-code Chief of Staff can't hold (`uv run …`, `npm run …`, `npx …`, a module or script it can't
-find, a loop or a pipe it doesn't follow), the worker's timeline says so once: a change to that
-code isn't caught. Workers don't edit those files with their tools. With the sandbox on, their
-commands can't change them, nor the scripts the hooks run, in your checkout; in their own
-worktree, they can't change the MCP server files (`.mcp.json`, `.github/mcp.json`: Copilot
-starts a server added there by itself, within seconds) nor the scripts the hooks run. Before a
-merge, a rebase or a pull, the worker checks what it would change (`git diff --name-only
-HEAD...main`) and, if that touches those, tells you in one line ("main changed .mcp.json; I
-can't update the branch's agent settings, so please update the branch yourself or let me
-continue without it"). An update that fails partway anyway, on a file it can't change, gets the
-worker one line, within its turn, to put its tree back before going on (Chief of Staff runs no
-git in the worker's repository for this). Their other settings there, and all of them without the
-sandbox, their commands can change: the same lines then ask you. In your home folder, agent
-homes (`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
-
-With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot,
-Codex or Claude): they can change or delete any file you can, outside its folders too (Chief of
-Staff refuses only a few commands outright, such as `rm -r` of your home or the root, a push to
-the default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on
-(Settings; always for workers that read Slack, except on Codex), workers' shell commands can write
-only to their workspace, checkouts and the repositories' `.git` (not their hooks, config, or your
-checkout's `HEAD` and index, nor files git would read in their place, such as `.git/commondir`),
-never see your GitHub token, and cannot read `~/.ssh`. On macOS, `gh` works inside Copilot's
-sandbox once Copilot's certificate is trusted: where it isn't, Settings → Workers says so with
-*Trust the sandbox's certificate*, which shows what it runs (`copilot sandbox ca create`, then
-`copilot sandbox ca trust`; one that must change first, `rotate`), asks first, and runs them for
-you: macOS asks for your password to add it to your login keychain. If it fails it says why, with
-*Try again*, and the commands to run yourself under *Details*. Claude Code's sandbox needs no
-certificate for `gh`. Codex can't run workers while the sandbox is on (its sandbox hasn't passed
-Chief of Staff's checks yet).
-The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux the
-sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files that
-change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
-`config.worktree` where the repository reads one) after each of a worker's turns and before it
-runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that repository,
-and the timeline says "A git file appeared in .git (commondir). If you made it, use it." **Use
-it** lets the worker go on. One in the private folder of a worktree Chief of Staff made is moved
-aside into Chief of Staff's data folder by itself, and the worker goes on: its timeline says so,
-and [Handled for you](#your-ok-and-handled-for-you) has *Put back*. Nothing is moved out of your
-own repository.
-
-The sandbox holds paths, so a worker that moves a whole folder into place (its own `.git` in
-your checkout, say) gets past it: Chief of Staff remembers each such `.git` folder as it first
-sees it and looks again before and after each turn and before it runs git there. If one was
-replaced, the worker waits, Chief of Staff runs no git there, and the timeline says "… /.git was
-replaced since Chief of Staff first saw it, so git there could run what this worker put in its
-place …". Look at it first (`ls -la .git`, its `config` and `hooks/`), then click **Use this
-.git** if it's fine.
-
-Workers can start servers on localhost (a test's server, Gradle's daemon); the token files of
-your own Gradle daemons and Jupyter servers stay unreadable to them (their folders,
-`~/.gradle/daemon` and Jupyter's `runtime`, are created empty if they do not exist yet). Workers that read Slack
-cannot reach localhost.
-
-**Workers' caches.** Sandboxed workers keep their package caches in a folder of their own
-(`~/Library/Caches/chiefofstaff/workers` on macOS, `~/.cache/chiefofstaff/workers` elsewhere),
-which they all share: what one worker downloads, the next one finds. Your own caches are
-read-only to them, so a worker can never change what your builds run, yet nothing you already
-have is downloaded again: Gradle reads your dependency cache, Maven your local repository and Go
-your module downloads directly; Playwright finds your browsers through links; the rest (npm's,
-pnpm's, Yarn's, Bun's, pip's, uv's, poetry's, pre-commit's, corepack's, Cargo's, NuGet's, deno's,
-Electron's, ccache's and sccache's caches, Gradle's and Maven's distributions, Go's build cache)
-is copied from yours in the background as copy-on-write clones, which take next to no disk space.
-Where the disk cannot clone (Linux on ext4, or your caches on another volume), they are copied
-instead, up to 8 GB and a quarter of the free space: the first worker after Chief of Staff
-starts may download what that left out, once, for all workers after it. Each pass looks again
-only at folders of yours that changed. Each worker's shell gets the tools pointed there, and a
-temporary folder of its own, before each command (nothing in its instructions): installs and
-builds work as in your terminal, including uv's Pythons and tools (pre-commit, poetry, `uvx`),
-corepack's pnpm and Yarn, Maven's wrapper, `go get`, your Go tools where a Makefile looks
-(`$(go env GOPATH)/bin`), and Gradle (in the sandbox, Gradle runs without its native libraries
-and with the worker's own daemon). Your caches are found where
-your own configuration in home keeps them (`cache=` in `~/.npmrc`, pip's `cache-dir`, Maven's
-`localRepository`…), never where a project's says. *Start workers' caches from yours* off
-(Settings) keeps your caches out of theirs. **Storage** shows the folder's size, and *Clear*
-deletes it (made again at once, and filled again from yours), when no worker is using it; a
-worker's Yarn PnP worktree then needs `yarn install` again. On macOS node-gyp builds native
-modules in workers' folder too, with your headers linked in: npm 11.5 and later warn
-"Unknown env config devdir" at each command (node-gyp reads no other setting for it).
-Electron's `@electron/rebuild` keeps its headers in `~/.electron-gyp`, read-only to workers.
-
-Copilot's own *dev-tool access* (which opened your caches read-write) is off for sandboxed
-workers: nothing in your home is writable to them but that folder and their own temporary
-folders beside it, and they read only what Chief of Staff names: their toolchains (what is on
-your `PATH`, so tools installed under `~/.local/bin` too; nvm's, pyenv's, asdf's, mise's,
-SDKMAN's toolchains, JDKs, uv's Pythons, rustup's for a Rust project…) and, for workers on your
-own tasks, the few of your caches they read where they are (Gradle's and Maven's, Go's
-modules, Playwright's browsers, pre-commit's hooks, Yarn's global cache and pnpm's store; they
-have copies of the rest) and what a private registry needs (`~/.npmrc`,
-`~/.m2/settings.xml` and `settings-security.xml`, pip's, uv's, poetry's and Go's configuration,
-`~/.netrc`, Cargo's credentials, mise's configuration…), as in your terminal. Workers that read
-Slack have caches of their own in their workspace, can't read yours, can't read the registry and
-credential files build tools use (`~/.npmrc`, `~/.m2/settings.xml`,
-`~/.gradle/gradle.properties`, `~/.pypirc`, `~/.netrc`, `~/.git-credentials`,
-`~/.aws/credentials`…), and read of a toolchain only what runs: its `bin`, `lib`, `share`…, never
-a node's `etc/npmrc`, Maven's `conf/settings.xml`, Homebrew's `var`, the system's registry
-settings or a tool home's caches (GOPATH's modules, pnpm's store). Each worker's shell setup is its own: no other worker reads
-it, and it goes when the worker closes. Chief of Staff itself never writes
-through a link a worker made in those folders. No worker can change Chief of Staff's own code
-or the Python it runs on, unless you asked it to work in place in Chief of Staff's own checkout.
-Before a worker's worktree is made, only origin's default branch is fetched, once for workers
-that start together.
-
-Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
-process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
-start there), Java reaches github.com only once Copilot's certificate is trusted (*Trust the
-sandbox's certificate*, Settings → Workers; Copilot's proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
-service the sandbox closes; `brew upgrade uv` or `uv self update`): workers are told so, and
-report it rather than retry.
-
-Hooks of your Copilot plugins run in the sandbox too. One that writes elsewhere (a journal, say)
-fails there; the worker carries on and its timeline notes it once. To let it write, add its
-folder under *Also writable in the sandbox*.
-
-Inside the sandbox, a worker cannot use your keychain, Docker or Kerberos tickets, or read your
-home and other repositories, and on Copilot `gh` needs Copilot's certificate trusted. That is the price of the confinement; with the sandbox off they work as in your
-terminal.
-
-### Disk space
-
-Workers' builds fill folders fast, so Chief of Staff cleans up after them and watches the disk:
-
-- **When a worker closes**, what a build makes again is deleted from its worktrees: build
-  output, dependencies and caches (`build/`, `node_modules/`, `.venv/`, `.gradle/`, `.next/`,
-  `*.egg-info`, `__pycache__`…), and only what git ignores. The worktree itself stays only for
-  your other files (logs, an edited `.env`, a report) or uncommitted changes; why it stays is
-  recorded. Tracked files, new files, a folder with its own `.git` and anything a link leads out
-  to are never deleted.
-- **A worker idle for 3 days** (*After idle (days)*, in Storage) with nothing queued, running or
-  waiting gets the same cleanup, but never while a program runs in its folder (a dev server),
-  another open worker uses it, it is open in a terminal, or it is marked *Keep its files*.
-- **Free space**: below 30 GB or 5% of the disk, whichever is more, you get one alert naming
-  the biggest folders and what can be cleaned. Below 10 GB or 2%, new worker turns wait for
-  space ("waiting for disk space") while running ones go on. Both clear once there is room again.
-- **Storage** (the disk icon at the bottom of the sidebar, amber or red when the disk is low)
-  shows free space, each worker's folder the largest first and what can be cleaned, why a kept
-  worktree stays, recent cleanups, and anything it could not delete (files another user owns,
-  say). From there: review a worktree's files, clean its build
-  output, delete a closed worker's worktree (type "delete"; its branch stays), mark a worker
-  *Keep its files*, and set what counts as build output or must never be cleaned. A worker's
-  size includes the git folders Chief of Staff keeps, in its data folder, to read the clones in
-  that worker's folder; they go when the worker closes or the clone is deleted, and are packed
-  when they grow past 256 MB.
-- **uv's cache** is shown with its size, never deleted. Each `uvx chiefofstaff@latest` of a new
-  version leaves an environment there; `uv cache prune` removes the ones nothing uses. Never run
-  `uv cache clean` while Chief of Staff is running: it can delete the environment it runs from.
-  `uv tool install chiefofstaff` once, then `uv tool upgrade chiefofstaff`, avoids the pile-up.
-
-## Receipts
-
-A worker's report is its claim. Receipts are what Chief of Staff observed:
-
-- the shell commands it ran and their exit codes, recognized as tests, checks or builds (also
-  tests run through a script of the project's, known by the test runner's summary, and runs a
-  worker hands to one of Copilot's sub-agents);
-- commits and changes in its checkouts (`git diff` against where its branch started), each
-  task's own: from when it was taken up to its result, less what other work changed in between
-  (a later task's, before a follow-up on it). In a folder of yours (not a worktree), a file is a
-  task's when its edits wrote it, or it changed while one of its commands ran that names it or
-  writes files it does not name (a glob, a variable, a script); what you (or a pull, or another
-  task) changed there meanwhile, even in a file it only read, is not counted (*not counted: 2
-  files*). A new file too large to
-  count is *1 large new file*. A finished task is *Out of date* when its own files changed
-  since its result (not when a later task changed others);
-- the state and checks of pull requests it reported.
-
-The review card shows them under *Observed* and flags disagreements, e.g. *Says tests pass, but
-no test run was observed*, *The last test run failed (exit 1)*, *Checks are failing on
-acme/app#7*, or *Says it made changes, but its checkouts have none* (each worker says with its
-report whether it changed files). A test that failed first and then passed (a regression test
-for a fix) shows as *✗→✓ tests*. *Copy report* puts goal, result and receipts into markdown.
-
-Receipts show the latest: the card changes as soon as a test run, push or commit ends, also
-after the report (work on its PR). A test run Copilot left running (a long suite, or one in the
-background) shows *… tests running* and gets its result when it ends; a command that never ran
-(refused, blocked) is no failed run; in `pytest && git push`, a rejected push is not failed
-tests. A PR shows in a few words, as GitHub has it now: *app#7 · ✓ CI · approved*, *CI
-running*, *✗ CI* (hover for the failing checks), *merged*. CI GitHub never started (the
-account's Actions minutes or spending limit used up, the account locked) is no failure: the
-card says once *CI didn't run on app#7: GitHub Actions minutes are used up*, and nothing asks
-you or its worker to fix it. When the PR's checks passed after
-the last local test run failed, the card says so (*✗ tests locally*, and *The last local test
-run failed (exit 1), but the checks on … pass now*): CI has the newer word.
-
-**Acceptance criteria.** For work that can be checked, the Router gives the task 1-4 *done when*
-criteria: a test that passes, a command and its output, a request and its response (for a bug
-fix, a regression test that fails before the fix and passes after). The worker reports each
-one with its evidence, and the card marks it:
-
-| Mark | Meaning |
-| --- | --- |
-| ✓ | **Verified**: the evidence names a command the worker was seen running, and it passed (a search that found nothing, `grep` exiting 1, backs "none remains") |
-| ~ | **Claimed**: reported as met, but nothing observed backs it |
-| ✗ | **Not met**, or reported met while the command behind it failed |
-| – | **Not checked** |
-
-Above them, one verdict: *✓ Verified*, *Partly verified · 2/3*, *Not verified* or *✗ Not met*.
-The summary a worker writes is never counted as evidence.
-
-**Evidence is about one version of the code.** The card shows the commit it was checked at
-(*at 2dbecc5*, *+ edits* for uncommitted ones). When the code changes after that (more commits,
-edits, another task in the same worker) or a decision it relied on changes, the card says *Out
-of date* and why.
-
-## Reviewing changes
-
-Click the changes on a review card (*+12 −3 in 2 files*) to read the worker's diff: its commits,
-uncommitted edits and new files, from where its branch started (also after the worker closed).
-Click a line (or Tab to it and press Enter) to comment on it; *Send to the worker* sends all comments as one follow-up, each
-with its file and line, and the task comes back for review when the worker is done.
-
-*Create PR* pushes the worker's branch to `origin` (over http(s), ssh, git or a local path, as all
-of Chief of Staff's own fetches and pushes: not through a remote helper such as `codecommit::`;
-from a clone in the worker's folder, only to GitHub's own address for the repository)
-and opens a pull request on GitHub with your signed-in `gh`: titled with what its commits say (their subjects; the task's title when it has
-none to read), and its report as the description, without what the report said about pushing or
-a PR (moot once the PR is open), and what was checked. If a PR from that branch
-is open already, that one is used. Uncommitted work is not pushed: follow up and ask the worker
-to commit first (also work left in a submodule checked out in its worktree; one Chief of Staff
-can't read says why, and the PR opens once you click *Open it anyway*). An open worker then follows the PR (reviews, comments and CI go to it); its
-task stays under *Monitoring* until the PR is merged or closed, and waits for your *Accept* until
-you give it (merging does not accept it).
-
-## Share links
-
-*Share…* in a finished card's ⋯ menu (right after *Copy report*) makes a link to the card that
-anyone holding it can open in a browser, with nothing to install or sign in to. The dialog shows
-the card exactly as they will see it. What looks private (tokens, keys and passwords, private or
-internal addresses, Slack links, email addresses) is in red: *Remove* or *Keep* each one; *Remove*
-takes out the whole secret (a private key's whole block, an AWS key with its secret, the password
-in a link), and *Create link* waits until every one is decided. Paths on your computer are
-shortened by themselves. Never shared: the worker's conversation, the changes themselves, cost and
-Slack threads.
-
-Choose how long it works (1, 7 or 30 days) and *Create link*: the card is encrypted and kept in a
-secret gist of your GitHub account (the one signed in to `gh`; with several, you pick), and the
-link, copied for you, holds the key. Its page (`evanl666.github.io/chiefofstaff/s/`) decrypts it
-in the browser.
-
-*Share…* on a card with a live link shows it, to copy or *Revoke*; Settings → You → *Shared links*
-lists your links while you have any. Revoke deletes the gist and the link stops working at once;
-it ends by itself when it expires, and Chief of Staff deletes the gist then. What people have
-already seen or copied can't be taken back. Without `gh`, or for a copy that never ends,
-*Download HTML file* saves the card as one file.
-
-A finished report in its worker's chat, and its line on Home (beside *View*), has *Share…* too:
-the same dialog, for that report's task. A card is shared as it is now, so from an earlier report
-whose card has a newer result since, the dialog says it shares that latest result.
-
-Someone sent you a link and you use Chief of Staff too? Paste it alone into Home's message box
-and press Enter (the page's *Open in my Chief* copies it): Chief of Staff opens the card itself,
-as a line in the chat, and its link is sent to no AI. It is someone else's words, read as
-information. *Start a task from this* puts it above the message box: write what you want done,
-and your chief of staff gets your words with the card quoted. The same link again shows the
-copy you have; the copy stays after the link ends (⋯ *Remove* deletes it).
-
-## When a session needs you
-
-Sessions ask instead of guessing. Each request is a card under *Needs you*, with a desktop
-notification:
-
-- **Decisions**: a choice that is yours (scope, a trade-off, a risky change such as a migration).
-  The card says why it comes up, the options and what each means, and what the worker
-  recommends; pick one, or write your own decision. Workers that hit the same question wait on
-  the same card, and one
-  answer reaches all of them, at once: a worker that asked and kept at other parts of its
-  task reads it in that same turn. A worker that asks again in other words while its card
-  waits updates that card (it says *updated 10:42*) instead of making another. Answering in the worker's chat answers its card
-  too (a question back, "what does B change?", does not: the worker answers it and the card
-  stays); a card whose task ends (done, failed, cancelled) leaves, and its worker is told. A
-  card is about the task its worker is at (not one given since); closed, the worker leaves
-  its card, and reopened, it waits on it again. See [Decisions](#decisions).
-- **Questions**: a worker reports one when it needs you (its progress reports meanwhile keep it
-  under *Needs you*, and asked again, it is the same question, updated), or uses Copilot's
-  `ask_user` for quick facts: pick a choice or type an answer. What you answer reaches the
-  worker at once, and the Router hears it too (it may record it as a decision). A worker
-  blocked on another worker it works with waits on it under *Monitoring* ("Waits on “…”"), not
-  under *Needs you*. An `ask_user` question waits at most an hour; then it goes on without your
-  answer, and the question
-  stays under *Needs you*, saying so, until you answer or dismiss it, or its task ends
-  (accepted, failed or cancelled; a task replaced by another, or by one the Router started
-  instead, passes it on to that one). Your answer
-  then reaches the worker as a message on its task, saying which question it answers. The
-  same after a restart, for a question still open then.
-- **Forms and links**: an MCP tool asks for input, or for you to open a link.
-- **Sign-ins**: an MCP server needs OAuth. Sign in in the browser tab; the card closes by
-  itself. Copilot keeps the sign-in for every session (see [SECURITY.md](../SECURITY.md)).
-- **Connections**: an MCP tool works but says an account must be connected, often "in a
-  browser". Every session it stops, Watch for you included, shares one card: the last error, how
-  many sessions wait, and its link (*Open link* only when you click it; *Link supplied by …*
-  when it is not the server's own address). Connect, then *I've done it*: each session retries
-  once, and the card closes when a retry works (another failure updates it; one that fails the
-  same way after *I've done it* says the account is connected but still can't be used from Chief
-  of Staff: check that it works in Copilot CLI in your terminal, then *Try again*). Watch for you
-  scans again at once, from where each watch was last covered; until then it still tries every
-  watch once a scan, and Settings says *connection needed*. A tool failure while Copilot's own
-  sign-in card for that server is open joins that card. Workers reach MCP servers as a Copilot
-  CLI client (*copilot-cli/chiefofstaff*), so connections you made for Copilot apply to them.
-  Workers on Claude Code or Codex reach them as that app (*claude-code/…*,
-  *codex-mcp-client/…*), as your own Claude Code and Codex do: a server that keeps connections
-  per app needs one for that app. Their card is their own and says so (*… needs you to connect
-  Glean for Claude Code*), with the link the server gave; still failing once connected, it says
-  to check that it works in that app in your terminal, not in Copilot CLI.
-- **A folder**: the Router is not sure where a task belongs. When the one folder it offers is a
-  configured project, that is your choice already: it is picked, the Router's chat says so with
-  *Change*, and no card comes.
-- **Approvals**: Slack replies and PR reviews drafted in your voice. Edit and *Send*; or,
-  under **⋯**, *Ask to redo…* (say what should change, it is needed: the same session drafts it
-  again and a new card comes) or *Reject* with a reason the session learns from. A Slack draft
-  shows where
-  it goes (DM, channel or thread) and the latest message there, read from Slack itself, so you
-  can check it answers the right conversation. When someone wrote there after the draft, *Send*
-  does not send: the card shows what they wrote, and *Send anyway* sends it. A newer draft for
-  the same conversation replaces the older one, and a session can withdraw a draft that turned
-  out wrong. An empty reply is never sent. A question its worker asked about the draft (send
-  it?) is answered by what you do with it, and its task goes on (or, finished, stays where it
-  was). Edits you make to a finished task's draft reach its worker with its next message: it is
-  not woken for them, and the task keeps its result. When someone asked for a review or reply in
-  a Slack thread its worker follows, that worker is woken once you send it, to draft a reply
-  there telling them. The Router knows what waits for you (each card's recipient, what it
-  answers and its task, and the workers' questions) and hears what you did with each draft.
-
-### Your OK and Handled for you
-
-Smooth by default: what is safe is handled for you, and what only needs your OK is one card.
-
-**Your OK** holds the approvals that don't speak as you and aren't decisions: habits to keep,
-checks to use, a changed decision to see, a folder to pick, a PR ready to merge, a sign-in, a
-session to take over, your profile. One line each, with its own button (*Keep*, *Use*, *Got it*,
-*Merge*, *Sign in*…); **⋯** has the rest and *Details*, its whole card. Lines that are local and
-can be undone in Settings (a changed decision seen, a check, a habit not about secrets, money or
-what goes out) are marked *safe*, and **Approve all safe** takes them all, each checked again as
-it is then. It counts once under *Needs you*, in the sidebar and in the daily summary. A merge, a
-sign-in, a reply or review in your voice, a decision and spending past a limit are never
-approved for you nor with others: each keeps its own button (a reply or review its own card).
-
-**Handled for you**, one quiet line at the end of *Needs you* while the last week has any, lists
-what Chief of Staff did instead of asking, the newest first, with *Undo* where undoing still
-means something (it says so when things moved on since):
-
-- a report with no code, no PR and nothing failing, accepted a few minutes after you read it, or
-  a day after it finished unread (*Undo* puts it back to accept, for good);
-- a changed decision every affected worker said changes nothing for, closed;
-- a habit your own words backed three times or more, kept (*Undo* drops it; once you dropped or
-  undid more than one in five of those, they wait on *Your OK* again);
-- the one configured project a task fits, picked (*Change* brings its card back);
-- with the sandbox on, a server that changed in a worker's folder, kept off for it (*Turn on*);
-- on Linux with the sandbox on, git files that appeared in a worktree folder of Chief of Staff's
-  own, moved aside (*Put back*);
-- what a start cleaned up: messages of yours that waited for a worker held for its folder's
-  settings and can no longer go (their task moved to another worker or was cancelled), one line
-  for each worker with what became of the task, timed when you wrote them, not when Chief of
-  Staff started. A worker left with nothing open closes, said in the same line, not in the chat.
-
-Folder settings that wait for your word (with the sandbox on) are not on *Your OK*: each is its
-worker's own row under *Needs you*, with *Use these settings*.
-
-There are no per-tool settings: Chief of Staff uses whatever your Copilot has (MCP servers,
-CLIs). For a new ability ("read our company docs"), the Router starts a setup worker that finds
-what is available, asks you to sign in, checks that it works and records how in **environment
-notes** for later sessions (editable in Settings).
-
-## Decisions
-
-Work depends on decisions: "v1 is email login only", "limit attempts per account". Chief of
-Staff keeps them, each with the tasks that rely on it:
-
-- your answers on decision cards (or in the worker's chat, to its card);
-- decisions you state to the Router ("SMS login is out for v1"), which it records and links to
-  the tasks they concern: the work you ask for in the same message, and a finished task only
-  when what it delivered relies on it.
-
-**Change one and the work follows.** Tell the Router ("change of plan: SMS login is in after
-all"). It records the new decision in place of the old one, and Chief of Staff:
-
-- tells every worker whose task relied on the old one, right away (also mid-turn), what changed;
-- reopens tasks that were already finished, and marks their checked results *Out of date*;
-- shows a *Decision changed* card: what was decided before and now, the tasks it affects, how
-  many checked results need redoing, and which workers confirmed what they change. Each worker
-  confirms with `ack_decision`. Once all have: when nothing changes for any of them, the card
-  closes by itself (under Handled for you); when one changes its work, it stays for you to see
-  (*Got it*).
-
-Work that does not rely on the decision carries on untouched.
-
-**One choice, asked once.** Whatever a choice comes by (a decision card, a worker's question or
-blocked report, a question card, a note of the Router's, or an ask at the end of a worker's
-report), Chief of Staff files it under its *subject*: the choice it is about. Sameness is Chief
-of Staff's call, not the asking worker's: two asks are the same choice when they share most of
-their telling words (numbers such as *1.11* whole; Chinese by pairs of characters), with no model
-call. Within one of your requests (the workers of a team) or one worker's tasks, asks of the same
-choice are one card under *Needs you*: *Asked by 2 workers + the Router: one answer reaches them
-all*, with what each asked folded in it (*Not the same* gives one its own card again), and the
-count says one. Across requests nothing joins by itself: the card says *Possibly the same as
-“…”* (and what you decided on it, if you did), and **Merge** makes them one (merged into one you
-decided, it is answered with that decision).
-
-**Any answer settles it.** A pick on any card, your reply in a waiting worker's chat, or the
-Router passing on your answer: every other ask of that choice is answered with your words where
-it was asked (its card closes, its question leaves, its question card returns your answer), each
-worker hears it once, and the Router once. Your pick, or your own words on a first ask, is kept
-as your decision on that choice (replacing the one before, whose tasks hear the change as
-above); words that pick none of the options of a choice you decided before are a note, and the
-decision stays. A question with no options (a file, a token, an account) is answered for every
-worker that asked it, and not kept as a decision. A card of a choice you decided before says so
-quietly: *Decided before: you picked “1.11” at 10:01*.
-
-When a worker asks a choice you decided before (in its request, or for its own task in other
-words or among the same options), it gets your decision back, not a card: it asks again only to have you reconsider,
-saying why, or for another decision it says is one. Another question on a task you decided
-something for is asked as usual. A worker whose open tasks rely on a decision it was not told
-(nothing else said it) reads *Decisions in force for your tasks* with its next message, once. A
-report of *done* that asks you something at its end is held once (the worker is told to ask on a
-card, or to leave the ask out); sent again as it was, its ask is kept as its question under
-*Needs you*, not lost with the result. One that asks again what its open question or blocked
-report asks leaves that ask open. A worker that asks before it has read your answer (it reached the worker while it worked)
-gets that answer instead of a card, and *Handled for you* says so; so does a question it asks
-before reading a newer message of yours or the Router's about its task: it reads that first.
-
-When what it found since calls one of your decisions into question, its card says *You answered
-this at 10:02 (“…”). Asked again because: …*. **Keep** leaves your answer in force (the worker
-goes on with it), and so does *Not now*, for now; words that name none of its options are a note
-to the worker (it goes on with them as your instruction, your answer still in force); picking
-one of its options replaces that decision (one decision stays in force), and every other task
-that relied on it is told, as
-above: each worker once, however many of its tasks rely on it; a finished task reopens only when
-the answer itself changed, and changes of one decision within two hours are one *Decision
-changed* card. Decided another way meanwhile (told the Router, say), the card leaves and its task
-goes on under your new decision. A decision the Router records on a choice you decided already
-(the same choice, as Chief of Staff tells it) replaces that one, as a change does: one value for
-one choice. When it only says the same value in other words ("the ranker serves k 1.11" after
-you picked 1.11), it is kept quietly: nobody is told to redo anything, and nothing reopens. One
-only possibly the same is kept beside it, and the Router is told which it may change. A decision the Router records for tasks already given reaches
-their workers too (a question one of them asked you stays until the Router says the decision
-answers it). What workers confirm about a change stays on its card after *Got it*.
-
-## How you work: learned, and kept up to date
-
-Chief of Staff keeps learning how you write and work, so its sessions get closer to doing it as
-you would.
-
-**How you write.** Every two hours (and when you press *Learn now*) it reads what you wrote
-since: the Slack messages you sent, your PR reviews and review comments (on the account active
-in `gh`; not what Chief of Staff posted for you, which it knows by what it posted; nothing is
-added to what it posts, so what Chief of Staff on another computer of yours posts on the same
-account is learned as your own writing: you approved it), your commit messages in your projects
-(not Copilot's, nor those a worker
-made), what you asked your own Copilot sessions, and what you told the Router. Only your own
-words; others' messages are never kept. A short-lived worker, which can do nothing but propose,
-then describes how you write in each place: answers and reports to you, Slack DMs, Slack
-channels, PR reviews, commit messages (language, length, tone, greetings, formatting, a short
-quote or two). It never sets the language: answers are in the language of the message they
-answer (write in English and you are answered in English, in Chinese and you are answered in
-Chinese), and a Slack reply is in the language of the message it replies to, or in yours
-when you said what to answer: what you said, the way you write (your exact words only where you
-quoted them). What you write to one worker changes only that worker's answers:
-the Router and new tasks' reports stay in the language you write to the Router in, and a task
-for a request that came without you (a Slack message) reports in that request's language.
-Each style applies at once to the sessions that write that way
-for you (the Slack session and workers that read Slack get your Slack style; workers get your
-commit and review style; the Router and workers answer you the way you talk to them), and the
-Router chat says what was learned, with a link to Settings. Settings → *You* → *Writing styles*
-(folded, with how many) shows each, with its version; *Undo* goes back to the previous one. Turn
-*Learn from what I write* off to stop reading them. Of your Copilot sessions, only those you talked in are read (two messages
-of yours or more): not a one-shot one, such as a `copilot -p` you ran or one question you asked
-and left, which is written for a script or a single answer; nor sessions a program, a worker or a
-script made (see [Your other sessions](#your-other-sessions)). What was read from
-those and not learned from yet is dropped before learning; `chiefofstaff tidy-sessions` names
-what was learned from a worker's or a script's sessions before that.
-
-**How you want work done.** Your sessions also learn from what you do with their work:
-
-- your decisions, especially when you go against what a worker recommended;
-- review comments on a diff, follow-ups on a finished result, notes when you retry a task,
-  reasons when you cancel one;
-- the drafts you edit before sending (each line comment of a review you rewrite or leave out,
-  and a verdict you change), and why you rejected one;
-- the decisions you change;
-- the instructions you give the Router and workers, so that guidance you repeat becomes a lesson.
-
-Only your own choices and words count; what a session proposed is kept beside them as context.
-Once a few new pieces of feedback came in (or guidance you keep giving your own sessions), the
-learning worker turns them into habits, e.g. *Give every database migration a rollback
-migration* or *Run a small smoke job before the full one*, each with where it applies
-(everywhere, Slack replies, one project) and what it rests on. A habit your own words backed three
-times or more, and not about secrets, money or what goes out, is kept at once, with *Undo* under
-[Handled for you](#your-ok-and-handled-for-you). The others are on *Your OK*, one line each
-(*Keep*; *Details* shows the **Learned from your work** card: keep, reword or untick each). Only
-what you keep goes into your sessions' instructions; habits learned while the card waits join it.
-
-Settings → *You* → *Habits* lists the habits in use (remove any, or add your own: they apply from
-your sessions' next message), and the page's last line shows how close the sessions get to you: the share of recommendations you took, drafts you sent as written and results you
-accepted as they were, over the last 30 days and the 30 before. Usage shows what a result you
-accepted cost, by model.
-
-## Checks learned from mistakes
-
-When a worker's test run fails and a later run passes after it changed the code, Chief of Staff
-keeps both versions (as git commits under `refs/chiefofstaff/`, without touching the worker's
-checkout). A short-lived worker reads the failure and the fix and, when it shows a mistake that
-can come back (a blocking call in async code, a forgotten migration), proposes a check: a shell
-command that fails when the mistake is there, e.g. `! git grep -nE '^[[:space:]]+time[.]sleep'
--- 'src/*.py'`. Before you see it, the check runs on both versions: it must fail on the code with
-the mistake and pass on the fix. A **Check learned from a mistake** card shows it with that
-proof; *Use this check* turns it on.
-
-From then on, when a worker in that repository says it is done with changes to files the check
-applies to, the check runs on a clean copy of its work. If it fails, the worker is sent back
-once to fix it (or to say why it does not apply); if it still fails, the review card flags it.
-Settings → *You* → *Checks* (folded, with how many) lists the checks, how often each ran and
-caught something, and turns any off. Checks run in a sandbox: no network, no writes, and nothing in your home folder but the
-repository is readable. They need macOS (`sandbox-exec`) or `bwrap` on Linux, so none run on
-Windows.
-
-## Focus
-
-**Focus** (at the top of Home) holds notifications for 30 minutes to 4 hours. The Router keeps
-working: Slack messages that need a reply get drafts, code work goes to workers, noise is
-ignored. Only what the Router marks urgent (an outage, someone blocked on you today) gets
-through. The chat says *Focusing for 1h*; the top of Home shows until when. When focus ends
-you get one summary: the messages and PR activity that came in, replies drafted (not those
-replaced or withdrawn since), tasks finished, and how many things need you, counted as
-*Needs you* counts them.
-
-## Autopilot
-
-Off by default. Tick *Autopilot* in Settings → General, under *On its own*; its *Options* hold
-*Credits a day* (100 by default), *Acts in* (*All your projects*, or *Only these…*: one
-`owner/name` per line), *While Autopilot is on, workers ask first* (on), and *Autopilot record*
-once it has run.
-
-**Turning it on.** Home's *Autopilot* menu: *For 2 hours*, *Until 9:00 AM* (your daily summary's
-time) or *Until I turn it off*. Or write one of its commands to the Router, exactly:
-`autopilot on` (2 hours, or until that morning time if it comes sooner), `autopilot until 5pm`,
-`autopilot for 3h`, `autopilot until I turn it off`, `autopilot off` or `stop autopilot`; in
-Chinese `开 autopilot`, `开 autopilot 到下午5点`, `autopilot 开两个小时`, `关 autopilot`. Chief of
-Staff answers it itself, saying until when; anything else, a near miss too, goes to the Router as
-any message. While it runs, Home's header says *Autopilot · until 6:00 PM · 4 done · 2 waiting
-for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
-
-**What it does.** It adds no capability: it changes who answers. While it is on:
-
-- A worker's question or decision card is answered only from what you said yourself: a message
-  you typed in the page (in that worker's chat, or to the Router when it gave that very message
-  to the task), your answer to a decision card in the page (your answer, not the card's
-  question, which is the worker's), or a habit you wrote or kept in the page. Each answer quotes
-  a whole sentence or clause of yours that says it, in the worker's chat too (*Autopilot
-  answered: Postgres, because you said “Postgres for v1”*): one that names the option it chose
-  (and no other) or holds its whole answer, from words of yours where nothing says no, in
-  English or Chinese (*Redis? No.* never means Redis; *Use Postgres, not Redis* waits for you).
-  It decides where the Router runs, with the Router's model and effort there (Settings →
-  *Agents & models*, *Who does the work*). What workers note, what the Router writes or decides,
-  files in a repository, away answers, Send to Chief notes and Slack messages are never your
-  word.
-- It answers a question as you would, in the one place it was asked: Chief of Staff files every
-  ask under the choice it is about, and Autopilot's answer settles it there, never kept as your
-  decision. A choice more than one worker asked (or the Router noted too) waits for you, so that
-  your one answer reaches them all (*Set aside: others asked the same choice…*).
-- What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
-  you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
-  deleting, merging, commenting…), and anything irreversible or outside this computer (a
-  migration, a release).
-- A finished result is accepted only after its own run of the task's checks: at the exact
-  commit, in a private copy, offline (no network, no credentials, no keychain), with only the
-  dependencies already there (the package caches workers share, filled from yours), the tree
-  checked before and after. Uncommitted work, a weakened test or checks that reach outside the
-  copy are left for you; where this computer can't run them offline (a test that downloads),
-  results wait for you (*Couldn't verify offline: it waits for you*); uv before 0.9.29 crashes
-  in the macOS sandbox, and its card says so (*Couldn't verify: uv 0.9.21 crashes in the
-  sandbox; uv 0.9.29 or newer fixes it*). The first time on a new Copilot version it waits
-  for that version's safety check first. A result it accepted says *Accepted by Autopilot*
-  (*Why* opens its entry), in its worker's chat too, and is never said to be yours. What waited
-  on it starts; a stalled worker is asked once more where it stands.
-- Nothing goes out in your name: no Slack reply, PR, comment or merge. What a turn it continued
-  would send (a reply you handed over, a note to another session) waits for you as a card.
-
-**Workers ask first.** On (the default), every turn Autopilot continues runs with Ask first,
-whatever your setting for workers, and keeps it until that turn ends, after Stop too; so does
-every turn its work leads to (a message the Router sends from it, a note from another worker).
-A Codex or Claude worker is reopened in Ask first before any of it reaches it, never mid-turn
-(it waits for that turn to end). Your own turns are as you set them. Off, workers keep your
-usual settings. Writing to a worker yourself in the page hands it back to you.
-
-**Stop** stops it at once: nothing it queued goes out, the turns it continued (and the Router's,
-when one carries its work) are stopped, their tasks waiting with *Go on*, and what it was still
-deciding or checking is yours (a card it was judging is drawn for you, a result stays to
-review; a question or decision it answered whose answer had not gone out yet is yours again,
-under *Needs you*, saying so). What its judge and the turns it starts use counts against
-*Credits a day*; at the cap it pauses until the next day and says so.
-
-**When it ends**, one card at the end of the Router's chat, *While you were away*, says what it
-did and left for you: each row opens its entry in the record, with *Undo* on an acceptance and
-*Change* on a decision; under an answer or an acceptance, *then:* what its worker did next. A daily
-summary or Focus summary due during a run of a day or less is folded into it; a longer run gets
-its part in each daily summary. *Handled for you* gets one row per run.
-
-**The record** (from *4 done*, *View all*, *Handled for you* or Settings): every run, newest first,
-each action with what it rested on, its evidence and what came next; *Left for you* shows only
-what waits; *Copy as Markdown*. It is append-only and hash-chained: *Undo* and *Change* add
-entries, and a record changed outside Chief of Staff says so. Ask the Router "what did autopilot
-do last night?": it answers from the record only, each entry linked.
-
-Before installing an earlier version, `chiefofstaff --prepare-downgrade` ends a run and stops the
-turns it continued (their tasks stopped by you, their check-backs removed), so the earlier version
-resumes none of them; the record stays.
-
-## Slack
-
-Chief of Staff uses Slack's [official MCP server](https://docs.slack.dev/ai/slack-mcp-server/)
-with your **user** token. A watcher looks for new DMs and mentions every minute without a model
-and wakes the Router only when something new arrived.
-
-1. Create a Slack app **from `slack-manifest.json`** (user scopes only; token rotation off).
-   Your workspace may require admin approval; only internal or Marketplace apps may use MCP.
+| **Needs you** | Decisions, questions, drafts to approve (Slack replies, PR reviews), results to accept, failed or stopped tasks, sign-ins |
+| **Teams** | One row per request that became a team: its parts, what it waits on, its latest change |
+| **Running** | Tasks being worked on now, each with its live step |
+| **Monitoring** | Tasks nobody has to act on now but that wait for something: CI, a review, a reply, a run, a check-back |
+| **Recently finished** | Accepted work, cancelled work, for three days |
+| **Artifacts** | The PRs, documents and runs your tasks delivered, with where each stands now |
+
+Each card has one main action (*Answer*, *Send*, *Accept*…); the rest is behind **⋯**. Approvals
+that only need your OK (a habit, a check, a PR ready to merge, a sign-in) are lines in one card,
+**Your OK**, and what was handled for you is one quiet line under it, **Handled for you**, each
+with *Undo* where it can be undone. A result that changed no code and opened no PR is accepted
+for you a little after you read it; everything else waits for your *Accept*. More:
+[Reference → Home](reference.md#home), [Your OK and Handled for
+you](reference.md#your-ok-and-handled-for-you).
+
+### Teams
+
+When the Router splits one request into parts that work together (two sides of one change, a
+part that needs another's result), those parts are a **team**, named after your request.
+
+- Workers in a team **tell and ask each other** what the other needs, in their own words and at
+  once, without a Router turn in between. A worker waiting for another's message waits quietly
+  and goes on when it arrives. When one finishes, the others still at work get its result.
+- What they tell each other is information, never new work: a change of course goes through the
+  Router, which decides or asks you.
+- The **team page** (click a team's row on Home) is where you run it: one line saying where the
+  request stands and the one thing that moves it, the **plan** as a rail of parts with each
+  part's state and output, **So far** (what was made, what was decided, what to watch), **Since
+  you looked**, and **Tell the team** to send one message to the parts you pick. Done, the page
+  says what the request delivered, with *Copy summary*.
+
+Workers are listed one by one in the sidebar; teams are on Home. More:
+[Reference → Tasks and workers](reference.md#tasks-and-workers).
+
+### Decisions
+
+Workers ask instead of guessing. A **decision card** says what is to decide and why, the options
+and what each means, and what the worker recommends; pick one or write your own.
+
+- **One choice, asked once.** Within one request, workers (and the Router) that hit the same
+  choice share one card, and your one answer reaches all of them, also a worker in the middle of
+  a turn. Across requests, a card says *Possibly the same as “…”* and *Merge* joins them.
+- **Decisions are kept**, each with the tasks that rely on it. Tell the Router "change of plan:
+  limit login attempts per IP address only" and every worker whose task relied on the old
+  decision hears what changed, finished work that relied on it reopens, and a *Decision changed*
+  card shows who confirmed what.
+
+More: [Reference → Decisions](reference.md#decisions).
+
+### Receipts
+
+A worker's report is its claim; **receipts** are what Chief of Staff saw it do. Next to every
+result: the test and build commands it ran and their exit codes (*✗→✓ tests* when a failing test
+was made to pass), its commits and its diff, the PR checks. Each acceptance criterion is
+*verified* (a check was seen running and passing), *claimed* (only the report says so) or
+*failed*. A report that claims something nothing backs is flagged. More: [Reference →
+Receipts](reference.md#receipts).
+
+## Daily use
+
+### Giving work
+
+Type on Home. Several things at once is fine: the Router splits them and starts them in parallel,
+or in order when one needs another's result.
+
+- **To one worker:** type `@` and pick it; your message goes straight to it.
+- **On one agent:** type `@` and pick an agent (`@codex`, `@claude`) for what you ask next; pick
+  two to compare (see [Agents](#agents-copilot-codex-and-claude)).
+- **Images:** paste or drop screenshots (up to five, 5 MB each); the worker gets them too.
+- **Progress:** ask the Router. A worker's routine updates stay quiet on its task's card.
+- **Stop:** *Stop* in a worker's chat interrupts it; its task waits under *Needs you* for *Go on*
+  or *Cancel*. "Stop all my work" to the Router does the same for every worker.
+
+For work on a subject a worker already knows, the Router continues that worker's task, gives it
+a new task, or starts a new worker that builds on its results. When that worker is busy, its new
+task can start at once in a **second worker** with its conversation so far (⑂ in the sidebar).
+Say "a new worker" in so many words and you get one.
+
+### Reviewing results
+
+A finished result is a card under *Needs you*, marked *New* until you open it.
+
+- **View report** opens it whole, with its receipts.
+- **Accept** finishes the task. **Request changes** sends it back with what to change; its next
+  report is a new result to review. **Follow up** asks more and keeps the result as it is.
+- Click the changes (*+12 −3 in 2 files*) to read the diff; click a line to comment, and *Send to
+  the worker* sends all your comments as one follow-up.
+- **Create PR** (in **⋯**) pushes the worker's branch and opens a pull request with your `gh`.
+
+A worker's PR stays under *Monitoring* until it is merged: its CI, reviews and merge state are
+read from GitHub, and news on it comes back as an *Update*. Workers close themselves when their
+PR is merged or closed.
+
+### Following threads, check-backs and the Watchdog
+
+Work is followed until it is really done:
+
+- **Threads.** A worker follows every PR it opens or acts on, and the Slack thread of a reply you
+  approved. New comments, reviews, commits, CI results and the merge go straight to that worker;
+  the Router is not woken.
+- **Check-backs.** A worker waiting on a long run (a training job, a deploy) sets a time to look
+  again; its row says when (*↻ in 12 min*) and what it checks.
+- **The Watchdog.** Every minute a cheap check (no model) looks for workers with no activity for
+  15 minutes, the same step repeated, or a turn that ended without a report. The Watchdog session
+  reviews each one and nudges it, interrupts a hung step, or tells the Router. A worker making
+  progress is never disturbed, however long it takes.
+- **Overdue.** A task with no activity for four hours (*Overdue after*) gets its worker asked
+  where it stands; no answer within the hour brings it to *Needs you*.
+
+More: [Reference → Following threads](reference.md#following-threads),
+[Watchdog](reference.md#watchdog).
+
+### Focus and the daily summary
+
+**Focus** (top of Home) holds notifications for 30 minutes to 4 hours while work goes on; only
+what the Router marks urgent gets through, and you get one summary at the end. The **daily
+summary** (Settings → General, 09:00 by default) says what finished, what waits for you, what
+was handled for you and what it used. Quiet days post nothing.
+
+### Slack
+
+Chief of Staff uses Slack's official MCP server with your **user** token. A watcher looks for new
+DMs and mentions every minute without a model, and wakes the Router only when something new
+arrived.
+
+1. Create a Slack app **from `slack-manifest.json`** in this repository (user scopes only; token
+   rotation off). Your workspace may need an admin to approve it.
 2. Enable MCP access for the app (`https://api.slack.com/apps/<APP_ID>/app-assistant`).
 3. Install it and copy the **User OAuth Token** (`xoxp-…`) from *OAuth & Permissions*.
-4. In **Settings**, paste the token, enable *Watch Slack*, and save. The token is stored in
-   your OS keychain (or set `CHIEFOFSTAFF_SLACK_USER_TOKEN`).
+4. Settings → Connections → *Slack*: paste the token, turn on *Watch Slack*, save. The token is
+   kept in your OS keychain (or set `CHIEFOFSTAFF_SLACK_USER_TOKEN`).
 
-The Router forwards messages that need a reply to the **Slack session**, which reads the
-conversation and drafts a reply in your voice for you to approve. Messages that need work
-outside Slack go to a worker with Slack access, whose reply is drafted in the conversation the
-message came from. Older messages are not replayed on first enable.
+Messages that need a reply get one **drafted in your voice**, on a card with *Send*; nothing goes
+out until you approve it. Messages that need work become tasks.
 
-### Delegate by reaction
+**Delegate by reaction.** React 🤖 to any Slack message, yours or someone else's, in any channel,
+to hand it over. The Router treats it as your request, and when the author is waiting, the worker
+replies in that thread with the outcome: your reaction is your OK for that one reply (it falls
+back to a card when someone wrote in the thread since, or the reply looks like it holds a
+secret). Write a note to yourself and react to it to delegate from your phone.
 
-React with 🤖 (`:robot_face:`) to any Slack message, in any channel, yours or someone else's,
-to hand it to your chief of staff: "take care of this". The Router treats it as a request from
-you: it starts a worker (or gives it to the one that knows the subject), and when the author is
-waiting, the worker replies in that thread with the outcome. Write a note to yourself and react
-to it to delegate from your phone.
+No Slack app? A watch can read Slack through a tool your agent already has (see
+[Watches](#watches)). More: [Reference → Slack](reference.md#slack).
 
-Your reaction is your OK for that one reply: it goes out at once, as you, in the thread of the
-message you reacted to (or a new thread under it), with no card. The worker is told it writes
-straight to the people there. Only your own reaction counts, and only that reply: anything else
-it sends, anywhere else, waits for your OK as usual. It falls back to the card, with one line
-saying why, when someone else wrote in the thread since, when the reply looks like it holds a
-secret or names a file on your computer, or when the check before sending holds it. Each reply
-sent this way is listed under *Handled for you* with a link to it in Slack (Slack's MCP server
-can't delete messages, so there is no Undo). *Reply directly when you react with :robot_face:*
-in **Settings → Connections → Slack** turns this off: every reply then waits for your OK.
+### GitHub reviews
 
-Change the emoji (or empty it to turn this off) in **Settings → Connections → Slack**. The watcher finds
-reactions with Slack's `hasmy::robot_face:` search, among the 20 most recent messages you
-reacted to; reactions from before you turned it on are ignored. The message itself is still
-someone else's text: the Router checks with you before anything risky it asks for.
+Turn on Settings → Connections → *GitHub reviews* and list repositories (`owner/name`): each
+review requested of you starts a worker that drafts the review. Or just ask: "review
+checkout-service PR #1529". A drafted review has a verdict (approve, request changes or comment)
+and comments on lines of the diff; the card shows the PR, the review and each comment with its
+code. It is published only when you approve it, and only if the PR has not changed since. More:
+[Reference → GitHub reviews](reference.md#github-reviews).
 
-## GitHub reviews
+### Prepared for you: keeping your PRs moving
 
-Enable *Watch review requests* and list repositories (`owner/name`). Chief of Staff checks
-`gh search prs --review-requested=@me` through your signed-in `gh`. The Router starts a worker
-per request; its review is published only after you approve the draft, and only if the PR head
-has not changed since.
+Turn on Settings → General → *Keep my PRs moving*. When a PR a worker opened for you fails CI or
+gets review comments, the same worker prepares what it needs: a fix, checked, or replies to the
+comments. Its row under *Needs you* changes to *Review fix* or *Review & post*, and nothing
+reaches GitHub until you approve it. Its *Options* set how far it goes for each kind of change
+and what it may spend a day. Preparing fixes needs Copilot for now; on other agents it still
+finds what needs doing. More: [Reference → Prepared for
+you](reference.md#prepared-for-you-keeping-your-prs-moving).
 
-You can also just ask: "review checkout-service PR #1529". A worker drafts reviews on a PR its task
-names (by URL, or by the repository's name and number), one it opened, follows or was given, or
-one GitHub asks you to review. A review carries a **verdict**: approve, request changes or
-comment. Ask "review it and approve it if nothing blocks merging" and it is drafted as an
-approval, a real GitHub approval once sent. A review also carries **comments on lines** of the
-diff; lines outside the diff are refused when drafting, so what you approve can be published.
-
-The card under *Needs you* says what the PR is (“Add greet” by @maya · +3 −1 in 1 file), the
-verdict, the start of the summary and how many line comments there are. **Review…** opens the
-review to check it: the PR and what it is about, the summary, and each line comment with the
-lines of code it is about. Edit anything; *✕ Remove* leaves a comment out (*Undo* brings it
-back); an empty summary posts the line comments alone. The verdict is beside the send button,
-which says what it does (*Approve & send*, *Request changes & send*, *Send review*). Not like
-this at all? *Ask to redo…* sends it back to the worker with what should change.
-
-On a PR a worker is working on, it can also draft **replies to review comments**, in any
-repository: each card shows the comment it answers, and the reply is posted in that thread once
-you approve it. When the reply says the point is fixed or settled, the card has *Resolve the
-conversation* ticked: sent, the conversation is resolved on GitHub too (untick it to leave it
-open). A comment that is not on a line (a top-level comment, or the summary of someone's
-review) has no thread to reply in: the answer is posted in the PR's conversation and starts
-with @ and its author's login.
-
-**Posted it yourself?** Copied a drafted reply or review and posted it on GitHub yourself
-(edited a little, even)? Within a few minutes Chief of Staff finds it there: the card leaves as
-sent, and the worker is told, so it does not ask you about it again. A worker also always hears
-what became of its drafts (sent, edited, rejected), with its next message. What you post on a PR
-yourself, and what its own worker pushes (any commit made in a worker's checkout, quiet or not,
-a rebase onto a base others moved too: their commits on the base are not the PR's), is not news
-to the workers following it; news on a PR goes to the task that made it (the task is
-named in it; not a later task of that worker that only asks about it), and once handled, a
-finished task goes back to where it was. A worker that only read or reviewed a PR someone else's
-task made is not asked too, except for replies to its own review comments.
-
-**A send a restart interrupted** is looked for on GitHub (or Slack) first. On GitHub it counts as
-sent only if it is there as your account's, posted since it began to go out, with exactly its
-text (a teammate's reply in the same words is not it); when two could be it, its card says it
-can't tell which, for you to look and mark it sent or send it again.
-
-**Several GitHub accounts** (a personal one active in `gh`, your company's signed in as well):
-Chief of Staff reaches each repository with the account that can see it, and remembers it per
-organization. Sign in with each once (`gh auth login`); you need not switch. Workers are told the
-same: they open PRs and push as that account (gh's active one, unless it cannot see the
-repository), not as another one that happens to be signed in. When none can see a
-repository, the worker tells you which accounts are signed in.
-
-Workers commit on their branch but do not push unless the task asks for it: you open the PR with
-*Create PR*. Analyses and research need no branch at all.
-
-## Prepared for you: keeping your PRs moving
-
-Off by default. Turn it on in Settings → General (*Keep my PRs moving*); its *Options*, under its
-line while it is on, hold its choices (*Settings* on Home's *Prepared for you* opens them), and its
-line says what it does now and what it spent today.
-
-**Your worker PRs.** When a PR a worker opened for you fails CI or gets review comments, Chief of
-Staff prepares what it needs in that same worker: a fix, checked, or replies to the comments.
-Nothing reaches GitHub until you approve it. The PR keeps its row under *Needs you*; only the
-row's words and its one action change:
-
-- *Fix it*: it found what fails and can prepare a fix (each kind's level is *Suggest*: nothing
-  runs until you click);
-- *Review fix* or *Review & post*: a fix or replies are ready. The review shows what would be
-  published: the change (changes to tests, CI or checks first, marked), how the fix was checked,
-  and each reply, which you can edit. A push-back on a comment offers *Post my reply*, *Do it
-  their way* (a new plan) or *Leave it to me*. *Push* (or *Push & post*) publishes exactly that;
-  *Request changes…* sends it back with your words; *Dismiss* drops it;
-- *Resume*: it paused, because someone else pushed to the PR (you, a teammate, or its worker in
-  a turn you asked for), or the PR became stacked. Nothing is tried on commits it can't account
-  for until you say so;
-- *Look*: it stopped trying (the same failure came back after its fix, or two attempts made no
-  progress), or what you approved did not go out. *Look* shows what it did, attempt by attempt.
-
-The row's ⋯ adds *Stop looking after this PR* (its news then comes to its worker as before),
-*Merge when ready* and *Accept this commit…*.
-
-**How a fix is checked.** The fix is a commit on top of the PR's latest commit, made in the worker's
-checkout when that is at the same commit with nothing uncommitted; otherwise in a fresh copy,
-leaving the worker's branch and any unpushed work as they are (the review says so). Either way its
-git works in a folder of its own: your repository, which the worker's checkout shares with yours,
-stays read-only to it, and Chief of Staff moves its commit in once it ends (onto the worker's
-branch, when it worked in the worker's checkout). A repository the worker cloned into its own folder
-is used only while it is at that commit (no copy is made of it, and its fix isn't run on frozen
-copies). Then Chief of Staff runs the test command that failed, in the worker's restricted session,
-on two frozen copies, one of the PR as it is and one with the fix, and the review says what it
-showed: which tests failed before and pass now, and whether any test stopped running. Test names are
-read for pytest, Go, cargo and vitest; for other runners the review says which tests ran was not
-checked. A fix that skips or weakens a test, edits CI or changes what the checks check is never
-hidden among the rest: it is marked, and its parts come first.
-
-**While it prepares, the worker runs restricted.** For that turn only: no GitHub (no `git push`,
-no `gh`, no GitHub hosts at all), no credentials (none of your git, GitHub, SSH, keychain, package
-registry or cloud sign-ins), no MCP servers, no Slack, your repository read-only, and the network
-only for the package registries its project installs from (PyPI, npm, crates.io's index and
-downloads, Go, and the hosts you list under *Other hosts fixes may download from*). Its tools use
-workers' own package caches, as a sandboxed worker's do; yours stay read-only. This computer's own
-servers are reachable only for a repository where you tick *Its tests may use this computer's
-servers*. Chief of Staff publishes what you approve itself, as your account, with git hooks off
-and a push that only goes out if the branch is still where the plan found it. Before the first
-fix on a new version of Copilot, Chief of Staff checks that those limits hold on this computer;
-until they do, nothing is prepared.
-
-**What those limits don't stop.** A fix's tests run your project's code, and its dependencies'. The
-registries it may reach take uploads from anyone with an account of their own there (an npm or
-RubyGems publish), Go's module proxy fetches any module path it is asked for, and Go's large
-downloads come from a storage host (storage.googleapis.com) that takes uploads to a link someone
-else signed. So code that means to can still carry what is in the checkout out through those hosts,
-by its author's account; none of your accounts can be used for it. A registry that needs your
-sign-in to download from can't be used while it prepares: when its install fails for that, its PR's
-row says so, and no fix is tried there for a day.
-
-**Levels and credits.** For each kind (*CI failures*, *Review comments*): *Off*, *Suggest* (it
-offers *Fix it*) or *Prepare* (it prepares at once). Work you didn't ask for spends at most
-*Credits it may spend a day without asking* (0 by default: only when you click). A fix you ask
-for is always charged to your day, and every attempt stops at a fixed amount of credits.
-
-**Your message comes first.** Write to the worker, or press *Stop*, and the attempt stops at
-once; your own new tasks take its place when workers are busy. Stopped for your message or task,
-it is tried again once the worker is free, if still needed; after *Stop*, not by itself. A
-worker you close gives its PRs back to you, paused; reopened, they are its again. *Pause
-watching* (at the end of Settings → Connections) pauses Prepared for you too, as it stops reading GitHub: what it
-had ready is withdrawn, and it looks at your PRs again once you resume. What you
-approved is checked again just before each part of it is sent: turned off, paused, *Stop
-looking after this PR*, or the PR changing hands withdraws what hasn't gone out yet (a reply
-waiting its turn to be sent too), and nothing goes out more than an hour after you approved it:
-its row then says *Not sent: you approved it over an hour ago*, and *Review again* offers what
-didn't go out for you to approve again. If Chief of Staff stops while it publishes what you approved, it reads on GitHub what went out
-when it starts again (a reply only as your account's, since it began to go out, with exactly
-its text: when two could be it, the attempt says it can't tell), and sends the rest once, within
-that hour (replies to a fix whose push did not go out are not sent). While **Update and
-restart** waits for the turns running to end, no attempt starts.
-
-**Replies and the AI line.** The first time it would post a reply in a repository, the review
-asks whether replies there say they were drafted with an AI assistant; your answer is kept per
-repository (Settings → General → *Keep my PRs moving* → *Options* → *Repositories*). Replies you post are learned from,
-as your edits to drafts are.
-
-**Merge when ready** is per PR, in its ⋯. It merges only the commit you accepted (by accepting
-the task's result, or *Accept this commit…* after looking at what changed), or fixes you approved
-on top of it, once its checks pass, its reviews approve and GitHub would merge it. It never
-merges a commit nobody approved: a teammate's push pauses it until you accept the new commit.
-Bases that merge through a queue are not supported yet. A PR in a stack on GitHub (its lower PRs
-merged already) merges through GitHub's merge for stacks, at that same commit; while a PR below
-it in its stack is still open, its row waits for that one to merge first, since GitHub would
-merge it too.
-
-**Your other PRs.** With *My other open PRs* ticked, Home has a *Prepared for you* section of
-your other open PRs in your repositories that need something (CI failing, comments to answer),
-read on GitHub at no credit cost: three rows, then *All found…*, which also lists those it can't
-take yet and why (a fork, stacked, a draft). *Hand to a worker* starts a task of yours that
-checks the branch out in a worktree of its own; the PR then is that task's, and kept moving as
-above. You can also ask the Router: "keep acme/api#117 moving".
-
-Not yet: PRs from forks, stacked PRs, Codex or Claude workers (Codex has no sandbox for it, and
-Claude Code's can't keep commands from your keychain), and making any change without your
-approval.
-
-## Watches: what to look out for
+### Watches
 
 Settings → Connections → *Watches* says what to look out for, in your words: "Slack DMs and
-mentions of me", "comments on my Google Docs", "emails from customers". Optionally say with
-what: "Glean search", "the Slack MCP server", your company's own search. Chief of Staff's
-connector checks them on a schedule (every 5 minutes in work hours, every 30 after; both
-settable, 0 turns after-hours checks off; weekends count as after hours: Settings says
-*Weekend: every 30 min*, or *Not scanning now* and why when after-hours checks are off) with
-whatever MCP servers, skills and CLIs your
-Copilot has here, so it works without a Slack token wherever your company gives Copilot a
-search. *Scan now* saves the watches as written and checks at once. You can also ask the
-Router ("watch #deploys for payment failures"): it proposes the watch on a card under *Needs
-you*, and *Submit* adds it (edit it first if you like); a watch you have already is not added
-twice, and a card that a restart ended unanswered is told to the Router, which can propose it
-again.
+mentions of me", "comments on my docs", "emails from customers", and optionally with what tool.
+Chief of Staff checks them on a schedule (every 5 minutes in work hours, every 30 after; *Scan
+now* checks at once) with the MCP servers, skills and CLIs your agent has, and turns what needs
+you into tasks and drafts. You can also ask the Router ("watch #deploys for payment failures"):
+it proposes the watch on a card. More: [Reference →
+Watches](reference.md#watches-what-to-look-out-for).
 
-What needs you (a question, a request, a mention that expects your answer) goes to the Router,
-like a Slack event. It has a worker look into it, read the conversation and draft the reply in
-your voice. Where Chief of Staff can send it (Slack connected), you approve and it is sent;
-otherwise approving copies it for you to paste. Bots, FYIs and what you already answered are
-left alone (the connector reads a message's thread and leaves out what you answered there), and
-nothing is handed over twice. A watch whose tool is missing here says so under *Watches*. The
-connector only looks: it never posts, replies or reacts. It reads other people's messages, so
-it runs sandboxed with network to GitHub only, whatever the worker sandbox setting.
+### When you're away
 
-Each watch is searched from where its last complete search ended (up to a week back), not only
-the last day, so a slow day of searches does not skip anything: a search that could not cover
-everything (a tool that returns only the newest results, a failed page) does not count as done,
-and that time is searched again. Time that still cannot be searched after a few tries (or that
-the tool cannot reach back to) is kept as a gap: Settings → *Watches* lists it, and you are told
-("Could not check “#deploys” for 6 hours, between 3:00 PM and 9:00 PM", the end's day too when it
-is not the start's); a gap that keeps growing is told
-again once it doubles or passes an hour or a day, with all of it ("Still could not check…"). A
-gap an earlier version kept (told only when it began, or taken for told at a length it had
-grown to) is told once more, all of it, at the first scan after the update, if it is still open
-or was told shorter than it is (*Told before; the full range is: …*); not one of a watch you
-removed.
+Turn on Settings → Connections → *When you're away* and say how to reach you ("DM me on Slack
+through our team's bot plugin", or "send it to my own Slack DM"). After some minutes without
+keyboard or mouse, what needs you is sent there once, as a short list, each item with a code of
+its own. Answer where you got it: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2,
+"K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task. A code works once,
+and only for what it came with; anything else you write there is never taken as a command. *Send
+a test* tries the way you gave. More: [Reference → When you are
+away](reference.md#when-you-are-away).
 
-It also collects what you write there (your own messages only), so *How you work* learns your
-voice even where Slack is reached through another tool.
+### Send to Chief
 
-## When you are away
+Hand over work from wherever you are without switching to Home. Turn it on in Settings →
+Connections → *Send to Chief from the command line* (macOS and Linux), then:
 
-Turn on Settings → Connections → *When you're away* and say how to reach you, for example
-"DM me on Slack through the acmebot plugin". After that many minutes without keyboard or mouse
-(on Linux, where Chief of Staff can't read those: without using its page, as the setting says),
-what needs you (cards, questions from workers, a question the Router asked you in the chat,
-tasks you stopped, failed tasks (of the last three days, as under *Needs you*)) is sent to you
-that way, once: a
-short gist of up to five items (*and 3 more*),
-each with a code of its own (random, five letters, for that item only, valid for a week). Answer
-where you got it with the code: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2 of a
-decision, "K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task,
-"K3XQ7 go on" or "K3XQ7 cancel" does what *Go on* or *Cancel* does with a task you stopped. A code
-works once, and only for what it was sent with. A question that comes up again (its task asked
-something new) is sent again. What your answer to a draft means (send it, drop it, change it, or
-not clear) is the messenger's reading of your words, in any language: "ship it", "发吧", "say
-Friday instead"; one message can answer several codes ("K3XQ7 send, B4XJT no"). Each answer is
-read once, and a code's latest answer is the one that counts. A send you hold back or make
-conditional ("after lunch", "tmrw", "先别发", "once Bob confirms"), a question back ("send?")
-and a joke are never sent, whatever the reading; nor is a draft that still has a blank to fill
-("[yes / no]", "___"). Such an answer is asked again where you got it, saying why ("Not sent
-yet: “after lunch” sounds like not now"); an answer to a code you already used says what it
-did. *Send a test* tries the way you gave (a test that fails is said
-as such in the chat, each time). Without a bot that can message you, say "send it to my own
-Slack DM": with Slack connected in Settings, Chief of Staff sends it there through its own Slack
-connection and reads your answers there; you see it without a phone notification.
-
-The notifications are sent by a messenger of their own, not the connector: it is given only
-Chief of Staff's message, in a file (plain text, Slack formatting and Block Kit to choose from),
-and follows your worker sandbox setting, so a company bot's command-line tool works (with the
-sandbox off, it runs as in your own sessions). It has no Slack tools of its own: for your own
-Slack DM it asks Chief of Staff to send the message there (nothing else, to nobody else) and to
-read what you wrote there since. An item counts as sent only once the messenger
-says it went out; a failed send is tried again ten minutes later. The messenger also reads your
-answers, the way it sent (the bot's DM, your own DM), every few minutes for the first hour
-after a notification, then every half hour, while you are away and for a day after; your own
-DM (and the threads of the notifications in it) is checked every few minutes all day, and read
-when you wrote something new there. A reply with no code answers the only code that waits;
-with several waiting, you are asked which. Written in Chinese, you
-get the notifications in Chinese. The chat notes each one. When sending fails, the chat says so
-once, and until a notice goes out again the sidebar and the *When you're away* row in Settings
-say so in red (*Away notice not delivered · 12 min ago*), with why on hover. Where they go is
-said as the way only (*Slack DM to you*), never one message's ids.
-
-Each item in a notification says what it is (*Needs your input*, *Failed*, *Stopped*…), the
-task it is about, what it needs in a sentence or two (whole sentences, not a heading such as
-"Issue:") and where to answer it (*Open Needs you → Fix deployment compatibility issue*).
-
-Settings → *When you're away* shows what the way you gave can do, as tried (by *Send a test*
-and by every notification since), not as assumed: *Send* (a message goes out), *Delivery* (it
-can be read back where it went), *Read replies* (your answers there are read) and *New
-commands* (no, by design: only answers with a code act). When replies cannot be read it says
-*Send only*: notifications then carry no codes (none are even made) and do not suggest
-replying; each says where to go in Chief of Staff. When some notification threads could not be read (or there was more than
-one page of messages), it says *Coverage limited* and how much, and those messages are read
-again later: an answer there is not taken for read until it was.
-
-## Send to Chief
-
-Hand Chief of Staff work from wherever you are, without switching to Home: a note, and a link
-or text you pass along. Turn it on in Settings → Connections → *Send to Chief from the command
-line*; it says once what it does and saves only when you press *Turn on*. It needs
-macOS or Linux: on Windows a Unix socket cannot tell who connects, so it stays off. Then:
-
-```
+```bash
 chiefofstaff send "fix the flaky login test in acme/api"
-chiefofstaff send "review this" --url https://github.com/acme/api/pull/7 --title "Speed up exports"
+chiefofstaff send "review this" --url https://github.com/acme/api/pull/7
 pbpaste | chiefofstaff send "answer Maya with the outcome" --text-from -
 ```
 
-Started with `uvx chiefofstaff`, there is no `chiefofstaff` in your shell: run
-`uv tool install chiefofstaff` once, or `uvx chiefofstaff send …` (Settings shows what works here).
+Started with `uvx`, there is no `chiefofstaff` in your shell: run `uv tool install chiefofstaff`
+once, or use `uvx chiefofstaff send …`.
 
-What you send becomes one request for the Router, as a message on Home does: the note is your
-request; the link, its title and the text (`--text-from FILE`, or `-` for what comes in on
-standard input) are material it passes along, never instructions, and without a note the Router
-takes the item as "take care of this". A pull request link is followed as a delegated Slack
-message's thread is, a Slack message link names its thread, and an issue is named by its
-reference. Anything risky it asks for, your note's requests too, is confirmed with you first: a
-note sent from outside Chief of Staff is only as surely yours as your computer is. The work it
-starts runs with your settings, as any task does. It waits for the Router to finish what it is
-doing, and several sent at once come as one turn. Home shows one line per item in the chat
-(*Sent from the command line: …*), which opens to what you sent; nothing else.
+**From a hotkey:** bind `/full/path/to/chiefofstaff send "$1"` (`command -v chiefofstaff` prints
+the path) to a key with macOS Shortcuts (*Ask for Input*, then *Run Shell Script* with input as
+arguments, then *Add Keyboard Shortcut*), Raycast, Alfred, or a custom shortcut on Linux.
+Step-by-step recipes for each, and one that sends the front browser tab: [Reference → From a
+hotkey](reference.md#from-a-hotkey).
 
-It reaches the running Chief of Staff on this computer only, through a socket in its data
-directory that only your user can use (see [SECURITY.md](../SECURITY.md#send-to-chief)); pass
-`--data-dir` when Chief of Staff runs with one. The command prints *Sent to Chief of Staff.* when
-Chief of Staff took the item, and otherwise why not, with your note so nothing is lost. It
-exits with:
+### Your other sessions
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Sent, or taken already (the same note and link sent again within ten minutes is taken once) |
-| 2 | Usage: nothing to send, a link that is not http or https, a note longer than 20,000 characters |
-| 3 | Chief of Staff isn't running, Send to Chief is off, or something other than your Chief of Staff is at its socket: nothing was sent |
-| 4 | More than 10 items in a minute or 300 in a day: not taken |
-| 5 | Chief of Staff is reconnecting to Copilot: not taken, try again in a moment |
-| 6 | *Delivery unconfirmed*: the request went out and no answer came, even after two more tries with the same item |
+*Other sessions* in the sidebar lists the sessions you started yourself in a terminal (Copilot's,
+and Codex's and Claude Code's while those agents are on), the ones open now first, each with
+where it stands: asking you, working, idle, done. Open one to read it. **Send it a message to
+continue it here**: it becomes a worker, with its conversation so far. While a session is open in
+a terminal, Chief of Staff only reads it: continue there, or exit it there to message it here.
+More: [Reference → Your other sessions](reference.md#your-other-sessions).
 
-After *Delivery unconfirmed*, run the same command with the `--item` it prints: Chief of Staff
-takes an item once, and answers a repeat with the same receipt. Nothing is queued: when Chief of
-Staff is not running, the command says so at once. Text longer than an item holds (20,000
-characters, or 64 KB) is cut, and the command says so.
+### How it learns you
 
-Other tools can send with plain HTTP over the socket (`POST /v1/send`, JSON with `item`, 32
-hexadecimal characters you make once and keep for retries, and `note`, `url`, `title`, `text`):
+- **How you write.** Every two hours (or *Learn now* in Settings → You) it reads what you wrote:
+  your Slack messages, PR reviews, commit messages, what you asked your own Copilot sessions, what
+  you told the Router. Only your own words. Your writing style applies to drafts at once.
+- **How you work.** Instructions you keep giving ("run a small smoke job first") become
+  **habits**, which wait for your OK under *Your OK*.
+- **Your profile.** Settings → You → *Build from my work* distills a short profile from your
+  projects and activity; sessions use it once you approve it.
+- **Checks learned from mistakes.** When a worker's failing test passes after its fix, a helper
+  proposes a check (a shell command) that fails on the mistake. It runs on both versions before
+  you see it: it must fail on the code with the mistake and pass on the fix. *Use this check*
+  turns it on, and from then on a worker in that repository that reintroduces the mistake is sent
+  back before you see its result.
 
-```
-curl --unix-socket "$HOME/Library/Application Support/chiefofstaff/send/socket" \
-  -H 'Content-Type: application/json' -d '{"item": "…", "note": "…"}' http://chief/v1/send
-```
+Everything learned is listed in Settings → You, where you can edit or remove it. More:
+[Reference → How you work](reference.md#how-you-work-learned-and-kept-up-to-date), [Checks
+learned from mistakes](reference.md#checks-learned-from-mistakes).
 
-curl does not check who answers at that path; `chiefofstaff send` does, before it writes a byte.
+## Agents: Copilot, Codex and Claude
 
-### From a hotkey
+<a id="workers-on-other-coding-agents"></a>
 
-Each of these calls the command by its full path (`command -v chiefofstaff` prints it), since
-launchers do not read your shell's `PATH`:
+Workers, and Chief of Staff's own sessions (the Router, the Watchdog, the Slack session, the
+watcher and the helpers), run on any of three coding agents, each with your own sign-in and plan:
 
-- **Shortcuts (macOS):** a new shortcut with *Ask for Input* (text, "What should Chief of Staff
-  do?"), then *Run Shell Script* with *Pass Input* set to *as arguments* and the script
-  `/full/path/to/chiefofstaff send "$1"`. Shortcuts asks once to let it run scripts (Settings
-  → Advanced → *Allow Running Scripts*). In the shortcut's details, *Add Keyboard Shortcut*.
-- **Raycast:** a script command (save it in a script folder you added to Raycast):
-
-  ```bash
-  #!/bin/bash
-  # @raycast.schemaVersion 1
-  # @raycast.title Send to Chief
-  # @raycast.mode compact
-  # @raycast.argument1 { "type": "text", "placeholder": "What should Chief of Staff do?" }
-  exec /full/path/to/chiefofstaff send "$1"
-  ```
-
-  Give it a hotkey in Raycast's settings; its last line of output is shown when it ends.
-- **Alfred:** a workflow with a *Keyword* input (with an argument), connected to *Run Script*
-  (`/bin/bash`, input *as argv*) running `/full/path/to/chiefofstaff send "$1"`, and a
-  *Hotkey* trigger if you like; a *Post Notification* output shows what it printed.
-- **Linux:** a custom keyboard shortcut (GNOME: Settings → Keyboard → Custom Shortcuts) running
-  `sh -c 'note=$(zenity --entry --title="Send to Chief" --text="What should Chief of Staff do?") && notify-send "Chief of Staff" "$(/full/path/to/chiefofstaff send "$note" 2>&1)"'`.
-
-**The front browser tab** (macOS): the same, with the tab's link and title read by AppleScript
-and passed along. In a *Run Shell Script* (or the script above), before the command:
-
-```bash
-# Chrome:
-url=$(osascript -e 'tell application "Google Chrome" to get URL of active tab of front window')
-title=$(osascript -e 'tell application "Google Chrome" to get title of active tab of front window')
-# Safari:
-url=$(osascript -e 'tell application "Safari" to get URL of current tab of front window')
-title=$(osascript -e 'tell application "Safari" to get name of current tab of front window')
-
-/full/path/to/chiefofstaff send "$1" --url "$url" --title "$title"
-```
-
-To add text you copied first, pipe the clipboard in: `LC_ALL=en_US.UTF-8 pbpaste |
-/full/path/to/chiefofstaff send "$1" --url "$url" --title "$title" --text-from -` (launchers run
-scripts without a locale, and `pbpaste` then writes accents and curly quotes in Mac Roman, not
-UTF-8). macOS asks once to let the launcher control the browser (Automation); no browser
-extension is involved, and the browser only answers the launcher's question.
-
-## Abilities: skills, plugins and MCP servers
-
-Copilot workers load everything your own Copilot sessions load: your plugins, skills, MCP servers
-and agents, your company's, and a repository's own. Settings → Connections → *Skills, plugins and MCP
-servers* adds more: add a skill (*Add a skill…*: paste a `SKILL.md` with a name and a
-description, or upload one; one with the name of a skill you have is refused, not replaced), name
-folders of skills (*Skill folders*, folded), list Copilot plugins to install
-(`owner/repo`, `owner/repo:path`, `name@marketplace` or an https git URL; installed with
-`copilot plugin install`, each with its status), and MCP servers as in Copilot's
-`mcp-config.json`, checked as Copilot checks them (`tools` and `args` lists of strings, `env` and
-`headers` objects of strings, `timeout` in whole milliseconds): Copilot never starts on a message
-to a session with one wrong field, and says nothing. If a worker's message is not started on
-within a minute and a half anyway, the worker and its task show that as a failure (not
-*working* forever): fix the setting and *Retry*. A settings change, or *Stop* then *Go on*, sends
-what it was not started on again on a new connection with the settings as they are then. They
-run as they do in your own sessions: add only what you would install
-for yourself.
-
-## Images
-
-Paste or drop screenshots into the chat (PNG, JPEG, GIF or WebP, up to 5 MB, five at a time).
-The Router sees them, and a worker it gives them to gets them too; a message straight to a
-worker (@) brings them along.
-
-## Following threads
-
-A Slack thread, a Slack DM or a pull request can be *followed* by a session. New activity there
-goes straight to it; the Router is not woken (its timeline shows one line).
-
-- A worker follows every PR its task is to act on (review it, check it, fix, merge or watch
-  it), every PR it opens or reports, and the PR of a review you sent; not a PR its task only
-  mentions for context (a link to write into a file, *see #60*). A session follows a Slack
-  conversation after you approve a reply it drafted there.
-- The Router passes an event's thread keys when it hands work to a session.
-- For PRs: new comments, replies, reviews, commits, CI results (checks and commit statuses, also
-  when a check passes on a re-run) and the merge or close arrive; your own reviews and comments
-  do not come back as news. The worker tells you each time, even when its task is finished: news
-  as a line in the chat ("CI passes now"), and a question when you should decide how to go on
-  (someone answered your comment: reply, re-review, approve, or leave it), often with a reply
-  drafted. A merged PR does not accept its task for you: it waits for your *Accept* (merging
-  and accepting are separate).
-- A PR merged or closed before it was followed is let go at once when a task only names it. One
-  a worker was asked to follow (with `follow_thread`, or handed over by the Router to watch it)
-  stays followed for two weeks if it is closed, not merged: its reopening (and comments on it)
-  is news. After two weeks it is let go, and its worker's chat and the Router's say so.
-- A task card's PR chips (a review task's card shows the PR it reviews) show the PR as it is
-  now: read again every few minutes and as soon as something happens on it, judging each check
-  by its latest run. "What's the status of my PRs?" is answered from that, not from an earlier
-  report.
-- When a follower closes, activity goes to the Router again.
-- A PR that cannot be read says why on its task's card: GitHub says this account cannot read it
-  (permission), it does not exist (not found), GitHub's rate limit, or GitHub did not answer
-  (a timeout, an outage). It is read again later, each wait longer than the last up to an hour
-  (a rate limit: when GitHub says it resets); *Retry* reads it now. A PR GitHub says three times
-  in a row does not exist is let go, and its worker is told. The first good read clears the
-  warning at once. *Stop following* lets go of it for that task only; once nobody follows it,
-  what was kept for reading it is cleared.
-
-## Watchdog
-
-Every minute a cheap check (no model) looks at each working worker: no activity for 15 minutes,
-the same step repeated, the same instructions for 45 minutes, or a turn that ended without a
-report. Activity is what its session does, not only what its chat shows: a model call is work
-while it is open, a command while its output still grows, and a worker waiting for another
-worker it works with is not stopped. A flagged worker is reviewed by the Watchdog session, which
-is told what the worker is at (*in a turn since 12:37 (model call since 12:37)*) and its latest
-reports, and decides: on track, nudge (into the worker's current turn, also one at work on a
-follow-up of finished work), interrupt a hung step and nudge, or escalate to the Router. A
-worker flagged as quiet is looked at again just before that: still at work, nothing is sent.
-After two nudges without a new report the problem goes to the Router. It does not coach a worker
-that is making progress, however long it takes; a nudge says why it stepped in (*Watchdog ·
-looks stuck*, and the evidence). A worker waiting for your word on its folder's settings is left
-alone: its card under *Needs you* has it. Its switch, the agent it runs on, its model and effort
-are its row in Settings → Agents & models → *Who does the work*; *Its activity* (its session) is
-just below.
-
-## What runs without asking
-
-**Whatever the mode**, no worker does these as you on its own: comment on, review, merge or
-close a PR (`gh pr comment|review|merge|close`), open, change, comment on or close an issue
-(`gh issue create|edit|comment|close`), write through `gh api` or GitHub's MCP server, force-push
-a branch that isn't its own (`--force-with-lease` too), or push to `main`/`master`. Chief of Staff
-refuses it and the worker asks you, or hands you the text as a draft to approve. Its own
-branches it pushes to as it likes, and it opens PRs and reads anything; a push whose branch the
-command doesn't say plainly is refused too, saying so. The same for workers on Codex (whose
-ChatGPT apps are off for that reason) and Claude Code.
-
-**With *Ask first*** (yolo off), workers ask before risky commands: Chief of Staff also refuses,
-and the worker asks you: writes outside its folders, `sudo`, any force push, piping downloads
-into a shell, system-level destructive commands and `gh issue delete`. Workers that read Slack cannot fetch URLs, and their
-network reaches only GitHub when sandboxed. These checks read commands as text, which can't be
-fully parsed: the push and delete checks are a best effort (a push whose branch a command doesn't
-say plainly, a script fed to a shell on a line that pushes, and a command line too long or
-complex to check, are refused, saying so; what they don't read:
-[Known limits](../SECURITY.md#known-limits)). Protect your default branch on GitHub as well.
-
-**Yolo** is on by default: workers act without asking, as in your own agent sessions (the *Ask
-first* checks don't run). Tick *Ask first* in Settings → General, whose line says which way it is
-and, under it, what holds either way (*no worker posts, reviews or merges on GitHub as you, pushes
-to main, or force-pushes others' branches*); or choose per worker in its header's **⋯**: *Yolo
-(acts without asking)* or *Ask first (asks before risky commands)*. Workers that read Slack keep
-the checks unless you choose yolo for them there. Either way, the sandbox applies when it is on;
-a worker is kept out of a checkout of yours given to read and out of Chief of Staff's private
-files; a *Prepared for you* step can't reach GitHub; and the Router never asks a worker to merge
-or force-push.
-
-Nothing is sent as you without your approval: what Chief of Staff sends itself (a Slack reply, a
-PR review or reply from its card, what *Prepared for you* publishes) goes only once you approve
-it (a reply to a message you reacted to for it is approved by your reaction), and no worker gets
-your Slack connection. Write tools of MCP servers you added yourself are the exception: they run
-as in your own sessions ([Known limits](../SECURITY.md#known-limits)). See
-[SECURITY.md](../SECURITY.md) for which of these boundaries the OS enforces and which rely on the
-model.
-
-## Models and usage
-
-Settings → *Agents & models* sets them. *Who does the work*, at the top, has a row for each kind of
-work: *New workers*, then Chief of Staff's own sessions: the *Router*, the *Watchdog*, *Slack* (the
-session that drafts your Slack replies), *Watch for you* and the *Helpers* (they learn how you
-work, suggest checks and your profile, and message you when you're away). Each row has where it
-*Runs on* (any agent on: see [Workers on other coding agents](#workers-on-other-coding-agents)),
-then its *Model* and *Effort* on that agent. The menus list the models that agent offers and the
-efforts the chosen model offers (*Auto*, which picks a model each turn, takes none); the first,
-*Default*, is the agent's own default model, named where known. Switching *Runs on* shows that
-agent's models; what a row had on each agent is kept, for when it runs there again. A value saved
-that its agent no longer lists stays as saved, said *not offered now*, until you change it. The
-*Default* model of before (Copilot's, for a session without one of its own) is gone: on updating,
-each row that took it got it as its own, and so did *Watch for you* and the *Helpers*, which took the
-workers' model, so nothing changes until you change it. Copilot's row below (unfold it with **›**)
-has the *Limit per worker (credits)*. A session's **⋯** (top right; on Home, the Router's) switches
-its model, effort and context window (where the model has a long-context tier). The Router may
-choose a stronger or cheaper model or effort for one task.
-**Usage** (the chart icon, bottom left, with today's credits) totals credits by session, task,
-model and role for any date range; every task shows its own credits (hover its time). Premium
-requests are counted as Copilot counts them: one for each message a session is sent, at its
-model's multiplier, not for the calls the model makes on its own after it. The totals also show
-compactions (Copilot summing up a long conversation) and how many tokens were fresh, read from
-the prompt cache or written to it. *Tasks with spend in this range* says what the credits went
-to: tasks finished and accepted (what each cost), tasks in progress, and what no task spent (the
-Router, Watch for you, …). A worker's row unfolds to the tasks its credits went to. It includes
-what a worker used while you had it open in a terminal, read from Copilot's log (also from
-before Chief of Staff was running). An optional credit limit per worker (Copilot's row) stops
-runaway workers.
-
-## Workers on other coding agents
-
-Your workers can also run on [Codex](https://developers.openai.com/codex/cli), OpenAI's coding
-agent, or on [Claude Code](https://docs.claude.com/en/docs/claude-code), Anthropic's, each with
-your own sign-in, and so can every one of Chief of Staff's own sessions: the Router, the Watchdog,
-the Slack session, *Watch for you* and the helpers. Every worker shows the agent it runs on (Copilot
-too): a small diamond of its colour on its sidebar row, a chip on its line in your chat, its name in
-its header. Codex and Claude Code run on macOS and Linux; on Windows, Chief of Staff runs on Copilot
-for now.
-
-**Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once per agent:
-*Codex is ready. Allow workers to use it?* *Allow* makes it available (new workers and Chief of
-Staff's own sessions stay where they run); *Not now* leaves it off and is not asked again. Settings →
-*Agents & models* has, under *Who does the work*, a row per agent installed (with Copilot alone, only
-Copilot's, and a line saying which others it runs on; one not installed has none, but for one still
-on, *Not installed*, so you can turn it off): its status in a few words
-(*Ready*, *Sign in needed*, *Not installed*, *At its limit · resets …*, *Setting up Claude…*,
-*Can't run here*), a small
-meter of the most-used of its plan's limits (each limit and when it resets on hover or focus), its
-one action (*Sign in*: see **Signing in and installing from here** below) and *Use*, which turns on
-only once it is ready (turning it off always works, whatever its status; what ran on it moves to the
-first agent on, as the page shows before you save).
-What costs money or stops its work is a line under it, never folded away: a limit reached with
-extra usage carrying its workers on, a limit used up, a rate limit, a sign-in ending within a
-week, why it can't run here. Unfolded (**›**): a *Limit per worker* in tokens (empty: none); then its
-version, how it is signed in, whose plan or key it uses and *Sign in again*, or, not ready yet, its
-command with *Copy command* to run it in a terminal yourself instead. *New workers* in *Who does the
-work* says the agent new work uses (Copilot by default; each agent on, one that can't run now with
-its status, "Codex · Sign in needed"; picking one turns it on; or *Last used*: the agent you last
-chose for a worker), its model and effort there (also what `@codex` uses for one task), and whose
-plan it uses. A changed model or effort reaches the workers on that agent that have none of their
-own, and each of Chief of Staff's own sessions, from their next turn. A worker keeps the agent it
-started on.
-
-**Without Copilot.** Chief of Staff needs one coding agent, not Copilot in particular. At its first
-start it runs on the first one installed and signed in (Copilot, then Codex, then Claude Code) and
-says so in your chat (*Chief of Staff runs on Codex (uses your ChatGPT sign-in).*); with none ready,
-Home's *Set up a coding agent* card says what each needs, and Chief of Staff starts by itself once
-one is ready (or *Retry*). With Claude Code alone, signed in, on an install without the Claude
-extra, it turns Claude on and sets it up first (**Setting up Claude**): Home says *Setting up Claude
-Code* meanwhile, and Chief of Staff starts on it once that is done. Once another agent is here, Copilot's row has *Use* too: turned off,
-Copilot is never started, its workers at work stop (their tasks wait under *Needs you*) and Chief of
-Staff's own sessions go on with the next agent on; the last agent on can't be turned off. While
-Copilot is on but signed out, not installed or unable to start (also when it stopped answering and
-the new Copilot Chief of Staff starts can't run), Chief of Staff runs on the next agent on meanwhile (its row says why, and each session that moved says so in one line), Copilot is tried
-again by itself, and what was chosen for it goes back to it once it runs; what you send a Copilot
-worker meanwhile waits for it. What needs Copilot for now: *Prepared for you* still finds what
-needs doing but prepares no fixes (its steps run in Copilot's sandbox); *Where your other sessions
-stand* and learning from your own sessions read Copilot's sessions; credits and premium requests
-are Copilot's (Usage counts other agents' tokens). With Codex alone, turning on the worker sandbox
-(Workers) keeps Codex workers from starting: Codex's sandbox hasn't passed Chief of Staff's checks
-yet. On Windows, Chief of Staff runs on Copilot for now.
-
-**Signing in and installing from here.** Wherever an agent says *Sign-in needed* (the `@` list, the
-chip's popover, a card in your chat, its row in Settings), *Sign in* runs that
-agent's own sign-in for you, as its workers run it (your `CODEX_HOME` or `CLAUDE_CONFIG_DIR`):
-`codex login`, or `claude auth login --claudeai`. It opens the agent's own sign-in page in your
-browser; the dialog has *Open sign-in page* and *Copy link* too, a *Paste code* field where Claude
-asks for the code its page shows, and *Show output*. You sign in on that page; Chief of Staff never
-signs in for you and never reads an agent's sign-in (Claude's tokens or keychain above all): it only
-runs the agent's program and its status command. The agent turns *Ready* by itself as soon as you
-have (its status is looked at every second or two meanwhile, again when you come back to the page or
-open the `@` list, and before a worker starts on it). *Other ways*: for Codex, *Use a code instead*
-(`codex login --device-auth`: a page and a one-time code, for when you use Chief of Staff from
-another device) and *Use an API key* (it goes to `codex login --with-api-key` on its input, never on
-a command line, and Chief of Staff keeps no copy); for Claude, an Anthropic Console account (`claude
-auth login --console`). `codex login` signs you out of Codex as it begins, so signing in again asks
-first, and *Cancel* says it leaves Codex signed out. *Install* shows the official installer's
-command, word for word, before anything runs (Codex's `curl -fsSL
-https://chatgpt.com/codex/install.sh | sh`, Claude Code's `curl -fsSL https://claude.ai/install.sh |
-bash`; Homebrew or npm under *Other ways* where you have them), runs it with its output shown, finds
-the agent where installers put it (also outside the folders your terminal had on its path when Chief
-of Staff started; that folder goes after yours, so your own programs stay first), and goes on to
-*Sign in*. On Windows it shows the PowerShell command to copy.
-
-Copilot has the same *Sign in* and *Install* (Home's card when no agent can run yet, and Copilot's
-row in Settings): *Sign in* runs `copilot login --device-code` and shows its page and one-time code
-(*Sign in in the browser instead* under *Other ways*); once you've entered it, Chief of Staff starts
-on Copilot by itself, with no *Retry* and no restart. *Install* runs Copilot's official installer
-(`curl -fsSL https://gh.io/copilot-install | bash`; npm or Homebrew under *Other ways*; on Windows,
-`winget install GitHub.Copilot` to copy), then goes on to *Sign in*. Home's card lists each agent
-with what it needs and its button; the commands, to run in a terminal yourself, stay under *Or in a
-terminal*.
-
-**Updating an agent.** An agent older than the versions Chief of Staff was tested with says so
-(Codex and Claude Code can't run then; Copilot runs, with a line in the sidebar) with *Update*. It
-shows the agent's own updater, word for word (`copilot update`, `codex update`, `claude update`), and
-that it updates the agent for everything on your computer that uses it, then runs it only once you
-say *Update*, with its output and a result: the agent turns *Ready* by itself (Copilot's new version
-runs from its next start), or it says why not, with *Try again* and the command under *Details*.
-Where Claude Code says when your sign-in ends, the `@` list says so from a week before ("Claude
-sign-in ends Dec 11"); with `ANTHROPIC_API_KEY` set where Chief of Staff runs, Claude's workers use
-that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)"); with
-`CODEX_ACCESS_TOKEN` set, Codex's workers use that token over your `codex login` ("Uses your access
-token (CODEX_ACCESS_TOKEN)"). `CODEX_API_KEY` and `OPENAI_API_KEY` don't change what Codex workers
-use (only `codex exec` reads the first), so nothing is said of them.
-
-**Setting up Claude.** Claude workers also need Anthropic's Agent SDK for Python (Chief of Staff's
-Claude extra). While Claude is on for workers (or any of Chief of Staff's own sessions runs on it)
-and the SDK is missing, or is a version this release was not tested with, Chief of Staff installs the
-tested one by itself: as it starts, as you turn Claude on, or when you click *Retry*. Claude's row
-says *Setting up Claude…* meanwhile (usually under a minute), then *Ready*, with no restart. With
-Claude off, its row says *Not set up yet*: turning on *Use* sets it up (turning it off
-again before it is done stops it). It installs only
-the version its Claude extra names, into its own environment (a `uv tool`, pipx or other virtual
-environment: with `uv pip install`, or that environment's `pip`). Started with `uvx`, whose
-environment lives in uv's cache, it installs into a folder of its own in its data folder instead,
-read after its own packages, so nothing it already has is replaced. It tries once by itself per
-Chief of Staff version (an update that dropped the SDK is set up again as the new version starts).
-Where it can't (no network, no space, no `uv` or `pip`), the row says why in a few words ("Couldn't
-set up Claude: no network") with *Retry*; *Details* has what the installer said and, as a last
-resort, the command to run yourself (`uv tool install 'chiefofstaff[claude]'`, or the one for how you
-installed Chief of Staff). A task for Claude meanwhile waits a little for the setup, then goes as when
-Claude can't run, saying *Claude is being set up*.
-
-**Choosing it for one task.** Type `@` in Home's message box: it lists every agent first, each with
-its status (*Ready*, *Sign-in needed*, *Not installed*; one not ready is dimmed: picking it signs in
-or installs it), then your workers, and marks the agent the Router runs on (*Router*). Arrows, Enter
-and Escape work in the list and in the chip's popover. The agent you pick becomes a chip above the
-box ("On Codex", × removes it), and the Router starts that work there; click the chip to pick
-another agent, or that agent's model and effort, with whose plan it uses under them. Saying so works
-too ("do this with Claude"). The chip wins over the Router's own choice. Claude's models are its
-aliases, each with the exact model it stands for now ("Opus (now claude-opus-5-5)": it follows
-Claude Code's updates), and those exact models, to pin one ("claude-opus-5-5 (pinned)"); the first
-choice is what Settings chose ("Settings: Opus (now …)"), or Claude Code's own default where Settings
-chose none. Each worker shows its agent's mark (a small diamond of its colour, its model on hover)
-on its sidebar row, its tasks and its header, and a chip on the line that says it started in your
-chat, Copilot's too, also once it is closed.
-
-**Comparing two agents.** Pick two agents (`@codex`, then `@claude`: "Compare on Codex and
-Claude"), or say "do this with Codex and Claude": the same task runs on each, a worker each in a
-worktree of its own, each a row of its own in the sidebar with a small ⇄ (the other side on
-hover); the Router gives
-you both results side by side once both have reported.
-
-**Starting over on another agent.** Until a worker has done anything (no step yet), its line in
-your chat and its header show its agent as a chip: *Restart on Claude* (or another agent that can
-run it) starts the same task there at once, with the first worker closed; its header's chip also
-picks that agent's model and effort. Once it has begun, *Continue with…* is what moves it.
-
-**When it can't run.**
-
-- An agent you named that is signed out or not installed: your message is saved. Its card in your
-  chat says so ("Codex needs you to sign in. Your message is saved: “Count the rows” starts on Codex
-  once you have.") with *Sign in* (or *Install*), *Don't run it*, and *Continue with Copilot* (or
-  the agent new workers start on, where that is another that can run it). Once you have signed in,
-  it starts there by itself, once, after a few seconds' *Resuming… Cancel* (Cancel keeps it for you
-  to start), and the card says *Resumed after sign-in*; it is listed under *Handled for you*. Only
-  work that had not begun goes on by itself: a task whose turn had already run something is never
-  sent again (its sign-in lost mid-turn says *Sign-in needed* at once; *Go on* is yours). Work for a
-  worker you have on that agent gets the same card (it gets your message once you have signed in),
-  with *Continue with Copilot*: a new worker there goes on from a summary of its work, with what it
-  was given. One that can't run for another reason (too old, turned off) says why, with *Wait* or
-  *Run on Copilot instead*, and nothing starts elsewhere.
-- The agent new workers use cannot run: they start on the next agent on that can (Copilot, Codex,
-  Claude Code, in that order), their line in your chat says why, and so does *New workers* in
-  Settings ("New workers start on Copilot (Claude Sonnet 5.5, uses your Copilot plan) until then:
-  Codex is not signed in.").
-- A plan's usage limit used up, or a rate limit the agent gave up on, in the middle of a task:
-  the worker pauses, saying which limit and until when ("Codex's weekly limit is used up · resets
-  tomorrow 11:11 AM", in your local time; Codex's limits are read when it doesn't say them first).
-  Where the agent said when, it goes on by itself then, once (under *Monitoring* until then; at
-  that time Codex is asked again, and a limit not reset after all is waited for again), unless you
-  or another worker have told it something since; it is listed under *Handled for you*. *Continue
-  with Copilot* (or another agent that can run it) moves it over now; *Go on now* is in its **⋯**.
-  Where the agent didn't say when (a rate limit, or Claude without its reset), its card says so
-  plainly and waits under *Needs you* for *Go on* or *Continue with*. Until the limit resets, the
-  `@` list, the chip's popover and the chip say so ("Weekly limit used up · resets tomorrow 11:11
-  AM"); you can still pick that agent: work you name it for is saved with its card ("Your message
-  is saved: … starts on Codex once it resets"), with *Continue with Copilot* and *Don't run it*,
-  and starts there by itself, once, after the reset. Nothing switches by itself.
-
-**Chief of Staff's own sessions on another agent.** In *Who does the work*, each of them runs on
-any agent on (Copilot by default). Where it needs nothing but Chief of Staff's own tools (the
-Router, the Watchdog, the Slack session, and the helpers that only read what they are given: the
-learner and the checker), it runs there with nothing but those, as on Copilot: none of the agent's
-commands, files, web search, subagents, hooks or MCP servers; the Slack session's Slack reads are
-Chief of Staff's own tools, which call Slack with the token Chief of Staff holds (no agent's
-settings ever hold it). *Watch for you*, the profile helper and the messenger work as workers do
-(*Watch for you* reaches your world with the MCP servers and tools of the agent it runs on: set up
-your Slack, mail or search servers there). The switch needs nothing from you: a fresh session on
-that agent takes over (the Router's with a summary of what it knew: your open work, cards,
-decisions and your conversation), your chat stays one, and one line in it says so ("The Router
-runs on Codex now, with a summary of what it knew."). Its **⋯** then lists that agent's models; it
-uses the *Model* and *Effort* of its own row on that agent unless you pick one there. Its spend is
-tokens on that agent (in *Usage*), with no limit per worker.
-If the agent can't run it (signed out, not installed, a plan's limit reached, its process stopped,
-a turn that lost its sign-in), it goes on with the next agent on that can, in the order Copilot,
-Codex, Claude Code, by itself, with what it was answering (a helper with its job), says why in one
-line ("The Router runs on Copilot for now: Codex is not signed in: …", also under its row in
-Settings, with that agent's model and whose plan it uses), and goes back by itself once the agent
-can (once the limit resets; at once when you sign in here, within a couple of minutes when you sign
-in elsewhere). Each agent that failed one is tried again for it after a wait that grows with each
-failure in a row, also across a restart. At the foot of *Who does the work*, *If its agent can't
-run it* chooses that (*Use another that can, and tell me*, the default) or *Wait, and ask me*: the
-Router, the Watchdog or the Slack session waits instead, what it is sent kept, one card in your
-chat saying why ("The Router waits for Codex. Codex needs you to sign in. What it is sent is kept
-until then.") with *Sign in* and *Use Copilot until then* (the agent that can run it meanwhile).
-With no agent on that can run it, it waits that way whatever you chose, and goes on by itself once
-one can. *Watch for you* and the helpers run now and then: they always go on with another agent
-that can. An agent it runs on that is not ready shows *Sign in* in its row (not installed, the
-command that installs it, unfolded). The agent compacts a long conversation itself, where on
-Copilot the Router moves to a fresh session with a summary. Turning an agent off puts what ran on
-it on the first agent on; so does `chiefofstaff --prepare-downgrade` (on Copilot).
-
-**Continue with another agent.** An idle worker's **⋯** has *Continue with Claude…* (or another
-agent on), and you can ask the Router ("hand this to Claude"). A dialog says in one line what
-goes ("Sends a summary (180 words) and its changes (3 files, +40 −12) to a new Claude worker in a
-copy of its worktree; this one stays open."), then a new worker on that agent goes on from that
-summary (its task, reports, last messages, and each folder's branch and uncommitted changes) in a
-copy of its worktree: the same commit, its uncommitted changes and new files. This one stays
-open, as it was. One that works in your own folder (in place) hands that folder over and closes,
-so two workers never write the same one. Its open tasks are the new worker's now (what waited for
-them waits for the new one; a paused one leaves *Needs you* and no longer goes on at its reset),
-and continuing it again opens the worker it went to rather than making another.
-
-**Usage.** Each agent's row says how much of its plan's limits is used and when they reset,
-where the agent says it (Codex reads its own rate limits; Claude's come from what its workers
-last heard), with a chip from 80%. Chief of Staff never reads a sign-in for this. A worker's
-spend is in tokens, never credits: its header (against its limit, if it has one), its tasks'
-hover tips and a part of its own in *Usage*; the daily summary adds them on a day with some.
-
-**What each needs:** macOS or Linux.
-
-- **Codex:** the Codex CLI 0.167.2 or later, signed in (`codex login`). Chief of Staff runs
-  nothing of Codex where it was never set up (no `~/.codex`, or `CODEX_HOME`): any run would
-  make that folder. For Home's first-run card it runs only `codex --version` and
-  `codex login status`. Only once you open Settings → *Agents & models* does it start Codex to
-  read its models and limits, without Codex's plugin sync (Codex still refreshes its own model
-  cache then).
-- **Claude:** Claude Code 2.1.322 or later, signed in by running `claude` in a terminal. What
-  Claude workers need of Chief of Staff's own (Anthropic's Agent SDK for Python, its Claude
-  extra) it sets up by itself while Claude is on, nothing to run: see **Setting up Claude**
-  below. For Home's first-run
-  card Chief of Staff runs only `claude --version`, and `claude auth status` where Claude was set
-  up (its `.claude.json` is there). Claude workers use
-  whatever your `claude` is signed in with: a Claude plan, an API key, Amazon Bedrock, Google
-  Cloud, Foundry or a gateway. Chief of Staff has no sign-in of its own for it and never reads
-  yours. On a Claude plan, Claude workers count against your plan's usage limits, under
-  Anthropic's terms.
-
-**What differs from a Copilot worker:**
-
-- **Spend limit:** a worker with a limit stops once it has spent it. It may pass it by the model
-  call in flight, and by what its subagents spend before they stop (on Claude, also by their
-  output since its last answer, which Claude counts only then). Tokens are counted as each agent
-  counts them, cached input included. If the agent stops in the middle of a turn, what it spent
-  then is not known: a worker with a limit then waits under *Needs you* until you say *Go on* (or
-  *Retry*, if it failed). Without a limit that is recorded and shown in *Usage*, and nothing
-  waits.
-- **Ask first:** every command, edit and MCP call asks Chief of Staff, which answers as for a
-  Copilot worker, on the versions its check showed doing so (Codex before 0.168; Claude from
-  2.1.322, each version checked on this machine, without a model, before its first worker). A
-  check that could not finish (a machine busy with other work) is tried again by itself, and
-  whenever a worker or the Router wants that agent; what waits for it goes on once it has run.
-  Codex: its subagents are off for such a worker (ChatGPT's apps are, for every worker), and your
-  own Codex rules and `PermissionRequest` hooks can allow what those checks would refuse. Claude: your own Claude
-  hooks are off for such a worker (one could approve what Chief of Staff refused); its name's
-  tooltip says so. A version that is not shown to ask first runs workers that act on their own;
-  their **⋯** says why *Ask first* is off. Codex takes up a switch to *Ask first* only in a new
-  process: a worker at work then stops (with what it left running), and *Go on* continues,
-  asking first.
-- **Sandbox:** as for a Copilot worker, with the sandbox off a worker's commands run as you and
-  can delete any file you can; the sandbox on prevents that. Claude workers run in Claude's own
-  sandbox, set as Chief of Staff's is for a Copilot worker (writes only in its folders, your
-  secrets unreadable, the network as Settings says; your checkout given to read stays read-only
-  even as the folder its commands run in), on a version whose check showed it holding. Codex
-  workers can't run while Settings → General → *Sandbox* is on (Codex's sandbox has not passed
-  Chief of Staff's checks yet); with it off they run as Copilot workers do then, with your caches,
-  tools and network (`danger-full-access`), and every edit and every command that writes still
-  asks Chief of Staff, so your own checkouts stay read-only to them. Your own Codex `sandbox_mode`
-  and Claude `sandbox` settings are not applied: Chief of Staff sets each of Claude's sandbox
-  switches itself, and while the sandbox is on, a Claude worker does not start where your Claude
-  settings (yours, a trusted project's, managed ones) add to its sandbox's lists
-  (`excludedCommands`, `allowedDomains`, `allowWrite`, …) or set a proxy port, allow edits by an
-  absolute path (`Edit(//…)`, `Edit(~/…)`) or add directories (`additionalDirectories`), or, for a
-  worker whose network is limited, allow web domains (`WebFetch(domain:…)`): Claude would merge
-  them with Chief of Staff's. One line says which setting, in which file, and what it would let
-  workers do, on Claude's row in Settings → *Agents & models* and where such a worker would have
-  started ("Your Claude settings let workers write outside their folder
-  (permissions.additionalDirectories in ~/.claude/settings.json), so sandboxed Claude workers
-  can't start."). Those files are read as Claude reads them (with a byte-order mark, at any size;
-  a sandboxed worker doesn't start where one is over 16 MB). A sandboxed Claude worker runs no
-  hooks, yours included: Claude runs them outside its sandbox (a trusted repository's, its skills'
-  and subagents', a plugin's) and can only turn them all off. Claude's row says so in one line
-  ("Sandboxed Claude workers don't run hooks."), and the worker's name's tooltip too. Claude Code
-  itself, at a sandboxed worker's first command in a git repository, adds one line,
-  `**/.claude/.cc-writes/`, to your global git ignore file (`core.excludesFile`, else
-  `~/.config/git/ignore`), unless git already ignores that folder. It also makes an empty
-  `.claude/.cc-writes/` folder, where it stages whole-file writes, in the worker's folder and in
-  the repository's main checkout; git shows neither. No setting of Claude Code 2.1.322 turns this
-  off. Nor does a worker's process update anything (`DISABLE_AUTOUPDATER`: Claude itself, your
-  plugins, their marketplaces); your own sessions keep those. What any session of a signed-in
-  Claude keeps up to date, a worker's does too: in `~/.claude.json`, the time Anthropic's server
-  last confirmed your Consumer Terms answer (`groveChoiceSeenAt`, an hour's cache; a session
-  without a terminal never marks their notice as seen, it only says to run `claude`), and, with
-  skills synced from claude.ai, those skills in `~/.claude/skills/synced/` (turning that
-  off for workers would hide those skills from them). Codex's commands run without a login shell,
-  with the environment and `PATH` a Copilot worker's commands get; Codex puts its own helpers
-  first on `PATH` and sets a few variables of its own (such as `LANG` and `LC_ALL` to `C.UTF-8`,
-  `TERM=dumb`, `PAGER=cat`).
-- **Workers that read Slack** run on any agent, as other workers do, and ask first unless you
-  set it otherwise for one: on Copilot and on Claude their commands run in the sandbox, with the
-  network limited to GitHub, as always; on Codex, which has no sandbox Chief of Staff checked,
-  every command, edit and MCP call they make asks Chief of Staff first, which refuses fetching
-  URLs and network commands for them, but Codex itself runs its own read-only commands (`cat`,
-  `ls`, `grep`) and reads its MCP servers' resources without asking. Their Slack reads are Chief
-  of Staff's own tools on every agent.
-  See [SECURITY.md](../SECURITY.md).
-- **Memory:** Codex's memories and Claude's auto memory are off in Chief of Staff's workers
-  (Codex's run commands nobody is asked about; Claude's folder is shared with your own sessions).
-  Your own sessions keep theirs.
-- **Repositories:** a repository's own settings (Codex's `.codex/`, Claude's `.claude/` and
-  `.mcp.json`) load only where you trust its folder in that agent (a worktree as its repository
-  is trusted). Elsewhere none of them loads, and the repository's `AGENTS.md` or `CLAUDE.md`
-  reaches the worker as text: a message marked as the repository's, with any tag in it escaped,
-  so it can't pass as yours or as Chief of Staff's. Codex workers run without the sandbox, so
-  their threads trust Codex's as your own Codex sessions do. With the sandbox on they would load
-  only as you last let them, as for Copilot's: a `.codex/` folder that changed since (or that Chief of Staff sees for the first
-  time, outside a folder it made) is not loaded for the worker, and its timeline says "Codex
-  settings in this folder changed (changed .codex/config.toml), so Codex won't load them for this
-  worker until you say to use them". **Use these settings** on that line loads them from its
-  next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or
-  Codex's settings folder.
-- **Questions:** a worker asks you with the same card as a Copilot worker's, and an MCP server's
-  form reaches you too. An MCP server that needs a sign-in has a card under *Needs you* (Your OK),
-  as for Copilot's: its *Sign in* runs the agent's own `codex mcp login <name>` or `claude mcp login
-  <name>` for you, in the worker's folder, shows the server's page to open, and answers the card
-  once you've signed in there (the agent keeps the sign-in). The command, to run in a terminal
-  yourself (then *I signed in*), is under the card's *Details*.
-- **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
-  worker's checkouts (receipts, *Storage*, removed with the others). Claude makes one
-  (`EnterWorktree`, a subagent isolated in a worktree) in its repository's main checkout, which
-  for a worker in a worktree of Chief of Staff's is your own: that is refused, and the worker
-  makes it in its own folder (`git worktree add .claude/worktrees/<name>`) and enters it by its
-  path. What it schedules (`/loop`,
-  a reminder) runs as a turn of its own, admitted, shown and stopped as any: *Stop* holds it
-  until you say *Go on*; *Cancel*, *Set aside* and closing the worker end it, and delete it in
-  Claude too, with one short turn of the worker's (Claude would bring it back when the session
-  is resumed); one meant to outlive the worker (`durable`) is refused. With the worker sandbox
-  on, Claude's own settings in a worker's folder (`.claude/settings.json`,
-  `.claude/settings.local.json`, `.mcp.json`, `.claude/agents/`), which Claude loads as its
-  process starts and whose hooks and servers it runs outside its sandbox, are held as Copilot's
-  are (see [Where workers work](#where-workers-work)): one that changed keeps the worker waiting,
-  with "Claude settings in this folder changed (added .mcp.json); Chief of Staff won't start the
-  worker there until you say to use them." and **Use these settings**; an MCP server whose files
-  changed is off for it instead. With the sandbox off (the default) its commands run as you, so
-  they neither hold it nor are checked. A sandboxed worker's commands use
-  workers' own caches, as a Copilot worker's do. Another Claude session's message is shown
-  labelled with the name it gives itself, unverified (any program of yours could send it), never
-  as yours, and can approve nothing; a message to a session that isn't one of your workers asks
-  you each time. In plan mode the worker reads and writes only its plan, and removes no
-  worktree, until the plan is approved (when the worker acts on its own, at once; under *Ask first*,
-  by you); its subagents get Chief of Staff's rules; a cloud agent or a routine needs your OK
-  each time. Receipts show no exit code where Claude gives none (a `grep` that found nothing,
-  say).
-- **Continue in a terminal** (**⋯**) copies the agent's own command (`codex resume <thread>`, or
-  `cd <folder> && claude --resume <id>`); while it is open there, Chief of Staff writes nothing
-  to it, and it shows what you did there before its next message. A Claude worker with turns
-  scheduled is not handed over until they are deleted in Claude: they would go on in your
-  terminal. Nor, with the worker sandbox on, is one whose folder's settings of its agent changed
-  (they would load there): its timeline then has the line with **Use these settings**.
-- **Your own sessions:** *Other sessions* lists your own Codex and Claude sessions too.
-  Adopting a Claude session goes on in that session (not while it is open elsewhere); a Codex
-  thread goes on in a new thread of Chief of Staff's with its conversation, and yours stays as it
-  was. A worker on another agent has no search of your past Copilot sessions.
-
-**Turning one off** stops its workers at once, with what they left running, and ends its
-processes; their chats, tasks and usage stay. *Go on* works again once it is back on.
-
-**Before installing an earlier version**, stop Chief of Staff and run
-`chiefofstaff --prepare-downgrade`: it stops the workers on other agents that were at work and
-checks that none of their processes is left. An earlier version can't go on with those workers:
-0.1.45 and 0.1.46 run Codex workers but refuse Claude's, and earlier versions run every worker on
-Copilot, without its conversation. Close those you no longer need. If Chief of Staff was killed,
-run it (or `--prepare-downgrade`) once with this version first: it keeps its record of those
-processes in a form 0.1.46 and earlier cannot read, so they would not end what they left running.
-With no worker ever on another agent, it says there is nothing to prepare.
-
-## Daily summary and your profile
-
-At the configured time (default 09:00) the Router posts one summary: what finished (your tasks,
-not Chief of Staff's own helpers' nor those cancelled since), what waits for you (results to
-accept, as *Needs you* shows them: a report that only informs is not one), how much was handled
-for you (what [Handled for you](#your-ok-and-handled-for-you) lists for that day, less what you
-undid), how many tasks are running, credits used. Quiet days post nothing.
-
-**Build from my work** (Settings → *You* → *Your profile*) starts a worker that distills a short profile
-from your projects, GitHub activity, recent Copilot sessions and, with Slack, how you write. It
-arrives as a card under *Needs you*: correct anything, then *Use this profile*; sessions use it only
-then. Your edits to Slack drafts also teach the Slack session your
-style.
-
-## Settings and environment variables
-
-Most settings are in the UI. Environment variables for tuning and tests:
-
-| Variable | Default | Meaning |
+| Agent | Sign in with | Uses |
 | --- | --- | --- |
-| `CHIEFOFSTAFF_SLACK_USER_TOKEN` | | Slack user token instead of the keychain |
-| `CHIEFOFSTAFF_SLACK_MCP_URL` | Slack's | Another Slack MCP endpoint (tests) |
-| `CHIEFOFSTAFF_EVENT_DEBOUNCE` | `2` | Seconds events for the Router wait to batch |
-| `CHIEFOFSTAFF_ROUTER_CONTEXT` | `150000` | Router context (tokens) at which a fresh Router takes over |
-| `CHIEFOFSTAFF_QUESTION_TTL` | `7200` | Seconds before an unanswered question between sessions expires |
-| `CHIEFOFSTAFF_REQUEST_TIMEOUT` | `3600` | Seconds a session waits on a card for you (a worker's question then stays under *Needs you*) |
-| `CHIEFOFSTAFF_WATCHDOG_INTERVAL`, `_STALL`, `_LONG`, `_COOLDOWN` | `60`, `900`, `2700`, `600` | Watchdog timing (seconds) |
-| `CHIEFOFSTAFF_MIN_FREE_MEMORY` | `10` | New worker turns wait while less memory than this (percent) is free; `0` turns it off |
-| `CHIEFOFSTAFF_RELEASE_IDLE_MINUTES` | `10` | A quiet worker lets go of its Copilot session after this long |
-| `CHIEFOFSTAFF_DISK_WARNING_GB`, `_WARNING_PERCENT` | `30`, `5` | Below this much free space (whichever is more) the disk is low: an alert |
-| `CHIEFOFSTAFF_DISK_CRITICAL_GB`, `_CRITICAL_PERCENT` | `10`, `2` | Below this, new worker turns wait for space |
-| `CHIEFOFSTAFF_UPDATE_CHECK` | | `0`: never read PyPI for a newer release (tests), whatever Settings says |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli) | `copilot login` | Your Copilot plan (premium requests, shown as credits) |
+| [Codex CLI](https://developers.openai.com/codex/cli) | `codex login` | Your ChatGPT sign-in, or an API key |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code) | `claude auth login` | Your Claude plan, or an API key |
 
-Chief of Staff removes its own `CHIEFOFSTAFF_*` variables from the environment Copilot and its
-commands run in.
+Codex and Claude Code run on macOS and Linux; on Windows, Chief of Staff runs on Copilot for now.
 
-## Updating
+**Turning one on.** Once Codex or Claude Code is installed and signed in, Home asks once:
+*Codex is ready. Allow workers to use it?* Settings → Agents & models has a row per agent with
+its status (*Ready*, *Sign in needed*, *At its limit · resets …*), a meter of its plan's limits,
+*Sign in* (which runs the agent's own sign-in, in your browser) and *Use*. Claude workers also
+need Anthropic's Agent SDK for Python; Chief of Staff installs the tested version by itself when
+you turn Claude on (*Setting up Claude…*, usually under a minute).
 
-When a newer release is out, one quiet line at the bottom of the sidebar says so. Started with
-`uvx`, installed with `uv tool` or pipx, or with pip into a virtual environment of its own,
-**Update and restart** does the rest: once the turns running end (the line says which:
-*Restarting after the Router's turn ends…*; two minutes at most, a turn still running then goes on
-after the restart; *Cancel* stops waiting), Chief of Staff gets the new version (`uvx
-chiefofstaff@<version>`, `uv tool upgrade chiefofstaff`, `pipx upgrade chiefofstaff`, or that
-environment's `uv pip` or `pip install --upgrade chiefofstaff`), stops as on Ctrl+C and starts
-again in its own place: the same terminal, port and private link. The page reloads by itself,
-every session goes on as after any restart, and Home says it updated (or why it couldn't: it then
-runs the version it had).
+**One is enough.** Chief of Staff needs one coding agent, not Copilot in particular. With
+several, Copilot's row has *Use* too, and you can turn it off.
 
-**A restart loses no message.** A session at work as Chief of Staff stops (or as it crashes, or as
-its agent does) is given again, once, what that turn was given and did not finish, as soon as its
-agent has it open again: your message to the Router, the Router's to a worker, a report to the
-Router, with one line in its chat (*Chief of Staff restarted; asked the session to continue.*);
-what its agent's own record shows it finished is not given again. Until then it says
-*Reconnecting to Codex…* (or its agent's name), never *Thinking…*, and what it was given waits to
-be sent; a reconnect that takes long is tried again by itself, waiting longer each time, and
-*Retry* tries at once. A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
-given waits for its next message. Installed into a system's Python, or on Windows, the line says
-the command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
-start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
-most once a day, and sends nothing about you or your machine; *Say when a newer Chief of Staff is
-out* (Settings → General → More) turns it off. When Copilot can't start at all, the error says the
-command that updates Chief of Staff.
+**Who does the work.** Settings → Agents & models → *Who does the work* has a row for *New
+workers* and one for each of Chief of Staff's own sessions: the agent it runs on, its model and
+its effort. For one task, type `@codex` or `@claude` on Home (a chip says *On Codex*; click it
+for the model and effort), or just say it: "have Codex add rate limiting".
 
-Your Copilot CLI updates itself, and the Copilot SDK Chief of Staff is built on can lag behind it.
-Chief of Staff tells which protocol your CLI speaks before starting it, and runs it when it speaks
-that protocol (protocol 4, Copilot 1.0.113 and later, through a small adapter of its own). For a
-CLI newer still it runs Copilot 1.0.112 instead, with the same sign-in, settings and sessions:
-set up ahead, in the background (about 100 MB, once), so an update of your CLI costs no wait.
-Offline, it runs the newest Copilot already on your machine that it speaks. One line under the
-status says so while your own CLI is not the one running.
+**Compare.** Pick two agents (`@codex`, then `@claude`), or say "do this with Codex and Claude":
+the same task runs on each, a worker each in its own worktree (⇄ in the sidebar), and the Router
+gives you both results side by side.
 
-## Data
+**Move work.** Until a worker has done anything, its chip offers *Restart on Claude*. After that,
+*Continue with…* in its **⋯** hands its work to a new worker on another agent, from a summary of
+what it did.
 
-Everything stays on your machine, in the data directory (`--data-dir`, default per
-`platformdirs`, e.g. `~/Library/Application Support/chiefofstaff`): a SQLite database with
-sessions, tasks and timelines, workspaces under `work/` and, while Send to Chief is on, its
-socket in `send/`. Conversations themselves are
-stored by Copilot in `~/.copilot/session-state`; every session is a real Copilot session
-(`copilot --resume <id>` works).
+**When an agent can't run** (signed out, not installed, its plan's limit reached):
 
-A worker's Copilot session can grow very large over weeks of work (hundreds of MB). What such a
-session received is read from its own log, never asked of Copilot whole. Should Copilot still
-stop answering after reopening one, Chief of Staff starts a new Copilot by itself and the other
-workers go on; that worker is not reopened again: its task says *Waiting for you: its Copilot
-session is too large to reopen here*, and its chat says so with *Start a fresh worker with its
-context*, which goes on with its task in a fresh session, told where it was. Chief of Staff's
-page opens even while Copilot is slow to start (you can ask once it is connected), and stopping it
-never waits on Copilot for more than a few seconds.
+- **New work** starts on the next agent on that can, in the order Copilot, Codex, Claude Code,
+  and its line in your chat says why. Work you named an agent for waits for it instead, with
+  *Sign in* and *Continue with Copilot* on its card, and starts there by itself once it can.
+- **Work in progress** that hits a usage limit pauses and says until when. Where the agent says
+  when its limit resets, the worker goes on by itself then; *Continue with Copilot* (or another
+  agent) moves it now. Nothing switches agents mid-task by itself.
+- **The Router and Chief of Staff's own sessions** go on with the next agent that can, say so in
+  one line, and go back by themselves once theirs can.
+
+**Usage.** Each agent's row shows how much of its plan's limits is used and when they reset.
+Copilot work counts in credits; Codex and Claude work in tokens, shown on each worker and in
+*Usage*. A *Limit per worker* (unfold the agent's row) stops a worker once it has spent it.
+
+**What differs.** Workers on Codex and Claude Code follow the same floor and the same
+*Ask first* checks. Some things stay Copilot's: Copilot plugins, premium requests (credits),
+learning from your past Copilot sessions, *Show where my other sessions stand*, and preparing
+fixes in *Keep my PRs moving*. Codex can't run workers while the worker sandbox is on (its
+sandbox hasn't passed Chief of Staff's checks yet).
+
+Everything else, including signing in and installing from Chief of Staff, API keys, setup
+failures, roles' fallback choices and downgrading: [Reference → Workers on other coding
+agents](reference.md#workers-on-other-coding-agents).
+
+## Settings
+
+Settings (the gear at the bottom of the sidebar) has four pages.
+
+| Page | What is there |
+| --- | --- |
+| **General** | *Code folder*; *Workers at once*; *Ask first* and *Sandbox* (see [Safety](#safety-and-privacy)); *Keep my PRs moving*; *A busy worker's new task starts at once*; *Daily summary*; desktop notifications. Under *More*: when finished workers close, when a task is *Overdue*, *Show where my other sessions stand*, update notices, other project folders, where task folders go |
+| **Agents & models** | Each agent's status, sign-in and *Use*; *Who does the work*: the agent, model and effort for new workers and for each of Chief of Staff's own sessions; what happens when an agent can't run |
+| **Connections** | *Slack*, *GitHub reviews*, *Watches*, *When you're away*, *Skills, plugins and MCP servers* (more for workers; plugins are Copilot's), *Send to Chief from the command line*, and *Pause watching* to stop all of them at once |
+| **You** | *Learn from what I write*, *Learn now*, checks from mistakes; what was learned (writing styles, habits, checks, your profile); *Shared links* |
+
+**Usage** (the chart icon) shows credits and tokens by day, task and agent. **Storage** (the disk
+icon) shows free space and each worker's folder: Chief of Staff deletes build output when a
+worker closes or idles for three days, alerts you when the disk runs low, and lets you clean or
+keep a worker's files.
+
+Workers on Copilot load what your own Copilot sessions load: your plugins, skills, MCP servers
+and custom agents, your company's, and a repository's own; workers on Codex and Claude Code use
+their agent's own configuration in the same way ([Reference → Workers on other coding
+agents](reference.md#workers-on-other-coding-agents)). Gitignored files a worktree needs
+(`.env`, `.env.*`, or what a `.worktreeinclude` lists) are copied in from your checkout.
+
+Environment variables (Slack token, timeouts, the Watchdog's timing, disk thresholds) are listed
+in [Reference → Settings and environment
+variables](reference.md#settings-and-environment-variables).
+
+## Safety and privacy
+
+Chief of Staff runs agents on your machine with your accounts. What keeps them in bounds, and how
+firmly (the operating system, Chief of Staff, or only the agents' instructions), is in
+[SECURITY.md](../SECURITY.md). In short:
+
+**The floor, always, on every agent.** No worker comments on, reviews, merges or closes a PR as
+you, opens, changes or comments on an issue, writes through `gh api` or GitHub's MCP server,
+force-pushes a branch that isn't its own, or pushes to `main`/`master`. Chief of Staff checks
+every command and tool call of every worker and refuses these; the worker asks you or hands you a
+draft instead. It pushes its own branches and opens PRs.
+
+**Your voice needs your OK.** Slack replies and PR reviews go out only from a draft you approve
+(Chief of Staff refuses Slack's write tools; no agent is ever given your Slack token). The one
+exception is the one you choose: a 🤖 reaction is your OK for the one reply to that thread.
+
+**Your checkouts stay yours.** Workers work in their own worktrees. A worker that only reads your
+checkout can't write there; a test it runs there runs in a copy.
+
+**Ask first** (Settings → General; off by default) has workers ask before writes outside their
+folders, `sudo`, any force push, piping a download into a shell, and other risky commands. Off,
+workers act without asking, as your own sessions of those agents do; the floor holds either way.
+Choose it per worker in its header's **⋯**. Workers that read Slack ask first unless you set
+otherwise for one.
+
+**Sandbox** (Settings → General; macOS and Linux) runs workers' commands in an OS sandbox: they
+write only in their own folders, never see your GitHub token, and can't read your SSH keys. Codex
+can't run workers while it is on (its sandbox hasn't passed Chief of Staff's checks yet). Workers
+that read Slack are always sandboxed on Copilot and Claude, with the network limited to GitHub;
+on Codex they run without a sandbox and ask first. Turn it on for repositories you don't trust:
+with it, settings a worker writes into its folder (hooks, MCP servers) never load without your
+word.
+
+**Privacy.** Everything runs on your machine and stays in your data folder
+(`~/Library/Application Support/chiefofstaff` on macOS, `~/.local/share/chiefofstaff` on
+Linux). There is no account and no telemetry: your code and prompts go only to the coding agents
+you use, and Slack and GitHub are reached with your own sign-ins. The one call Chief of Staff
+makes for itself is a look at its PyPI page once a day for a newer version, which sends nothing
+about you (Settings → General → More turns it off). Content from Slack, GitHub and the web
+reaches agents marked as data, not instructions; still, delegate only messages you would forward
+to a colleague.
+
+## Sharing
+
+*Share…* on a finished result (in its card's **⋯**, or beside its line in a chat) makes a link
+anyone can open in a browser, with nothing to install or sign in to.
+
+1. The dialog shows the card exactly as others will see it. Whatever looks private (tokens, keys,
+   passwords, internal addresses, email addresses, Slack links) is marked: *Remove* or *Keep*
+   each one; *Create link* waits until every one is decided. Paths on your computer are
+   shortened. Never shared: the worker's conversation, the changes themselves, cost, Slack
+   threads.
+2. Choose how long it works (1, 7 or 30 days) and *Create link*. The card is encrypted and kept
+   in a secret gist of your GitHub account (the one signed in to `gh`); the key is only in the
+   link, after the `#`, so GitHub never sees it.
+3. Turn it off any time (*Share…* on the card, or Settings → You → *Shared links*); it stops
+   working at once. When it expires, Chief of Staff deletes the gist.
+
+Someone with Chief of Staff (0.1.58 or later) can open the link in their own, as a card on Home.
+No GitHub account? *Download HTML file* saves the same card as a file. More: [Reference → Share
+links](reference.md#share-links).
+
+## Troubleshooting
+
+**Chief of Staff is already running.** Started again on the same data folder, it prints the
+running one's link and opens it. **Port 8765 is unavailable**: something else listens there;
+start with another `--port`. To run a second Chief of Staff, give it its own `--port` and
+`--data-dir`.
+
+**Copilot is not signed in** (or another agent says *Sign in needed*). Run `copilot login` (or
+use *Sign in* on the agent's row in Settings → Agents & models). With another agent on, Chief of
+Staff goes on with it meanwhile and comes back to Copilot by itself.
+
+**Your Copilot CLI is newer than Chief of Staff supports.** Nothing to do: Chief of Staff runs a
+Copilot version it speaks, with the same sign-in, settings and sessions, and says so in one line.
+
+**A worker seems stuck.** The Watchdog looks at it every minute and nudges it when it is. *Nudge*
+on its row asks it where it stands now; *Stop* interrupts it, and *Go on* or *Go on with a
+note…* resumes it.
+
+**A message says *Not delivered*.** It was sent twice and the session never showed it; nothing
+is lost without a word. Send it again, or open the worker to see where it stands.
+
+**Work waits for memory or disk.** New work waits while less than 10% of memory is free, or the
+disk is nearly full; running work goes on. Storage (the disk icon) shows what takes the room and
+cleans build output.
+
+**`uvx chiefofstaff` runs an old version.** uv runs what it cached first: use
+`uvx chiefofstaff@latest`, or install it once with `uv tool install chiefofstaff`. `uv cache
+prune` removes old cached versions; never run `uv cache clean` while Chief of Staff is running.
+
+**An agent's settings in a folder changed** (with the sandbox on). A worker whose folder's hooks
+or MCP servers changed waits, and its timeline says what changed; click **Use these settings**
+if you trust the change.
+
+**Update and restart failed.** Home says why, and the version you had keeps running. Installed
+with pip or pipx, update with the command the sidebar shows.
+
+**On Windows**, Send to Chief, the sandbox and folder sizes are unavailable, and only Copilot runs
+workers. See [Reference → Installing and running](reference.md#installing-and-running).
+
+Still stuck? [Open an issue](https://github.com/evanl666/chiefofstaff/issues) with what you did,
+what you saw, and the version (`chiefofstaff --version`).
+
+## FAQ
+
+**Is a worker a real Copilot (or Codex, or Claude Code) session?** Yes. Copilot's show up in
+`copilot --resume` as "Chief of Staff · …"; for a Codex or Claude worker, **⋯** → *Continue in a
+terminal* copies its agent's own command.
+
+**Does it work without Slack or GitHub?** Yes. Both are optional; without them you hand it work
+on Home, by hotkey or from the command line.
+
+**What does it cost?** Nothing itself. Each agent's work counts against your plan with it:
+Home shows the Copilot credits each task used, and Usage every agent's.
+
+**Can I keep using my agents directly?** Yes. Sessions you start in a terminal are yours; Chief
+of Staff lists them under *Other sessions* and writes to none that is open elsewhere.
+
+**Where is my data, and how do I remove it?** In your data folder (`Data:` at startup says
+where), the task folders (`.chief/` in your code folder, unless you moved them) and, for
+conversations, where each agent keeps its sessions. Stop Chief of Staff and delete the first two
+to remove what it made; your own checkouts were never changed.
+
+**How do I go back to an earlier version?** Stop Chief of Staff and run `chiefofstaff
+--prepare-downgrade` first when workers ran on Codex or Claude Code; then install the version
+you want.
+
+**Does it run on a server?** It is made for your own computer: it listens on 127.0.0.1 only,
+behind a private link.

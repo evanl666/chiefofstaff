@@ -20,27 +20,43 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+from . import agents
 from .bus import Bus
 from .models import Settings
-from .runtime import Runtime
+from .runtime import AgentConnection, Runtime
 from .scripted import (
+    AgentLikeBackend,
     CallTool,
+    Profile,
     Say,
     ScriptedBackend,
     ScriptedSession,
     Shell,
     Wait,
     WriteFile,
+    agent_capabilities,
 )
+from .shares import Shares
 from .sources.slack import SlackSource
 from .store import Store
 from .watchdog import WatchConfig
 
 KICKOFF = (
-    "Fix the flaky login test in acme-api, then add rate limiting to login attempts. "
-    "Also compare a few feature-flag services for us."
+    "Fix the flaky login test in acme-api, then have Codex add rate limiting to login attempts. "
+    "Also ask Claude to compare a few feature-flag services for us."
 )
 MAYA_DM = "D0DEMOMAYA"
+# Codex and Claude, scripted as well and ready as if installed and signed in, so the demo has a
+# worker on each of the three agents. As their adapters show them (backend_codex.CODEX,
+# backend_claude.CLAUDE): both steer and give exit codes; Codex chooses its threads' ids.
+DEMO_AGENTS = {
+    "codex": Profile(agent_capabilities("Codex", steering=True), exit_codes=True, assigns_ids=True),
+    "claude": Profile(
+        agent_capabilities("Claude", steering=True), exit_codes=True, assigns_ids=False
+    ),
+}
+# The agent the kickoff names for its tasks (the other one runs where new workers start).
+NAMED = {"Rate-limit login attempts": "codex", "Compare feature-flag services": "claude"}
 ENVELOPE = re.compile(r"<message ([^>]*)>\n(.*?)\n</message>", re.DOTALL)
 ATTRIBUTE = re.compile(r'(\w+)="([^"]*)"')
 
@@ -133,10 +149,17 @@ def make_project(root: Path) -> Path:
 
 
 class DemoBrain:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, store: Store | None = None):
         self.project = str(project)
+        self.store = store
         self.researchers: set[str] = set()  # Workers on the task that stalls on purpose.
         self.reported: set[str] = set()
+
+    def on_agent(self, title: str) -> dict:
+        """The agent the owner named for a kickoff task, while the demo's agents are on."""
+        if title not in NAMED or not self.store or NAMED[title] not in agents.turned_on(self.store):
+            return {}
+        return {"agent": NAMED[title]}
 
     def __call__(self, session: ScriptedSession, prompt: str):
         script = {
@@ -175,6 +198,7 @@ class DemoBrain:
                         "spawn_worker",
                         {
                             "title": "Rate-limit login attempts",
+                            **self.on_agent("Rate-limit login attempts"),
                             "instructions": "Limit login attempts. Build on the login fix.",
                             "project": self.project,
                             "isolate": True,
@@ -190,14 +214,15 @@ class DemoBrain:
                         "spawn_worker",
                         {
                             "title": "Compare feature-flag services",
+                            **self.on_agent("Compare feature-flag services"),
                             "instructions": "Compare three feature-flag services for a small "
                             "team: price, SDKs, self-hosting.",
                             "why_new": "Research, not about the login code.",
                         },
                     )
                     yield Say(
-                        "Started three tasks: the flaky login test, rate limiting once the fix "
-                        "is in, and a feature-flag comparison."
+                        "Started three tasks: the flaky login test, rate limiting on Codex once "
+                        "the fix is in, and a feature-flag comparison on Claude."
                     )
                     continue
                 if "change of plan" in body.lower():
@@ -327,6 +352,14 @@ class DemoBrain:
                         "&& git log --oneline -1",
                         run=True,
                     )
+                    # What the rate limiting, which builds on this fix, needs to know.
+                    found = json.loads((yield CallTool("find_sessions", {"query": "Rate-limit"})))
+                    for match in found.get("matches", []):
+                        if match.get("title") == "Rate-limit login attempts":
+                            yield CallTool(
+                                "tell_session",
+                                {"session_id": match["session_id"], "text": TOLD_RATE_LIMITING},
+                            )
                     yield CallTool(
                         "report",
                         {
@@ -431,6 +464,10 @@ class DemoBrain:
         yield Say("OK.")
 
 
+TOLD_RATE_LIMITING = (
+    "Heads-up: `app/login.py` now takes the clock as a parameter (`now=time.time`). Give the "
+    "rate limiter the same parameter, so its tests don't race the real clock."
+)
 FLAGS_REPORT = (
     "Compared three feature-flag services for a small team.\n"
     "- **Hosted A**: free up to 10 seats, SDKs for all our languages, no self-hosting\n"
@@ -623,6 +660,29 @@ class DemoTokens:
         pass
 
 
+class DemoGitHub:
+    """GitHub as the demo's share links see it: one account signed in; a link is sealed as for
+    real, but its gist is made nowhere (nothing leaves this machine)."""
+
+    async def signed_in(self, fresh: bool = False) -> list[dict]:
+        return [{"login": "you", "active": True}]
+
+    async def gh(self, *args: str, **options) -> str:
+        return "false"  # No repository is private.
+
+    async def bound_user(self, login: str) -> tuple[str, int]:
+        return "demo", 1
+
+    async def raw(self, *args: str, payload: dict | None = None, token: str = "") -> str:
+        if payload is not None:
+            return json.dumps({"id": uuid4().hex})  # The gist a link would be kept in.
+        return "[]" if args[:2] == ("api", "gists?per_page=30") else ""
+
+
+class DemoShares(Shares):
+    github = DemoGitHub()  # type: ignore[assignment]
+
+
 class DemoRuntime(Runtime):
     """The real runtime, with scripted sessions, in-memory Slack and a quick Watchdog."""
 
@@ -649,7 +709,9 @@ class DemoRuntime(Runtime):
                     max_workers=3,
                 )
             )
-        brain = DemoBrain(project)
+            on = {name: {"enabled": True} for name in DEMO_AGENTS}
+            agents.save(store, agents.planned(store, on))
+        brain = self.brain = DemoBrain(project, store)
         super().__init__(
             store,
             bus,
@@ -668,6 +730,25 @@ class DemoRuntime(Runtime):
             return f"{target['url']}#pullrequestreview-demo"
 
         self.github.publish_review = published
+        self.shares = DemoShares(self)
+        # Scripted, they need no Agent SDK or sign-in of their own.
+        self.claude_setup.refused = lambda fresh=False: ""
+
+    def agent_connection(self, name: str) -> AgentConnection:
+        if name not in DEMO_AGENTS:
+            return super().agent_connection(name)
+        return AgentConnection(
+            lambda: AgentLikeBackend(self.brain, DEMO_AGENTS[name]),
+            enabled=lambda: agents.enabled(self.store, name),
+        )
+
+    def agents_found(self) -> list[str]:
+        return list(DEMO_AGENTS)
+
+    async def glance_agent(self, name: str) -> dict:
+        facts = {"version": "demo", "account": "chatgpt" if name == "codex" else "claudePlan"}
+        self.seen_ready(name, facts)
+        return facts
 
     async def start(self):
         await super().start()

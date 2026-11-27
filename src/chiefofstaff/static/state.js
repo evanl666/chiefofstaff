@@ -346,10 +346,12 @@ function handleEvent({ type, data }) {
 // A notification while the page is open: none while the owner focuses (unless urgent), nor where
 // the owner is looking and sees it already: the session it is from (on Home, the Router's: its
 // chat and Needs you), or Home's chat line for news that needs nothing of them.
-function notify({ text = "", session_id: sessionId, needs_action: needsAction, urgent }) {
+function notify({ text = "", session_id: sessionId, needs_action: needsAction, urgent, draft_id: draftId }) {
   const looking = document.hasFocus() && (sessionId === viewedId() || (state.selected === HOME && !needsAction));
   if (!urgent && (focusing() || looking)) return;
-  toast(shorten(firstLine(text) || text, 200), needsAction || urgent ? "attention" : "", sessionId);
+  const node = toast(shorten(firstLine(text) || text, 200), needsAction || urgent ? "attention" : "", sessionId);
+  // The card it announces: once that is settled (answered, sent, dropped), so is its note.
+  if (draftId) node.dataset.draft = draftId;
 }
 // A question one worker asked another waits until its answer comes (Home: "1 waiting 9 min"):
 // as their rows reach the Router, without reading the whole state again.
@@ -397,6 +399,7 @@ export function applyDraft(data) {
   state.snapshot.uncertain = uncertain;
   if (data.status !== "pending" && data.status !== "uncertain") {
     state.leaving.delete(`draft:${data.id}`);
+    document.querySelector(`#toasts .toast[data-draft="${CSS.escape(String(data.id))}"]`)?.remove();
     // Its review view, if one was opened, goes with it.
     document.querySelector(`.review-dialog[data-draft="${data.id}"]`)?.remove();
     if (/^(Withdrawn|Replaced by)/.test(data.outcome || "")) state.draftOutcomes.set(data.id, data.outcome);

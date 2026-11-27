@@ -6364,7 +6364,8 @@ async def main():
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
                           round_router_appears, round_agent_words, round_payload,
-                          round_reconnecting, round_self_handle, round_autopilot):  # fmt: skip
+                          round_reconnecting, round_self_handle, round_autopilot,
+                          round_toast_settled):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -13278,6 +13279,42 @@ async def in_sight(page, locator) -> bool:
           return Boolean(top) && (top === node || node.contains(top));
         }"""
     )
+
+
+async def round_toast_settled(runtime, browser, failures: list[str]):
+    """0.1.61 (seen in the README's clip): the note at the bottom that a decision needs the owner
+    stayed its twelve seconds after it was decided, above the note that said so. A card's note
+    now goes once the card is settled."""
+    store = runtime.store
+    router = store.get("router_id")
+    if runtime.focus.active():
+        await runtime.focus.end()  # (Focus holds notes back.)
+    old = store.settings()
+    new = old.model_copy(update={"max_workers": 1000})  # (Other rounds' workers hold slots.)
+    store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    await expect(page.locator("#application")).to_be_visible()
+    made = await call_tool(runtime, "spawn_worker", router, title="Limit the logins",
+                           instructions="Limit the logins", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    question = "Toast check: limit logins per IP address or per account?"
+    await call_tool(runtime, "ask_decision", worker, question=question,
+                    options=[{"choice": "Per IP address"}, {"choice": "Per account"}],
+                    distinct=True)  # fmt: skip
+    await settle(runtime)
+    note = page.locator(".toast.attention", has_text=question)
+    await expect(note).to_be_visible(timeout=10000)
+    card = [d for d in store.drafts() if d["kind"] == "decision" and d["session_id"] == worker][-1]
+    await page.locator(f'#needs .card.draft[data-id="{card["id"]}"] .option').first.click()
+    await expect(page.locator(".toast", has_text="Decided.")).to_be_visible(timeout=5000)
+    await expect(note).to_have_count(0, timeout=3000)
+    log("a decision's note at the bottom goes once it is decided, not twelve seconds later")
+    await context.close()
 
 
 async def round_long_report(runtime, browser, failures: list[str]):

@@ -84,6 +84,23 @@ Staff.
   as you stop Chief of Staff ends with it, as *Cancel* does: a sign-in no longer keeps waiting on
   its local port.
 
+- **A new README, a short guide, and the full reference.** The README (on PyPI too) shows the
+  real app in a 21-second clip and says what Chief of Staff does in eight lines. The guide is a
+  quarter of its length: quickstart, concepts, daily use, the three agents, settings, safety,
+  sharing, troubleshooting and FAQ. Everything it no longer spells out is in
+  [docs/reference.md](docs/reference.md), nothing dropped, with the README's install notes for
+  Windows and uv's cache, and what was said of Copilot alone now said of every agent. Links into the guide from the app (also from earlier versions) land
+  where they did. On PyPI the README's pictures now show, from the version's own tag.
+- **The demo runs on Copilot, Codex and Claude.** `chiefofstaff --demo` has scripted Codex and
+  Claude too, ready as if signed in: you ask Codex and Claude for two of the three tasks, the
+  login fix tells the rate limiting what it changed, and every agent's chip shows. A share link
+  made in the demo is sealed as for real, but no gist is made: nothing leaves your machine, as the
+  demo says (before, it made a secret gist on the account signed in to `gh`).
+- **A card's note goes once the card is settled.** The note at the bottom of the page that a
+  decision, a question or a draft needs you stayed its twelve seconds after you had answered it,
+  above the note that said so. It now goes as soon as its card is answered, sent or dropped.
+- `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one

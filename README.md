@@ -1,172 +1,175 @@
-# Chief of Staff
+<p align="center">
+  <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/captain.svg" width="360" alt="The captain, Chief of Staff's duck, in its five moods: idle, working, needs you, watching, done">
+</p>
 
-**English** · [简体中文](README.zh-CN.md)
+<h1 align="center">Chief of Staff</h1>
 
-[![PyPI](https://img.shields.io/pypi/v/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![Python](https://img.shields.io/pypi/pyversions/chiefofstaff)](https://pypi.org/project/chiefofstaff/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+<h3 align="center">Your engineering chief of staff.<br>The more it works for you, the more it works like you.</h3>
 
-Your engineering chief of staff. It catches what comes to you (a question in Slack, a PR to
-review, a comment on your doc), gets it done with your coding agent (GitHub Copilot, Codex or
-Claude Code), and answers in your voice: with
-proof of what was done, and only once you say OK. The longer it works for you, the better it
-knows how you work.
+<p align="center">
+  It runs Copilot, Codex and Claude as one team whose agents talk to each other, follows every
+  piece of work through to done, reaches you wherever you are, and brings you only the decisions.
+</p>
 
-**It does the work. It drafts the words. You make the call.**
+<p align="center">
+  <a href="https://pypi.org/project/chiefofstaff/"><img src="https://img.shields.io/pypi/v/chiefofstaff" alt="PyPI"></a>
+  <a href="https://pypi.org/project/chiefofstaff/"><img src="https://img.shields.io/pypi/pyversions/chiefofstaff" alt="Python"></a>
+  <a href="https://github.com/evanl666/chiefofstaff/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/runs-on%20your%20machine-2ea44f" alt="Runs on your machine">
+</p>
 
-<p align="center"><img src="docs/images/captain.svg" width="600" alt="The captain, Chief of Staff's duck, in its five moods: idle, working, needs you, watching, done"></p>
+<p align="center"><b>English</b> · <a href="https://github.com/evanl666/chiefofstaff/blob/main/README.zh-CN.md">简体中文</a></p>
 
-![Home: the chat, what needs you, and every task's live progress](docs/images/home.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.png">
+    <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.gif" width="900" alt="One request becomes a team on Copilot, Codex and Claude; one worker tells another what it changed; one decision card comes to you; the result is accepted on its receipts">
+  </picture>
+  <br>
+  <sub>The real app in demo mode, 21 seconds. <a href="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/hero.mp4">Full quality (MP4)</a></sub>
+</p>
+
+## Try it in 10 seconds
 
 ```bash
-uvx chiefofstaff@latest --demo    # try it with scripted sessions, no sign-in needed
+uvx chiefofstaff@latest --demo   # scripted agents: no sign-in, nothing leaves your machine
+uvx chiefofstaff@latest          # with Copilot CLI, Codex CLI or Claude Code signed in
 ```
 
-## Why
-
-Most of my day isn't writing code. It's answering a question in Slack, reviewing a PR,
-following up on a thread, checking whether a run finished. Copilot can do most of that, but I
-still had to notice each ask, start a session, keep an eye on it and write the reply myself.
-Chief of Staff does the noticing and the follow-through. I talk to one session, the Router: it
-hands each ask to its own Copilot session, keeps track of all of them, and comes back to me
-only with a decision to make or a draft to approve.
+No `uv`? `pipx run chiefofstaff --demo` works too. The browser opens by itself.
 
 ## What it does
 
-**Catches what comes to you**
-- Watches what you ask it to (Slack mentions, doc comments, mail) with any tool your coding
-  agent has, Glean or your company's search included, and turns what needs doing into tasks.
-- React 🤖 to any Slack message, press a hotkey from any app, or just say what you need.
-- Sends a follow-up to the session that did the work, with its history and checkout.
+1. **Learns to work like you, and from its own mistakes.** It picks up how you write (your Slack
+   messages, PR reviews, commits) and what you keep asking for; habits wait for your OK. When a
+   worker fixes a failing test, it proposes a check that fails on the mistake and passes on the
+   fix: proved on both, so that mistake is caught next time.
+2. **A team whose agents talk to each other.** One request becomes parts, each worker on its own agent and
+   worktree. They tell and ask each other directly, wait on each other's results and share your
+   decisions; a live team page shows the plan. Or run one task on two agents and compare.
+3. **Sees it through to done.** It keeps your PRs moving: when CI fails or reviewers comment, the
+   same worker prepares the fix or the replies for your OK (*Keep my PRs moving*). Slack threads
+   and PRs it follows go straight to their worker, check-backs watch long runs, and the Watchdog
+   nudges stalled work.
+4. **Reach it from anywhere.** React 🤖 to any Slack message to hand it over, or send work from
+   any app with a hotkey. When you're away, what needs you comes to you (a Slack DM, say), and
+   you answer right there.
+5. **Only decisions reach you.** One card per question, with options and a recommendation.
+   Workers that hit the same question share it, and your one answer reaches all of them. Every
+   result comes with receipts: the tests, commits and diff it saw, not just what the agent says.
+6. **Never acts as you without your OK.** It drafts Slack replies and PR reviews in your voice and
+   sends them only when you say so. No worker can comment, review, merge or close on GitHub as
+   you, push to `main`, or force-push someone else's branch.
+7. **Share in one link.** A finished result becomes an encrypted link that expires, opened in
+   any browser; whatever looks private is flagged for you to remove first.
+8. **The basics.** Copilot CLI, Codex CLI and Claude Code, mixed per task on the subscriptions you
+   already have; when one hits its limit, new work starts on the next. It continues sessions you
+   started in a terminal. Local, open source (MIT).
 
-**Answers in your voice, once you say OK**
-- Drafts Slack replies and PR reviews, approvals included, the way you write them.
-- Sends them only when you approve; you can edit a draft first.
+## What you stop doing
 
-**Shows proof, not just claims**
-- Shows what was observed next to each report (test runs, commits, diff, PR checks), and flags
-  claims nothing backs.
-- Lets you comment on the diff, send it back, and open the PR in one click.
-- Shares a finished card as a link that expires: encrypted in a secret gist of yours, opened in
-  any browser, with what looks private marked for you to remove first.
-
-**Learns how you work**
-- Picks up how you write and what you keep asking for. Your style applies at once; habits wait
-  for your OK.
-- Turns mistakes workers fixed into checks that catch them next time.
-
-**Guards your focus**
-- Asks only when it needs you: one card per thing, a decision with options and a
-  recommendation, a question, a draft.
-- Reaches you when you are away from your desk (through your company's Slack bot, say) and
-  takes your answers from there.
-- Focus mode holds notifications and gives you one summary at the end; a daily summary says what
-  finished, what waits for you and what was handled for you.
-
-**Keeps many things moving at once**
-- Splits a request into tasks and runs each in its own agent session, in parallel or in order.
-- Shows every task live on one board: what it is doing now, what waits and why, what is done.
-- The captain, the duck beside the name, shows how things stand at a glance: it salutes when
-  something needs you, takes the wheel while work runs, keeps watch while tasks wait, and
-  cheers when a task is done.
-
-**Your coding agent, your machine**
-- Uses the agent you already have, Copilot, Codex or Claude Code: your plan, models, plugins,
-  skills, MCP servers and your company's policies, plus anything you add in Settings. No other
-  AI service or API key.
-- Use more than one, with your own sign-in for each: pick one for a task with `@codex` or
-  `@claude`, and in Settings choose which runs new workers and each of Chief of Staff's own
-  sessions ([how](docs/guide.md#workers-on-other-coding-agents)).
-- Every worker gets its own folder and git worktree, so your checkouts stay untouched. Workers
-  run like your own agent sessions, but none comments, reviews, merges or closes on GitHub as
-  you, pushes to `main` or force-pushes others' branches without your OK; turn on *Ask first*
-  for more checks (no force pushes at all, no `sudo`) or an OS sandbox in Settings.
-
-## Install
-
-You need macOS, Linux or Windows (experimental), Python 3.11+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
-(or pipx) and one coding agent, signed in: the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli),
-the [Codex CLI](https://developers.openai.com/codex/cli) or [Claude Code](https://docs.claude.com/en/docs/claude-code)
-(Codex and Claude Code on macOS and Linux; on Windows, Copilot for now):
-
-```bash
-uv tool install chiefofstaff && chiefofstaff       # or: pipx install chiefofstaff
-```
-
-Chief of Staff runs on whichever is ready (Copilot first, then Codex, then Claude Code), and
-every session can run on any of them: Settings → Agents & models. None installed or signed in
-yet? Home's card has *Install* and *Sign in* for each, run for you (or, in a terminal:
-`npm install -g @github/copilot && copilot login`, `codex login`, `claude auth login`).
-
-Your browser opens Chief of Staff through a private link printed in the terminal (keep it to
-yourself). Tell it where your code lives, like `~/workspace`, and type what you need.
-
-Everything runs on your machine; data stays in `~/Library/Application Support/chiefofstaff`
-(macOS), `~/.local/share/chiefofstaff` (Linux), or `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`
-(Windows; with a Python installed from the Store app, Windows keeps it under that Python's
-`%LOCALAPPDATA%\Packages\...\LocalCache` instead: the `Data:` line at startup says where).
-Ctrl+C stops it, and sessions pick up where they left off next time. Options: `--port`,
-`--data-dir`, `--no-browser`, `--demo`. Click **Update and restart** where the sidebar says a
-newer version is out (Settings → General turns that off), or update with
-`uv tool upgrade chiefofstaff` (or `pipx upgrade chiefofstaff`). Without
-installing, start it with
-`uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs the version uv cached the first time,
-however old. Each new version leaves a cached environment behind in uv's cache: `uv cache prune`
-removes the ones nothing uses. Never run `uv cache clean` while Chief of Staff is running: it can delete
-the environment it runs from. Workers' folders, and how much disk they take, are under Storage
-(the disk icon at the bottom of the sidebar).
-
-On Windows (experimental), Send to Chief, the Copilot command sandbox, sandboxed checks and
-the folder sizes under Storage (measured with `du`) are unavailable. Workers can access files
-and networks available to your Windows account.
-A new data directory, and the private launch link in it, are made readable only by you (and
-SYSTEM and Administrators) with an access control list; a `--data-dir` that already exists
-keeps its own, so check it. Storage cleanup cannot see programs running as administrator in a
-worker's folder: close those before closing the worker. Git can still hit path length limits
-in deeply nested folders; use a shorter project or data directory if that happens.
-
-To start this checkout after `uv sync --extra dev`:
-
-```powershell
-.\.venv\Scripts\python.exe -m chiefofstaff
-```
-
-**Optional sign-ins**
-- **GitHub**: `gh auth login` with every account you use, to review PRs and open them.
-- **Slack**: paste a user token in Settings ([how](docs/guide.md#slack)), or reach Slack through
-  a tool your coding agent already has, such as Glean.
-- **Other services** (docs, issue trackers): a sign-in card appears when a worker needs one, and
-  one card when an MCP tool says an account must be connected (however many workers it stops).
+| Before | With Chief of Staff |
+| --- | --- |
+| Watching five terminal tabs to see which agent is stuck | One chat. Every task shows its live step; stalled ones get nudged |
+| Copying context from one agent to another | Workers tell each other what changed, in their own words |
+| Answering the same question for three agents | One card; your answer reaches every worker that asked |
+| Trusting "all tests pass" | Receipts: the commands it ran and their exit codes, its commits, its diff |
+| Re-checking every PR for red CI and new comments | The fix or the replies, prepared in the same worker, waiting for your OK |
+| Writing every reply and review from scratch | Drafts in your voice, sent when you say so |
+| Losing the afternoon when an agent hits its limit | New work starts on the next agent you have |
 
 ## How it works
 
-Each session is a regular session of its agent: a Copilot CLI session driven through the Copilot
-SDK (`copilot --resume` lists them as "Chief of Staff · …"), a thread of its own `codex
-app-server`, or a Claude Code session driven through Claude's Agent SDK.
-Sessions never talk to each other directly: they call tools
-such as `spawn_worker`, `report` and `tell_session`, and Chief of Staff delivers each message,
-labeled with who sent it, so a Slack message cannot pass itself off as you. Workers that work
-together pass what the other needs straight to it; the Router gets a copy.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/how-it-works.png" width="900" alt="What comes to you (your words, Slack, GitHub, watches, a hotkey) goes to the Router, which runs a team of workers on Copilot, Codex and Claude; only decisions, drafts, results with receipts and share links come back to you">
+</p>
 
+You talk to one session, the Router. It splits your request and starts a worker per part, on
+the agent you name for it (or the one Settings picks), each in its own folder and git worktree,
+and keeps the decisions.
+Every worker is a real session of its agent, driven through that agent's own SDK or app server
+(Copilot's show up in `copilot --resume`). Sessions never message each other unlabeled: Chief of Staff
+delivers each message with who sent it, so a Slack message can't pass itself off as you.
+
+## A look around
+
+| | |
+| --- | --- |
+| <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/tour-team.png" width="440" alt="A team's page: where the request stands, the plan, what the parts told each other, and what was decided"><br>**A team's page**: the plan, what the parts told each other, what you decided | <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/tour-decision.png" width="300" alt="A decision card: the question, why it comes up, three options with what each means, and a recommendation"><br>**One decision card**: options, what each means, a recommendation |
+| <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/tour-receipts.png" width="300" alt="A result with receipts: verified, the failing test made to pass, one file changed, one commit"><br>**Receipts**: verified, the failing test made to pass, the diff, the commit | <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/tour-slack.png" width="300" alt="A Slack reply drafted in your voice, with Send"><br>**In your voice**: a Slack reply drafted, sent on your OK |
+| <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/tour-team-talk.png" width="440" alt="Three tasks started on Copilot, Codex and Claude, and one worker telling another what it changed"><br>**Three agents, one request**: and a worker telling another what it changed | <img src="https://raw.githubusercontent.com/evanl666/chiefofstaff/main/docs/images/tour-share.png" width="440" alt="A share link, ready: encrypted, expires on its date, can be turned off any time"><br>**Share in one link**: encrypted, and it expires |
+
+## Safety and privacy
+
+| On its own | Only with your OK | Never: no worker can, in any mode |
+| --- | --- | --- |
+| Works in its own folder and git worktree; your checkouts stay untouched | Sends a Slack reply or posts a PR review in your name | Comment on, review, merge or close a PR as you, or write to issues |
+| Runs tests and builds; pushes its own `chief/…` branches and opens PRs | Merges a PR (one click on its card) | Push to `main` or `master` |
+| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check, a habit or your profile it learned | Force-push a branch that isn't its own |
+| Asks you instead of guessing | With *Ask first* on: writes outside its folders, `sudo`, any force push | Get your Slack token (no agent ever does) |
+
+Everything runs on your machine; your data stays in your data folder. No account, no telemetry:
+your code and prompts go only to the coding agents you use, and it reaches Slack and GitHub with
+your own sign-ins. The one call it makes for itself is a once-a-day look at PyPI for a newer
+version, which sends nothing about you (and can be turned off). A share link's key lives in the
+link itself, never on GitHub. An OS sandbox for workers is one switch in Settings.
+[SECURITY.md](SECURITY.md) says what the sandbox, Chief of Staff and the model each enforce.
+
+## Where it fits
+
+| | Great at | What is still on you |
+| --- | --- | --- |
+| A terminal coding agent | One task, deep, in your repository | Starting each session, watching it, carrying context, following up |
+| A dashboard of parallel agents | Many sessions side by side in worktrees | Watching each one, answering each one, merging |
+| An AI editor | Writing code with an agent beside you | Staying in the editor to drive it |
+| **Chief of Staff** | The layer above them: runs your agents as a team and follows the work to done | The decisions |
+
+## Install
+
+You need macOS or Linux (Windows is experimental, on Copilot only), Python 3.11+,
+[uv](https://docs.astral.sh/uv/getting-started/installation/) or pipx, and one coding agent signed
+in: the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli), the
+[Codex CLI](https://developers.openai.com/codex/cli) or [Claude Code](https://docs.claude.com/en/docs/claude-code).
+
+```bash
+npm install -g @github/copilot && copilot login   # or: codex login, or: claude auth login
+uv tool install chiefofstaff && chiefofstaff       # or: pipx install chiefofstaff
 ```
-you ── Home ── Router ── tasks ──► worker · worker · worker
-                 ▲                 (own folder and worktree)
-Slack, GitHub, ──┘    drafts ────► wait for your approval
-your watches          Watchdog ──► nudges stuck workers
-```
+
+It opens in your browser through a private link printed in the terminal. Tell it where your code
+lives (`~/workspace`, say) and type what you need. Optional: `gh auth login` for GitHub reviews and
+PRs, and a Slack user token in Settings ([how](docs/guide.md#slack)). Update with **Update and
+restart** in the sidebar, or `uv tool upgrade chiefofstaff`.
 
 ## Learn more
 
-- [User guide](docs/guide.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Security](SECURITY.md): what the OS sandbox, Chief of Staff and the model each enforce
-- [Changelog](CHANGELOG.md)
+- [Guide](docs/guide.md): quickstart, concepts, daily use, agents, settings, troubleshooting
+- [Reference](docs/reference.md): every behavior and setting in detail
+- [Security](SECURITY.md) · [Architecture](docs/ARCHITECTURE.md) · [Changelog](CHANGELOG.md)
 
-## Status
+<details>
+<summary><b>FAQ</b></summary>
 
-Early (0.1): expect rough edges. Each agent's usage counts against your plan with it (Home
-shows the Copilot credits each task used; Usage, every agent's). Issues and ideas are welcome; to contribute, see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+**Does it replace Copilot, Codex or Claude Code?** No. It runs them, on your own sign-ins and
+plans, and every worker stays a real session of its agent.
 
-## License
+**What does it cost?** Nothing itself. Each agent's work counts against your plan with it: Home
+shows the Copilot credits each task used, and Usage every agent's.
 
-MIT. Chief of Staff is an independent project, not made by or affiliated with GitHub. GitHub
-Copilot is a trademark of GitHub, Inc.
+**Can it post or merge as me?** Only when you say so. A reply, a review or a merge happens when
+you OK it on its card; no worker can do any of them itself, on any agent. One exception you
+choose: reacting 🤖 to a Slack message is your OK for the one reply to that thread.
+
+**Do I need all three agents?** No. One is enough, any of them. Add more in Settings → Agents &
+models, and pick one for a task by typing `@codex` or `@claude`.
+
+**Is it ready?** It is early (0.1) and moving fast: expect rough edges, and please
+[open an issue](https://github.com/evanl666/chiefofstaff/issues) when you hit one.
+
+</details>
+
+## Contributing and license
+
+Issues and ideas are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). MIT licensed. Chief of
+Staff is an independent project, not made by or affiliated with GitHub, OpenAI or Anthropic;
+product names belong to their owners.

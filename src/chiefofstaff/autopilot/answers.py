@@ -447,7 +447,8 @@ class Answers:
         )  # fmt: skip
         self.runtime.bus.publish("draft", self.store.draft(draft["id"]))
         title = f"Set aside by Autopilot · {self.runtime.display_title(row)}"
-        self.runtime.alert(draft["text"], session_id=row["id"], needs_action=True, title=title)
+        self.runtime.alert(draft["text"], session_id=row["id"], needs_action=True, title=title,
+                           draft_id=draft["id"])  # fmt: skip
         if not answer.done():
             answer.set_result(
                 DECLINED[kind] if kind in PARKED_ONLY
@@ -577,7 +578,7 @@ class Answers:
                                  {"draft_id": card["id"], "label": "Decision"})  # fmt: skip
         self.runtime.bus.publish("draft", self.store.draft(card["id"]))
         self.runtime.alert(card["text"], session_id=row["id"], needs_action=True,
-                           title=f"Decision · {row['title']}")  # fmt: skip
+                           title=f"Decision · {row['title']}", draft_id=card["id"])  # fmt: skip
 
     def change(self: Autopilot, entry_id: str) -> dict:  # type: ignore[misc]
         """*Change* on a decision it made: the card again, for the owner; their answer is
@@ -804,7 +805,8 @@ class Answers:
                 self.runtime.add_message(session["id"], "draft", card["text"],
                                          {"draft_id": card["id"], "label": "Decision"})  # fmt: skip
                 self.runtime.alert(card["text"], session_id=session["id"], needs_action=True,
-                                   title=f"Decision · {session['title']}")  # fmt: skip
+                                   title=f"Decision · {session['title']}",
+                                   draft_id=card["id"])  # fmt: skip
             self.runtime.bus.publish("draft", card)
         if rows:
             self.runtime.publish_state()

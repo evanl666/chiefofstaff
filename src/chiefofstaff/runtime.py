@@ -11830,11 +11830,15 @@ class Runtime:
         needs_action: bool,
         title: str = "Chief of Staff",
         urgent: bool = False,
+        draft_id: str = "",
     ):
-        """A toast and a desktop notification; held back while the owner focuses."""
+        """A toast and a desktop notification; held back while the owner focuses. `draft_id`:
+        the card it announces, whose toast goes once the card is settled."""
         if self.focus.active() and not urgent:
             return  # It waits in the inbox; the focus summary counts it.
         toast = {"text": text, "session_id": session_id, "needs_action": needs_action}
+        if draft_id:
+            toast["draft_id"] = draft_id
         self.bus.publish("toast", {**toast, "urgent": urgent})
         if self.store.settings().mac_notifications:
             self.background(self.notifier(title, text))

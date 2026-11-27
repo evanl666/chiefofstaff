@@ -51,7 +51,7 @@ ROUTER_PROMPT = (27651, "5db208d7a2b7cdda0c32bbb185ed70f2914bc6f16ed8ff669e28139
 HELP = """\
 usage: chiefofstaff [-h] [--version] [--port PORT] [--data-dir DATA_DIR] [--no-browser] [--demo]
 
-Run Chief of Staff: a Router that coordinates your Copilot sessions.
+Run Chief of Staff: a Router that runs Copilot, Codex and Claude Code as one team.
 
 options:
   -h, --help           show this help message and exit
@@ -59,7 +59,7 @@ options:
   --port PORT          default 8765 (8799 for --demo)
   --data-dir DATA_DIR
   --no-browser
-  --demo               try it without Copilot or Slack: scripted sessions in a temporary folder
+  --demo               try it without an agent or Slack: scripted sessions in a temporary folder
 """
 
 
