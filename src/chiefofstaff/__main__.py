@@ -231,7 +231,9 @@ def prepare_downgrade(parser: argparse.ArgumentParser, data_dir: Path) -> int:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Chief of Staff: a Router that coordinates your Copilot sessions."
+        description=(
+            "Run Chief of Staff: a Router that runs Copilot, Codex and Claude Code as one team."
+        )
     )
     parser.add_argument("--version", action="version", version=f"chiefofstaff {version()}")
     parser.add_argument("--port", type=int, default=None, help="default 8765 (8799 for --demo)")
@@ -240,7 +242,7 @@ def main():
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="try it without Copilot or Slack: scripted sessions in a temporary folder",
+        help="try it without an agent or Slack: scripted sessions in a temporary folder",
     )
     # Before installing an earlier version: the workers on other coding agents stop and none of
     # their processes may run (more-agents.md 8). Said where it applies (the guide, the Coding
