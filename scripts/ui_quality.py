@@ -2266,7 +2266,8 @@ async def autopilot_views(runtime, browser, quality: Quality):
         await page.locator("#settings-button").click()
         await page.locator("#settings-tabs [data-tab=general]").click()
         await expect(page.locator("#autopilot-line")).to_be_visible()
-        await expect(page.locator("#autopilot-group")).to_have_count(0)
+        await expect(page.locator("#autopilot-options")).to_be_hidden()
+        await expect(page.locator("#autopilot-more")).to_be_hidden()
         await page.locator("#autopilot-line").scroll_into_view_if_needed()
         await page.screenshot(path=folder / f"settings-off-1280-{scheme}.png")
         await page.locator("#settings-cancel").click()
@@ -2355,10 +2356,11 @@ async def autopilot_views(runtime, browser, quality: Quality):
         await page.screenshot(path=folder / f"record-entry-1280-{scheme}.png")
         await quality.check(page, f"autopilot entry {scheme}", "#timeline")
         await quality.contrast(page, f"autopilot record {scheme}", "#timeline")
-        # Settings → General with its line ticked: its small group.
+        # Settings → General with its line ticked: its Options, unfolded.
         await page.locator("#settings-button").click()
         await page.locator("#settings-tabs [data-tab=general]").click()
-        group = page.locator("#autopilot-group")
+        await page.locator("#autopilot-options").click()
+        group = page.locator("#autopilot-more")
         await expect(group).to_be_visible()
         for width in (800, 1280):
             await page.set_viewport_size({"width": width, "height": 900})

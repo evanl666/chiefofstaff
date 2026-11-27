@@ -14295,15 +14295,29 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     await page.locator("#settings-button").click()
     await page.locator("#settings-tabs [data-tab=general]").click()
     line = page.locator("#autopilot-line")
-    await expect(line).to_have_text(
-        "Autopilot: Chief of Staff acts for you while it's on, instead of waiting"
+    await expect(line.locator("label.name")).to_have_text("Autopilot")
+    await expect(line.locator(".help")).to_have_text(
+        "Answers your workers from what you said, and accepts results it checked itself, "
+        "while it's on."
     )
     await expect(line.locator("input")).not_to_be_checked()
-    group = page.locator("#autopilot-group")
-    await expect(group).to_have_count(0)
-    # Ticked: its group at once, with its defaults; unticked, it goes.
+    options = page.locator("#autopilot-options")
+    group = page.locator("#autopilot-more")
+    await expect(options).to_be_hidden()
+    await expect(group).to_be_hidden()
+    # Ticked: its Options, with its defaults, by keyboard too; unticked, folded and offered no
+    # more.
     await line.locator("input").check()
+    await expect(line.locator(".help")).to_have_text(
+        "Home's Autopilot button turns it on, for a while · up to 100 credits a day"
+    )
+    await expect(options).to_be_visible()
+    await expect(options).to_have_attribute("aria-expanded", "false")
+    await options.focus()
+    await page.keyboard.press("Enter")
+    await expect(options).to_have_attribute("aria-expanded", "true")
     await expect(group).to_be_visible()
+    await expect(group).not_to_contain_text("null")
     await expect(group.locator("[name=autopilot_credits]")).to_have_value("100")
     await expect(group.locator("[name=autopilot_ask_first]")).to_be_checked()
     await expect(group.locator("[name=autopilot_repos]")).to_be_hidden()
@@ -14313,9 +14327,12 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     await expect(repos).to_be_focused()
     await repos.fill("Acme/API\n\nacme/web")
     await line.locator("input").uncheck()
-    await expect(group).to_have_count(0)
+    await expect(group).to_be_hidden()
+    await expect(options).to_be_hidden()
     await line.locator("input").check()
+    await options.click()
     await group.locator("[name=autopilot_credits]").fill("40")
+    await expect(line.locator(".help")).to_contain_text("up to 40 credits a day")
     await group.locator("[name=autopilot_scope]").select_option("only")
     await group.locator("[name=autopilot_repos]").fill("Acme/API\n\nacme/web")
     await page.locator("#settings-form footer button[type=submit]").click()
@@ -14325,7 +14342,7 @@ async def round_autopilot(runtime, browser, failures: list[str]):
     assert saved.autopilot_repos == ["acme/api", "acme/web"], saved.autopilot_repos
     assert saved.autopilot_ask_first
     await expect(page.locator("#settings-dialog")).not_to_be_visible()
-    log("Autopilot: one line in General while off; its group once ticked, saved")
+    log("Autopilot: one line in General's On its own while off; its Options once ticked, saved")
 
     # Home's menu, by keyboard: on for 2 hours (or until the morning, if sooner).
     menu = page.locator("#session-actions .menu-wrap.autopilot")

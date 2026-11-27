@@ -2693,10 +2693,12 @@ ul.memory.shared-links li.confirming .confirm p { margin: 0; flex: 1 1 280px; li
 .autopilot-copy { margin: 0 0 10px 14px; }
 .autopilot-none { margin: 0 14px 12px; color: var(--muted); font-size: var(--small); }
 .autopilot-broken { color: var(--text); }
-.autopilot-group-settings { display: grid; gap: 6px; margin: 2px 0 6px 26px; }
-.autopilot-group-settings .row { align-items: flex-end; }
-dialog .autopilot-group-settings .row label.acts-in { width: 190px; }
-.autopilot-group-settings .autopilot-record-link { min-height: 32px; padding: 0 4px; }
+#autopilot-more label.acts-in { width: 190px; }
+#autopilot-more .autopilot-record-link { min-height: 32px; padding: 0 4px; }
+#autopilot-more .ask-first { display: grid; gap: 2px; }
+#autopilot-more .ask-first > label.check { margin: 0; }
+#autopilot-more small { color: var(--muted); font-size: var(--small); }
+#autopilot-more .ask-first > small { padding-left: 26px; }
 @media (max-width: 760px) {
   .autopilot-item > .autopilot-then, .autopilot-detail { padding-left: 0; margin-left: 8px; }
   .autopilot-line { flex-wrap: wrap; }
