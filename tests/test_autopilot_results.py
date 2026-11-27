@@ -341,6 +341,39 @@ async def test_the_first_check_of_a_copilot_version_is_waited_for_not_a_reason(
     assert await asyncio.wait_for(verify.refusal(runtime), 10) == verify.OFFLINE
 
 
+async def test_its_offline_run_builds_the_sessions_tools_before_it_runs_a_step(harness, tmp_path):
+    """Live (B1, Copilot 1.0.116): a session resumed for the verification has no tools until
+    they are built ("Tool 'bash' does not exist"), so no step ran and every result was left
+    for the owner. They are built first, as the step check's session does."""
+    from types import SimpleNamespace
+
+    await harness.connect()
+    runtime, client = harness.runtime, harness.client
+    original, built = client.resume_session, []
+
+    async def resume(session_id, **options):
+        session = await original(session_id, **options)
+
+        async def execute(request, **options):
+            if not built:
+                return {"textResultForLlm": "Tool 'bash' does not exist. Available tools that "
+                        "can be called are .", "resultType": "failure"}  # fmt: skip
+            return {"textResultForLlm": "ok\nCOS-EXIT-0\n", "resultType": "success",
+                    "toolTelemetry": {"properties": {"sandboxApplied": "true"}}}  # fmt: skip
+
+        async def validate(**options):
+            built.append(True)
+
+        session.rpc.tools = SimpleNamespace(execute=execute, initialize_and_validate=validate)
+        return session
+
+    client.resume_session = resume
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    [step] = await verify.run_offline(runtime, copy, ["pytest -q"])
+    assert built and (step["exit"], step["sandboxed"]) == (0, True), step
+
+
 @pytest.mark.parametrize(
     "command",
     [

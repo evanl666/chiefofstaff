@@ -193,6 +193,9 @@ async def run_offline(runtime: Runtime, copy: Path, steps: list[str]) -> list[di
         with contextlib.suppress(Exception):
             await created.disconnect()
         session = await backend.resume_session(session_id, **options)
+        with contextlib.suppress(Exception):
+            # Its tools are built first, as the step check's session's (none until then).
+            await session.rpc.tools.initialize_and_validate(timeout=60)
         (copy / ".cos-tmp").mkdir(exist_ok=True)
         for step in steps:
             started = time.monotonic()
