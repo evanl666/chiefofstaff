@@ -1245,7 +1245,7 @@ didn't go out for you to approve again. If Chief of Staff stops while it publish
 when it starts again (a reply only as your account's, since it began to go out, with exactly
 its text: when two could be it, the attempt says it can't tell), and sends the rest once, within
 that hour (replies to a fix whose push did not go out are not sent). While **Update and
-restart** waits for no turn running, no attempt starts.
+restart** waits for the turns running to end, no attempt starts.
 
 **Replies and the AI line.** The first time it would post a reply in a repository, the review
 asks whether replies there say they were drafted with an AI assistant; your answer is kept per
@@ -2017,12 +2017,23 @@ commands run in.
 ## Updating
 
 When a newer release is out, one quiet line at the bottom of the sidebar says so. Started with
-`uvx` or installed with `uv tool`, **Update and restart** does the rest: once no turn is running
-(it waits, never stopping one; *Cancel* stops waiting), Chief of Staff gets the new version
-(`uvx chiefofstaff@<version>`, or `uv tool upgrade chiefofstaff`), stops as on Ctrl+C and starts
-again in its own place: the same terminal, port and private link. The page reloads by itself,
-every session goes on as after any restart, and Home says it updated (or why it couldn't: it then
-runs the version it had). Installed another way (pip, pipx), or on Windows, the line says the
+`uvx` or installed with `uv tool`, **Update and restart** does the rest: once the turns running
+end (the line says which: *Restarting after the Router's turn ends…*; two minutes at most, a turn
+still running then goes on after the restart; *Cancel* stops waiting), Chief of Staff gets the new
+version (`uvx chiefofstaff@<version>`, or `uv tool upgrade chiefofstaff`), stops as on Ctrl+C and
+starts again in its own place: the same terminal, port and private link. The page reloads by
+itself, every session goes on as after any restart, and Home says it updated (or why it couldn't:
+it then runs the version it had).
+
+**A restart loses no message.** A session at work as Chief of Staff stops (or as it crashes, or as
+its agent does) is given again, once, what that turn was given and did not finish, as soon as its
+agent has it open again: your message to the Router, the Router's to a worker, a report to the
+Router, with one line in its chat (*Chief of Staff restarted; asked the session to continue.*);
+what its agent's own record shows it finished is not given again. Until then it says
+*Reconnecting to Codex…* (or its agent's name), never *Thinking…*, and what it was given waits to
+be sent; a reconnect that takes long is tried again by itself, waiting longer each time, and
+*Retry* tries at once. A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
+given waits for its next message. Installed another way (pip, pipx), or on Windows, the line says the
 command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
 start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
 most once a day, and sends nothing about you or your machine; *Say when a newer Chief of Staff is
