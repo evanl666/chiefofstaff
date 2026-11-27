@@ -10,6 +10,7 @@ import pytest
 from conftest import Harness, call_tool, settle
 
 from chiefofstaff import ingress
+from chiefofstaff.autopilot.answers import SHARED
 from chiefofstaff.autopilot.judge import PARKED_ANSWER
 from chiefofstaff.autopilot.logbook import RETURNED
 from chiefofstaff.models import Settings
@@ -583,13 +584,16 @@ async def test_a_reported_question_is_answered_once_the_routers_turn_is_over(har
     assert [e["kind"] for e in entries(runtime, "answered")] == ["answered"]
 
 
-async def reported(harness, said="Name it sessions_v1."):
+async def reported(harness, said="Name it sessions_v1.", request=""):
     """A worker's reported question under Needs you, the Router's turn on it over, its task
-    waiting for the answer; and a second worker (to want a slot)."""
+    waiting for the answer; and a second worker (to want a slot). `request`: both made for one
+    owner request (the ledger's anchor)."""
     runtime = harness.runtime
     await on(runtime)
     made = await worker(runtime, harness.router_id)
     other = await worker(runtime, harness.router_id, title="Cache store")
+    for task_id in (made["task_id"], other["task_id"]) if request else ():
+        harness.store.set(f"req:{task_id}", request)
     session = made["session_id"]
     owner = await said_in_page(runtime, session, said)
     await call_tool(runtime, "report", session, status="question", task_id=made["task_id"],
@@ -689,6 +693,8 @@ async def test_stop_while_a_decision_waits_for_a_slot_gives_its_card_back(harnes
     [decided] = runtime.autopilot.book.decisions(task_id=made["task_id"])
     assert decided["status"] == "withdrawn"
     assert runtime.snapshot()["autopilot"]["set_aside"][card["id"]] == RETURNED
+    [ask] = asks_of(harness, "decision", card["id"])
+    assert (ask["status"], ask["answer"]) == ("open", ""), "its ask in the ledger open again"
     drawn = [m for m in harness.store.messages(session) if m["kind"] == "draft"]
     assert [(m["meta"] or {}).get("draft_id") for m in drawn] == [card["id"]]
     assert runtime.tasks.get(made["task_id"])["status"] == status
@@ -764,6 +770,96 @@ async def test_a_delivery_stopped_while_its_worker_is_made_ready_changes_nothing
     assert runtime.tasks.get(made["task_id"])["status"] == status, "not set going"
     assert questions(harness), "the owner's still"
     assert [i["state"] for i in runtime.autopilot.book.outbox("withdrawn")] == ["withdrawn"]
+
+
+def asks_of(harness, channel: str, ref: str) -> list[dict]:
+    return harness.store.all("SELECT * FROM asks WHERE channel=? AND ref=?", (channel, ref))
+
+
+async def test_its_answer_settles_its_ask_in_the_ledger_never_as_a_decision(harness):
+    """Rebase on 0.1.60: Autopilot's answer goes through the ledger's settle path (one choice,
+    answered once), as its own: never kept as the owner's decision on it."""
+    runtime = await harness.connect()
+    await on(runtime)
+    made = await worker(runtime, harness.router_id)
+    session = made["session_id"]
+    owner = await said_in_page(runtime, session, "Postgres for v1, please.")
+    answer = await asked(runtime, session, "Which store for sessions?", ["Postgres", "Redis"])
+    await judge_proposes(harness, answer="Postgres", basis=[cite(owner, "Postgres for v1")])
+    await asyncio.wait_for(answer, 5)
+    await settle(runtime)
+    [card] = [d for d in harness.store.drafts("answered") if d["kind"] == "question"]
+    [ask] = asks_of(harness, "ask_user", card["id"])
+    assert (ask["status"], ask["answer"]) == ("settled", "Postgres")
+    assert runtime.decisions.active() == [], "never the owner's decision"
+    assert not harness.store.one("SELECT decision_id FROM subjects WHERE id=?",
+                                 (ask["subject_id"],))["decision_id"]  # fmt: skip
+
+
+async def test_a_choice_two_workers_asked_waits_for_the_owner_one_answer_for_both(harness):
+    """Rebase on 0.1.60: a decision card two workers of one request asked (the ledger joins
+    them) is one choice with several askers: Autopilot sets it aside, and the owner's one answer
+    reaches both, once each; Autopilot decides nothing."""
+    from chiefofstaff.models import DraftDecision
+
+    runtime = await harness.connect()
+    await on(runtime)
+    api = await worker(runtime, harness.router_id, title="Login API")
+    form = await worker(runtime, harness.router_id, title="Login form")
+    for made in (api, form):
+        harness.store.set(f"req:{made['task_id']}", "9001")
+    owner = await said_in_page(runtime, api["session_id"], "Email only for v1.")
+    options = [{"choice": "Email only", "effect": "a"}, {"choice": "Email and SMS", "effect": "b"}]
+    await call_tool(runtime, "ask_decision", api["session_id"],
+                    question="Do we support SMS login in v1?", options=options)  # fmt: skip
+    judge = await until(lambda: judging(harness))
+    joined = await call_tool(runtime, "ask_decision", form["session_id"],
+                             question="Is there SMS login?")  # fmt: skip
+    assert joined.result_type == "success"
+    await call_tool(runtime, "propose_answer", judge, answer="Email only",
+                    basis=[cite(owner, "Email only for v1")], park=False, asks_permission=False,
+                    reversible=True, sure=True, reason="The owner said so.")  # fmt: skip
+    await settle(runtime)
+    assert SHARED in entries(runtime, "parked")[0]["why"]["reason"]
+    assert runtime.autopilot.book.decisions() == []
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "decision"]
+    assert [m for m in harness.store.messages(api["session_id"]) if m["kind"] == "draft"]
+    with ingress.through(ingress.PAGE):
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Email only"))
+    await settle(runtime)
+    for made in (api, form):
+        sent = harness.session(made["session_id"]).sent
+        told = [text for text in sent if 'type="decision"' in text]
+        assert len(told) == 1 and "Email only" in told[0], told
+        assert not [text for text in sent if 'type="autopilot"' in text]
+    [decision] = runtime.decisions.active()
+    assert decision["text"].endswith("Email only"), "the owner's"
+
+
+async def test_a_question_whose_choice_another_asks_meanwhile_goes_back_to_the_owner(
+    harness, monkeypatch
+):
+    """Rebase on 0.1.60: answered, its delivery waiting for a slot; another worker of its request
+    asks the same choice: the answer is withdrawn, never stored for its worker; the question
+    stays the owner's, set aside with why, one answer for both."""
+    runtime = await harness.connect()
+    made, other, owner = await reported(harness, request="9001")
+    session = made["session_id"]
+    [question] = questions(harness)
+    slot_wanted(runtime, monkeypatch)
+    tick = asyncio.ensure_future(runtime.autopilot.tick())
+    await judge_proposes(harness, answer="sessions_v1", basis=[cite(owner, "Name it sessions_v1")])
+    await asyncio.wait_for(tick, 5)
+    await until(lambda: entries(runtime, "answered"))
+    runtime.asks.record_question(other["session_id"], "What should the table be called?",
+                                 other["task_id"])  # fmt: skip
+    monkeypatch.undo()
+    await runtime.autopilot.dispatch()
+    await settle(runtime)
+    assert not [m for m in harness.store.messages(session) if (m["meta"] or {}).get("outbox")]
+    assert question in questions(harness)
+    assert runtime.snapshot()["autopilot"]["set_aside"][question] == SHARED
+    assert [a["status"] for a in asks_of(harness, "question", question)] == ["open"]
 
 
 async def test_its_tick_never_waits_for_the_judge(harness, monkeypatch):

@@ -525,7 +525,7 @@ class Autopilot(Answers, Results):
                     continue
                 except Withdrawn as exc:
                     # Stop came since its claim (or what it answers was settled meanwhile).
-                    if self.book.withdraw_claimed(claimed, str(exc)):
+                    if self.book.withdraw_claimed(claimed, str(exc), exc.returned):
                         self.draw_returned([claimed])
                     continue
                 except Exception as exc:

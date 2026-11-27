@@ -28,10 +28,11 @@ from typing import TYPE_CHECKING, Any
 from ..asks import DECLINED
 from ..backend import COPILOT_AGENT
 from ..envelope import wrap
+from ..ledger import SharedAskError
 from ..store import now
 from . import basis as owner
 from . import judge
-from .logbook import ACTIVE, PARKED, UNDONE, WITHDRAWN
+from .logbook import ACTIVE, PARKED, RETURNED, UNDONE, WITHDRAWN
 from .origin import CARRIED
 
 if TYPE_CHECKING:
@@ -59,6 +60,8 @@ OWNER_ONLY = ("access", "a key", "the key", "money", "budget", "account", "sign 
 
 # Why what was in flight when Autopilot stopped goes to the owner instead.
 STOPPED = "Autopilot was stopped before it decided"
+# One choice asked by several (ledger.py): one answer of the owner's reaches them all.
+SHARED = "others asked the same choice, so one answer from you reaches them all"
 
 
 class Later(Exception):  # noqa: N818  (not an error: delivered later)
@@ -66,7 +69,12 @@ class Later(Exception):  # noqa: N818  (not an error: delivered later)
 
 
 class Withdrawn(Exception):  # noqa: N818  (not an error: Stop came first)
-    """A delivery Stop overtook after its claim: never stored for its session."""
+    """A delivery Stop overtook after its claim: never stored for its session. `returned`: why
+    what it answered is the owner's again (a line under it in Needs you)."""
+
+    def __init__(self, why: str, returned: str = RETURNED):
+        super().__init__(why)
+        self.returned = returned
 
 
 def clock(iso: str) -> str:
@@ -241,6 +249,8 @@ class Answers:
             reason = "it is not about a task"
         elif not self.in_turn_answer(row):
             reason = "its worker can't take Autopilot's answer in this turn"
+        elif self.runtime.ledger.shared("ask_user", draft["id"], row["id"]):
+            reason = SHARED
         else:
             with suppress(TimeoutError):
                 verdict, offered = await asyncio.wait_for(
@@ -259,8 +269,13 @@ class Answers:
                 self.release_card(row, draft, task, ticket)
             elif reason:
                 self.park_card(row, draft, answer, task, reason, verdict.reason, ticket=ticket)
-            elif not self.answer_card(row, draft, answer, task or {}, verdict, offered, ticket):
-                self.release_card(row, draft, task, ticket)
+            elif refused := self.answer_card(row, draft, answer, task or {}, verdict, offered,
+                                             ticket):  # fmt: skip
+                if refused == STOPPED:
+                    self.release_card(row, draft, task, ticket)
+                else:
+                    self.park_card(row, draft, answer, task, refused, verdict.reason,
+                                   ticket=ticket)  # fmt: skip
         finally:
             self.deciding.discard(draft["id"])
             self.runtime.publish_state()
@@ -352,13 +367,20 @@ class Answers:
 
     def answer_card(self: Autopilot, row: dict, draft: dict, answer: asyncio.Future, task: dict,  # type: ignore[misc]
                     verdict: judge.Verdict, offered: list[owner.Item],  # type: ignore[misc]
-                    ticket: tuple[str, int] | None) -> bool:  # type: ignore[misc]  # fmt: skip
+                    ticket: tuple[str, int] | None) -> str:  # type: ignore[misc]  # fmt: skip
         """Its answer into the turn, filed under the run it was judged in, if that still holds
-        (else nothing: False)."""
+        (else nothing: STOPPED), and settled in the ledger as the one ask of its choice (else
+        nothing: SHARED). "" once answered."""
         because = self.because(verdict, offered)
         with self.store.transaction():
             if not ticket or not self.holds(ticket):
-                return False
+                return STOPPED
+            try:
+                claimed = self.runtime.ledger.claim(
+                    "ask_user", draft["id"], verdict.answer, row["id"], alone=True
+                )
+            except SharedAskError:
+                return SHARED
             entry = self.book.append(
                 ticket[0], "answered",
                 f"Answered “{draft['text'][:120]}”: {verdict.answer}",
@@ -372,13 +394,16 @@ class Answers:
         self.origins.keep(row["id"], origin)  # The turn goes on Autopilot's word from here.
         self.notice(row["id"], task, entry, f"Autopilot answered: {verdict.answer}, {because}.")
         self.runtime.bus.publish("draft", self.store.draft(draft["id"]))
+        self.runtime.background(
+            self.runtime.ledger.pass_on(claimed, verdict.answer, by="autopilot")
+        )
         if not answer.done():
             answer.set_result({
                 "answer": f"{verdict.answer}\n\n(Answered for the owner by Autopilot, from what "
                           f"they said: {because.removeprefix('because you said ')}.)",
                 "wasFreeform": verdict.answer not in (draft["target"].get("choices") or []),
             })  # fmt: skip
-        return True
+        return ""
 
     def release_card(self: Autopilot, row: dict, draft: dict, task: dict | None,  # type: ignore[misc]
                      ticket: tuple[str, int] | None):  # type: ignore[misc]  # fmt: skip
@@ -456,6 +481,8 @@ class Answers:
                 reason = "it reconsiders what you decided"
             elif not task:
                 reason = "it is not about a task"
+            elif self.runtime.ledger.shared("decision", card["id"]):
+                reason = SHARED
             else:
                 with suppress(TimeoutError):
                     verdict, offered = await asyncio.wait_for(
@@ -474,24 +501,30 @@ class Answers:
                 self.park_decision(row, card, task, STOPPED, ticket=ticket)
             elif reason:
                 self.park_decision(row, card, task, reason, verdict.reason, ticket=ticket)
-            elif not self.decide(row, card, task or {}, verdict, offered, ticket):
-                self.park_decision(row, card, task, STOPPED, ticket=ticket)
+            elif refused := self.decide(row, card, task or {}, verdict, offered, ticket):
+                self.park_decision(row, card, task, refused, ticket=ticket)
         finally:
             self.deciding.discard(card["id"])
             self.runtime.publish_state()
 
     def decide(self: Autopilot, row: dict, card: dict, task: dict, verdict: judge.Verdict,  # type: ignore[misc]
-               offered: list[owner.Item], ticket: tuple[str, int] | None) -> bool:  # type: ignore[misc]  # fmt: skip
+               offered: list[owner.Item], ticket: tuple[str, int] | None) -> str:  # type: ignore[misc]  # fmt: skip
         """Its decision, filed under the run it was judged in if that still holds (else nothing:
-        False; True too when the owner decided first)."""
+        STOPPED), settled in the ledger as the one ask of its choice (else nothing: SHARED);
+        "" once decided, or when the owner decided first."""
         target = card["target"]
         because = self.because(verdict, offered)
         with self.store.transaction():
             fresh = self.store.draft(card["id"])
             if fresh["status"] != "pending":
-                return True
+                return ""
             if not ticket or not self.holds(ticket):
-                return False
+                return STOPPED
+            try:
+                claimed = self.runtime.ledger.claim("decision", card["id"], verdict.answer,
+                                                    alone=True)  # fmt: skip
+            except SharedAskError:
+                return SHARED
             run_id = ticket[0]
             entry = self.book.append(
                 run_id, "decided", f"“{target['question'][:120]}” → {verdict.answer}",
@@ -521,8 +554,11 @@ class Answers:
                     "decision": decided, "go_on": True,
                 }, ticket[1])  # fmt: skip
         self.runtime.bus.publish("draft", self.store.draft(card["id"]))
+        self.runtime.background(
+            self.runtime.ledger.pass_on(claimed, verdict.answer, by="autopilot")
+        )
         self.runtime.background(self.dispatch())
-        return True
+        return ""
 
     def park_decision(self: Autopilot, row: dict, card: dict, task: dict | None, reason: str,  # type: ignore[misc]
                       judged: str = "", ticket: tuple[str, int] | None = None):  # type: ignore[misc]  # fmt: skip
@@ -623,6 +659,8 @@ class Answers:
             reason = "it asks for an access, a key or money"
         elif not task or task["id"] != (question.get("task_id") or task["id"]):
             reason = "it is not about a task"
+        elif self.runtime.ledger.shared("question", question["id"]):
+            reason = SHARED
         else:
             verdict, offered = await self.judged(
                 kind="question", question=text, options=list(question.get("options") or []),
@@ -671,6 +709,7 @@ class Answers:
                         f"{because[0].upper() + because[1:]}.",
                 "display": f"Autopilot answered: {verdict.answer}, {because}.",
                 "go_on": True,
+                "answer": verdict.answer,
                 "question": {"id": question["id"], "at": question.get("at", ""), "text": text,
                              "task_id": question.get("task_id") or ""},
             }, ticket[1])  # fmt: skip
@@ -715,6 +754,12 @@ class Answers:
                 current = self.runtime.asks.owner_question(asked["id"])
                 if not current or current.get("at") != asked.get("at"):
                     raise Withdrawn("Its question was answered before it went out.")
+                try:
+                    claimed.append(self.runtime.ledger.claim(
+                        "question", asked["id"], payload.get("answer") or "", alone=True
+                    ))  # fmt: skip
+                except SharedAskError:
+                    raise Withdrawn("Others asked the same choice meanwhile.", SHARED) from None
                 self.store.delete(f"ownerq:{asked['id']}")
                 self.store.delete(f"autopilot:setaside:{asked['id']}")
                 # The Router hears it is no longer open (with its next message).
@@ -727,6 +772,7 @@ class Answers:
             if fresh and payload.get("go_on") and fresh["status"] == "waiting":
                 self.runtime.asks.go_on(fresh, chat=False)
 
+        claimed: list[tuple[list[dict], list[dict]]] = []
         holds()
         with self.origins.carrying(origin):
             message = await self.runtime.delivery.deliver(
@@ -734,6 +780,8 @@ class Answers:
                 check=still,
             )  # fmt: skip
         self.book.stored(item["id"], message["id"])
+        for settled in claimed:
+            await self.runtime.ledger.pass_on(settled, payload.get("answer") or "", by="autopilot")
         if payload.get("question"):
             self.runtime.publish_state()
         return ""

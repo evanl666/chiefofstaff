@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from ..ledger import reopen
 from ..store import Store, now
 
 STATEMENTS = (
@@ -547,9 +548,10 @@ class Logbook:
             self.give_back(row, withdrawn["id"])
         return True
 
-    def withdraw_claimed(self, row: dict, why: str) -> bool:
-        """A claimed item Stop overtook before it was stored for its session: withdrawn, with
-        its entry (one transaction)."""
+    def withdraw_claimed(self, row: dict, why: str, returned: str = RETURNED) -> bool:
+        """A claimed item Stop overtook before it was stored for its session (or what it
+        answers was settled otherwise meanwhile): withdrawn, with its entry (one transaction);
+        what it answered is the owner's again, saying `returned`."""
         with self.store.transaction():
             cursor = self.store.execute(
                 "UPDATE autopilot_outbox SET state=?, outcome=?, ended_at=? WHERE id=? AND state=? "
@@ -570,10 +572,10 @@ class Logbook:
                 why={"rule": "stopped", "reason": why},
                 payload={"item": row["id"]},
             )
-            self.give_back(row, withdrawn["id"])
+            self.give_back(row, withdrawn["id"], returned)
         return True
 
-    def give_back(self, row: dict, entry_id: str) -> str:
+    def give_back(self, row: dict, entry_id: str, why: str = RETURNED) -> str:
         """What a withdrawn answer was for is the owner's again, as if Autopilot never decided
         it (in the withdrawal's transaction): a question stays under Needs you (it is taken
         from there only as the answer is stored for its worker), set aside with why; a decision
@@ -583,7 +585,7 @@ class Logbook:
         payload = row.get("payload") or {}
         if row.get("kind") != "worker":
             return ""
-        returned = json.dumps({"why": RETURNED, "entry": entry_id})
+        returned = json.dumps({"why": why, "entry": entry_id})
         if (asked := payload.get("question")) and self.store.get(f"ownerq:{asked['id']}"):
             self.store.set(f"autopilot:setaside:{asked['id']}", returned)
         decision = self.decision(payload.get("decision") or "")
@@ -610,6 +612,7 @@ class Logbook:
         if not card or card["status"] != "answered":
             return ""
         self.store.update_draft(card["id"], status="pending", resolved_at=None, outcome="")
+        reopen(self.store, "decision", card["id"])  # Its ask in the ledger, open again.
         self.store.set(f"autopilot:setaside:{card['id']}", returned)
         return card["id"]
 
