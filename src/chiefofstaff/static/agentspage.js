@@ -655,7 +655,7 @@ function drawRow(name) {
     setupNote.textContent = setupOf(name)?.kind === "install"
       ? "Install runs the official installer in your account and shows its output; then Sign in."
       : status.text === "Not installed"
-      ? `${label(name)} isn't installed on this computer, so its work waits. Install it with this command in a terminal, or turn off Use.`
+      ? `${label(name)} isn't installed on this computer, so its work waits. Install it${fix?.command ? " with this command in a terminal" : ""}, or turn off Use.`
       : `Sign in opens ${label(name)}'s own sign-in page in your browser; Chief of Staff never reads your sign-in. Or run the command in a terminal yourself.`;
     if (fix?.command) {
       setupDetails.replaceChildren(
