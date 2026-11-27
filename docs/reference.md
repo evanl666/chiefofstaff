@@ -582,18 +582,19 @@ git in the worker's repository for this). Their other settings there, and all of
 sandbox, their commands can change: the same lines then ask you. In your home folder, agent
 homes (`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
 
-With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot,
-Codex or Claude): they can change or delete any file you can, outside its folders too (Chief of
-Staff refuses only a few commands outright, such as `rm -r` of your home or the root, a push to
-the default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on
-(Settings; always for workers that read Slack), workers' shell commands can write only to their
-workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
-`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see
-your GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot
-sandbox ca trust` once so `gh` works inside the sandbox; Settings tells you when it is needed. The
-sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux the
-sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files that
-change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
+With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot, Codex
+or Claude): they can change or delete any file you can, outside its folders too (Chief of Staff
+refuses only a few commands outright, such as `rm -r` of your home or the root, a push to the
+default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on (Settings;
+always for workers that read Slack, except on Codex), workers' shell commands can write only to
+their workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
+`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see your
+GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot sandbox
+ca trust` once so `gh` works inside Copilot's sandbox; Settings tells you when it is needed. Codex
+can't run workers while the sandbox is on (its sandbox hasn't passed Chief of Staff's checks yet).
+The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux
+the sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files
+that change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
 `config.worktree` where the repository reads one) after each of a worker's turns and before it
 runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that repository,
 and the timeline says "A git file appeared in .git (commondir). If you made it, use it." **Use
@@ -676,7 +677,7 @@ fails there; the worker carries on and its timeline notes it once. To let it wri
 folder under *Also writable in the sandbox*.
 
 Inside the sandbox, a worker cannot use your keychain, Docker or Kerberos tickets, or read your
-home and other repositories, and `gh` needs Copilot's certificate trusted. That is the price of the confinement; with the sandbox off they work as in your
+home and other repositories, and on Copilot `gh` needs Copilot's certificate trusted. That is the price of the confinement; with the sandbox off they work as in your
 terminal.
 
 ### Disk space
@@ -1494,8 +1495,8 @@ extension is involved, and the browser only answers the launcher's question.
 
 ## Abilities: skills, plugins and MCP servers
 
-Workers load everything your own Copilot sessions load: your plugins, skills, MCP servers and
-agents, your company's, and a repository's own. Settings → Connections → *Skills, plugins and MCP
+Copilot workers load everything your own Copilot sessions load: your plugins, skills, MCP servers
+and agents, your company's, and a repository's own. Settings → Connections → *Skills, plugins and MCP
 servers* adds more: add a skill (*Add a skill…*: paste a `SKILL.md` with a name and a
 description, or upload one; one with the name of a skill you have is refused, not replaced), name
 folders of skills (*Skill folders*, folded), list Copilot plugins to install
@@ -1588,7 +1589,7 @@ say plainly, a script fed to a shell on a line that pushes, and a command line t
 complex to check, are refused, saying so; what they don't read:
 [Known limits](../SECURITY.md#known-limits)). Protect your default branch on GitHub as well.
 
-**Yolo** is on by default: workers act without asking, as in your own Copilot sessions (the *Ask
+**Yolo** is on by default: workers act without asking, as in your own agent sessions (the *Ask
 first* checks don't run). Tick *Ask first* in Settings → General, whose line says which way it is
 and, under it, what holds either way (*no worker posts, reviews or merges on GitHub as you, pushes
 to main, or force-pushes others' branches*); or choose per worker in its header's **⋯**: *Yolo
@@ -2115,5 +2116,5 @@ stop answering after reopening one, Chief of Staff starts a new Copilot by itsel
 workers go on; that worker is not reopened again: its task says *Waiting for you: its Copilot
 session is too large to reopen here*, and its chat says so with *Start a fresh worker with its
 context*, which goes on with its task in a fresh session, told where it was. Chief of Staff's
-page opens even while Copilot is slow to start (you can ask once Copilot is connected), and stopping it
+page opens even while Copilot is slow to start (you can ask once it is connected), and stopping it
 never waits on Copilot for more than a few seconds.

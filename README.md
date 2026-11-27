@@ -155,8 +155,8 @@ restart** in the sidebar, or `uv tool upgrade chiefofstaff`.
 **Does it replace Copilot, Codex or Claude Code?** No. It runs them, on your own sign-ins and
 plans, and every worker stays a real session of its agent.
 
-**What does it cost?** Nothing itself. Work counts against the plans you already have; Home shows
-what each task used.
+**What does it cost?** Nothing itself. Each agent's work counts against your plan with it: Home
+shows the Copilot credits each task used, and Usage every agent's.
 
 **Can it post or merge as me?** Not on its own. Replies and reviews wait for your OK on a card, and
 the floor above holds on every agent. One exception you choose: reacting 🤖 to a Slack message is

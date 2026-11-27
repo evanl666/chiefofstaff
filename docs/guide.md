@@ -311,7 +311,7 @@ More: [Reference → Your other sessions](reference.md#your-other-sessions).
 ### How it learns you
 
 - **How you write.** Every two hours (or *Learn now* in Settings → You) it reads what you wrote:
-  your Slack messages, PR reviews, commit messages, what you asked your own agent sessions, what
+  your Slack messages, PR reviews, commit messages, what you asked your own Copilot sessions, what
   you told the Router. Only your own words. Your writing style applies to drafts at once.
 - **How you work.** Instructions you keep giving ("run a small smoke job first") become
   **habits**, which wait for your OK under *Your OK*.
@@ -381,10 +381,10 @@ Copilot work counts in credits; Codex and Claude work in tokens, shown on each w
 *Usage*. A *Limit per worker* (unfold the agent's row) stops a worker once it has spent it.
 
 **What differs.** Workers on Codex and Claude Code follow the same floor and the same
-*Ask first* checks. For now, preparing fixes in *Keep my PRs moving*, *Show where my other
-sessions stand* and learning from your own sessions read Copilot's sessions; with Codex alone,
-the worker sandbox keeps Codex workers from starting (its sandbox hasn't passed Chief of Staff's
-checks yet).
+*Ask first* checks. Some things stay Copilot's: Copilot plugins, premium requests (credits),
+learning from your past Copilot sessions, *Show where my other sessions stand*, and preparing
+fixes in *Keep my PRs moving*. Codex can't run workers while the worker sandbox is on (its
+sandbox hasn't passed Chief of Staff's checks yet).
 
 Everything else, including signing in and installing from Chief of Staff, API keys, setup
 failures, roles' fallback choices and downgrading: [Reference → Workers on other coding
@@ -398,7 +398,7 @@ Settings (the gear at the bottom of the sidebar) has four pages.
 | --- | --- |
 | **General** | *Code folder*; *Workers at once*; *Ask first* and *Sandbox* (see [Safety](#safety-and-privacy)); *Keep my PRs moving*; *A busy worker's new task starts at once*; *Daily summary*; desktop notifications. Under *More*: when finished workers close, when a task is *Overdue*, *Show where my other sessions stand*, update notices, other project folders, where task folders go |
 | **Agents & models** | Each agent's status, sign-in and *Use*; *Who does the work*: the agent, model and effort for new workers and for each of Chief of Staff's own sessions; what happens when an agent can't run |
-| **Connections** | *Slack*, *GitHub reviews*, *Watches*, *When you're away*, *Skills, plugins and MCP servers* (on top of what your agents have), *Send to Chief from the command line*, and *Pause watching* to stop all of them at once |
+| **Connections** | *Slack*, *GitHub reviews*, *Watches*, *When you're away*, *Skills, plugins and MCP servers* (more for workers; plugins are Copilot's), *Send to Chief from the command line*, and *Pause watching* to stop all of them at once |
 | **You** | *Learn from what I write*, *Learn now*, checks from mistakes; what was learned (writing styles, habits, checks, your profile); *Shared links* |
 
 **Usage** (the chart icon) shows credits and tokens by day, task and agent. **Storage** (the disk
@@ -406,9 +406,11 @@ icon) shows free space and each worker's folder: Chief of Staff deletes build ou
 worker closes or idles for three days, alerts you when the disk runs low, and lets you clean or
 keep a worker's files.
 
-Workers load what your own agent sessions load: your plugins, skills, MCP servers and custom
-agents, and a repository's own. Gitignored files a worktree needs (`.env`, `.env.*`, or what a
-`.worktreeinclude` lists) are copied in from your checkout.
+Workers on Copilot load what your own Copilot sessions load: your plugins, skills, MCP servers
+and custom agents, your company's, and a repository's own; workers on Codex and Claude Code use
+their agent's own configuration in the same way ([Reference → Workers on other coding
+agents](reference.md#workers-on-other-coding-agents)). Gitignored files a worktree needs
+(`.env`, `.env.*`, or what a `.worktreeinclude` lists) are copied in from your checkout.
 
 Environment variables (Slack token, timeouts, the Watchdog's timing, disk thresholds) are listed
 in [Reference → Settings and environment
@@ -434,17 +436,18 @@ exception is the one you choose: a 🤖 reaction is your OK for the one reply to
 checkout can't write there; a test it runs there runs in a copy.
 
 **Ask first** (Settings → General; off by default) has workers ask before writes outside their
-folders, `sudo`, any force push, piping a download into a shell, and other risky commands. Choose
-it per worker in its header's **⋯**. Workers that read Slack ask first unless you set otherwise
-for one.
+folders, `sudo`, any force push, piping a download into a shell, and other risky commands. Off,
+workers act without asking, as your own sessions of those agents do; the floor holds either way.
+Choose it per worker in its header's **⋯**. Workers that read Slack ask first unless you set
+otherwise for one.
 
 **Sandbox** (Settings → General; macOS and Linux) runs workers' commands in an OS sandbox: they
-write only in their own folders and can't read your SSH keys (on Copilot, they never see your
-GitHub token either).
-Workers that read Slack are sandboxed whatever the setting (on Copilot and Claude; on Codex every
-command asks Chief of Staff first), with the network limited to GitHub. Turn it on for
-repositories you don't trust: with it, settings a worker writes into its folder (hooks, MCP
-servers) never load without your word.
+write only in their own folders, never see your GitHub token, and can't read your SSH keys. Codex
+can't run workers while it is on (its sandbox hasn't passed Chief of Staff's checks yet). Workers
+that read Slack are always sandboxed on Copilot and Claude, with the network limited to GitHub;
+on Codex they run without a sandbox and ask first. Turn it on for repositories you don't trust:
+with it, settings a worker writes into its folder (hooks, MCP servers) never load without your
+word.
 
 **Privacy.** Everything runs on your machine and stays in your data folder
 (`~/Library/Application Support/chiefofstaff` on macOS, `~/.local/share/chiefofstaff` on
@@ -526,8 +529,8 @@ terminal* copies its agent's own command.
 **Does it work without Slack or GitHub?** Yes. Both are optional; without them you hand it work
 on Home, by hotkey or from the command line.
 
-**What does it cost?** Nothing itself. Work counts against your agents' plans; Home and Usage
-show what each task used.
+**What does it cost?** Nothing itself. Each agent's work counts against your plan with it:
+Home shows the Copilot credits each task used, and Usage every agent's.
 
 **Can I keep using my agents directly?** Yes. Sessions you start in a terminal are yours; Chief
 of Staff lists them under *Other sessions* and writes to none that is open elsewhere.

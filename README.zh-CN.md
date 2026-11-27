@@ -120,7 +120,7 @@ uv tool install chiefofstaff && chiefofstaff       # 或者：pipx install chief
 
 **它会取代 Copilot、Codex 或 Claude Code 吗？** 不会。它用你自己的登录和订阅来运行它们，每个 worker 都还是对应 agent 的真实 session。
 
-**要花钱吗？** 它本身不收费。工作计入你已有的订阅额度；Home 上能看到每个任务用了多少。
+**要花钱吗？** 它本身不收费。每个 agent 的用量算在你在那边的订阅里：Home 上显示每个任务用了多少 Copilot credits，Usage 里有每个 agent 的用量。
 
 **它会以我的名义发消息或合并吗？** 不会自作主张。回复和 review 都要你在卡片上同意，上面那条底线在每个 agent 上都成立。唯一的例外由你自己决定：在 Slack 消息上点 🤖，就等于同意它在那个讨论串里回一条。
 
