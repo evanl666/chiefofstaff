@@ -2,8 +2,14 @@
 itself, with a real uv and PyPI, into a `uv tool` install of this checkout made without the
 Claude extra (in a scratch folder: never the owner's tools, Claude or Copilot).
 
-  C1  Claude off, the SDK missing: its row says "Not set up yet" (it can be turned on); turned
-      on in Settings, "Setting up Claude…", then Ready, in the same process (no restart).
+  C0  A first start (a data folder Chief of Staff never ran in) with Claude Code alone ready
+      and the SDK missing: Claude is turned on and set up by itself, Home says "Setting up
+      Claude Code" meanwhile, then Chief of Staff runs on Claude, said once in its chat; Copilot,
+      not ready, is turned off (agents-anywhere: the first agent ready).
+  C1  Claude off, the SDK missing, not a first start (the agents' settings there, Claude off:
+      a first start would turn Claude on, C0): its row says "Not set up yet" (it can be turned
+      on); turned on in Settings, "Setting up Claude…", then Ready, in the same process (no
+      restart).
   C2  Chief of Staff installed again without the extra (`uv tool install --reinstall`, the same
       version), Claude on: set up as it starts, "Setting up Claude…" then Ready.
   C3  No network (uv offline, nothing cached): "Couldn't set up Claude: no network.", Retry, and
@@ -17,11 +23,12 @@ scenario but C3, and takes 2 to 5 minutes. Ports: LIVE_CLAUDE_SETUP_PORT (18990)
 after it. Scratch: a folder in TMPDIR, removed at the end (--keep keeps it); screenshots go to
 LIVE_CLAUDE_SETUP_SHOTS (browser-shots/claude-setup).
 
-    uv run --extra dev --with playwright python scripts/live_claude_setup.py [C1 C2 C3 C4]
+    uv run --extra dev --with playwright python scripts/live_claude_setup.py [C0 C1 C2 C3 C4]
 """
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -107,14 +114,21 @@ class World:
         )
         return self.run(str(python), "-c", code).stdout.strip()
 
-    def claude_on(self, data: Path):
+    def no_sdk(self):
+        """The SDK not in Chief of Staff's own environment (an earlier scenario set it up)."""
+        self.run("uv", "pip", "uninstall", "--python", str(self.python), "claude-agent-sdk")
+        assert self.sdk(self.python) == ""
+
+    def claude_on(self, data: Path, on: bool = True):
+        """Claude turned on (or off) in the data folder's agents' settings: then not a first
+        start, whatever else is there."""
         data.mkdir(parents=True, exist_ok=True)
         code = (
             "import sys; from pathlib import Path; from chiefofstaff.store import Store; "
             "from chiefofstaff import agents; agents.configure(Store(Path(sys.argv[1])), "
-            "'claude', enabled=True)"
+            "'claude', enabled=sys.argv[2] == '1')"
         )
-        done = self.run(str(self.python), "-c", code, str(data))
+        done = self.run(str(self.python), "-c", code, str(data), "1" if on else "0")
         assert done.returncode == 0, done.stderr
 
     def start(self, command: list[str], data: Path, port: int, cache: str, **more):
@@ -165,13 +179,63 @@ async def open_agents(page):
     )
 
 
-async def shot(page, name: str):
+def shot_path(name: str) -> Path:
     SHOTS.mkdir(parents=True, exist_ok=True)
-    await page.locator("#settings-dialog").screenshot(path=SHOTS / f"{name}.png")
+    return SHOTS / f"{name}.png"
+
+
+async def shot(page, name: str):
+    await page.locator("#settings-dialog").screenshot(path=shot_path(name))
+
+
+READY_ROUTER = """async () => {
+    const headers = {"X-Chief-Key": localStorage.getItem("cos.key") || ""};
+    const state = await (await fetch("/api/state", {headers, credentials: "omit"})).json();
+    return state.runtime?.state === "ready" && Boolean(state.router_id);
+}"""
+
+
+async def c0(world: World, browser, port: int):
+    world.no_sdk()
+    data = world.s / "data-first"
+    process, url = world.start([str(world.s / "bin" / "chiefofstaff")], data, port, "cache-c0")
+    try:
+        page = await browser.new_page(viewport={"width": 1100, "height": 900})
+        await page.goto(url)
+        await expect(page.locator("#application")).to_be_visible()
+        card = page.locator("#home-setup .label")
+        note = page.get_by_text(re.compile(r"^Chief of Staff runs on Claude\b"))
+        seen = await card.or_(note).first.inner_text(timeout=60000)
+        if seen == "Setting up Claude Code":
+            await page.screenshot(path=shot_path("c0-setting-up-home"))
+        else:
+            assert seen.startswith("Chief of Staff runs on Claude"), seen
+        await expect(page.locator("#home-setup")).to_have_count(0, timeout=240000)
+        # Running on Claude once set up (no restart): its Router there, the note said once. (A
+        # page open from before the Router existed shows its chat once reloaded.)
+        deadline = time.time() + 120
+        while not await page.evaluate(READY_ROUTER):
+            assert time.time() < deadline, "no Router running"
+            await asyncio.sleep(1)
+        await page.reload()
+        await expect(note).to_have_count(1, timeout=30000)
+        await page.screenshot(path=shot_path("c0-runs-on-claude"))
+        await open_agents(page)
+        await expect(page.locator("#agent-claude .agent-line .status")).to_have_text("Ready")
+        await expect(page.locator("input[name=agent_claude_enabled]")).to_be_checked()
+        await expect(page.locator("input[name=agent_copilot_enabled]")).not_to_be_checked()
+        await shot(page, "c0-ready")
+        assert process.poll() is None, "the same process: no restart"
+    finally:
+        stop(process)
+    assert world.sdk(world.python), "in Chief of Staff's own environment"
+    log("C0 ok: a first start with Claude alone: turned on, set up, runs on it, said once")
 
 
 async def c1(world: World, browser, port: int):
+    world.no_sdk()
     data = world.s / "data"
+    world.claude_on(data, False)  # Not a first start: Claude stays off (C0 is one).
     process, url = world.start([str(world.s / "bin" / "chiefofstaff")], data, port, "cache-c1")
     try:
         page, status = await agents_page(browser, url)
@@ -267,7 +331,7 @@ async def c4(world: World, browser, port: int):
 async def main():
     assert UV, "uv is needed"
     wanted = [arg.upper() for arg in sys.argv[1:] if not arg.startswith("--")] or [
-        "C1", "C2", "C3", "C4"
+        "C0", "C1", "C2", "C3", "C4"
     ]  # fmt: skip
     scratch = Path(tempfile.mkdtemp(prefix="cos-claude-setup-"))
     try:
