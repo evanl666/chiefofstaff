@@ -560,6 +560,41 @@ async def test_a_big_copilot_session_that_finished_its_turn_is_not_given_it_agai
         await runtime.stop()
 
 
+async def test_a_repeated_message_lost_at_a_stop_is_given_again(harness, monkeypatch):
+    """Review (Medium): the owner's "go on" to a worker, answered; "go on" again, which Copilot
+    lost at the stop (never written down). The answered one, the same words, was taken for it:
+    its turn counted as finished, and the second "go on" was never given."""
+    runtime = await harness.connect()
+    worker = await spawned(runtime, harness, "Port module A")
+    session = harness.session(worker)
+    session.emit("session.idle")
+    await settle(runtime)
+    await runtime.owner_send(worker, "go on")
+    session.emit("session.idle")
+    await settle(runtime)
+    await runtime.owner_send(worker, "go on")
+    session.sent.pop()  # Lost: never reached Copilot.
+    session.raw_sent.pop()
+    await runtime.stop()
+    events = FakeSession.get_events
+
+    async def each_answered(self):
+        said = SimpleNamespace(content="Done.", tool_requests=None)
+        answer = SimpleNamespace(type=SimpleNamespace(value="assistant.message"), data=said)
+        return [item for event in await events(self) for item in (event, answer)]
+
+    monkeypatch.setattr(FakeSession, "get_events", each_answered)
+    again = Harness(harness.store.directory, client=harness.client)
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        sent = again.session(worker).sent
+        assert given("go on", sent) == 2, "given again, once"
+        assert again.store.session(worker)["status"] == "working"
+    finally:
+        await runtime.stop()
+
+
 # The stop ends the agents' processes
 
 
