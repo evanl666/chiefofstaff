@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "chiefofstaff"
 version = "0.1.60"
-description = "One inbox for all your GitHub Copilot sessions: tasks and follow-ups go to the right session, Slack replies wait for your approval, and finished work waits for your review."
+description = "Your engineering chief of staff: runs Copilot, Codex and Claude Code as one team, follows every piece of work through to done, learns to work like you, and brings you only the decisions."
 license = "MIT"
 dynamic = ["readme"]
 license-files = ["LICENSE"]
 authors = [{ name = "evanl666" }]
 requires-python = ">=3.11"
-keywords = ["github-copilot", "ai-agents", "multi-agent", "orchestration", "slack", "developer-tools"]
+keywords = ["coding-agents", "github-copilot", "codex", "claude-code", "ai-agents", "multi-agent", "agent-orchestration", "human-in-the-loop", "slack", "developer-tools"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Web Environment",
@@ -62,17 +62,32 @@ dev = [
 [project.scripts]
 chiefofstaff = "chiefofstaff.cli:main"
 
-# The README links images and docs relatively, which works on GitHub (private or public); PyPI
-# gets absolute links.
+# PyPI's description is the README. Its pictures are absolute URLs (on main), so they show on
+# GitHub and PyPI alike; relative links are made absolute for PyPI.
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 content-type = "text/markdown"
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
 path = "README.md"
 
+# PyPI shows the README of the version it was uploaded with: GitHub-only parts (a video, say)
+# go, and its pictures are this version's (its tag's), so a later change on main never breaks
+# them. PyPI keeps img, details and tables, never video or style.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(?s)<!-- gh-only -->.*?<!-- /gh-only -->\n?'
+replacement = ''
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'https://raw\.githubusercontent\.com/evanl666/chiefofstaff/main/'
+replacement = 'https://raw.githubusercontent.com/evanl666/chiefofstaff/v$HFPR_VERSION/'
+
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '\]\((docs/images/[^)]+)\)'
-replacement = '](https://raw.githubusercontent.com/evanl666/chiefofstaff/main/\1)'
+replacement = '](https://raw.githubusercontent.com/evanl666/chiefofstaff/v$HFPR_VERSION/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'src="(?!https?://)([^"]+)"'
+replacement = 'src="https://raw.githubusercontent.com/evanl666/chiefofstaff/v$HFPR_VERSION/\1"'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '\]\((?!https?://|#)([^)]+)\)'
@@ -80,6 +95,10 @@ replacement = '](https://github.com/evanl666/chiefofstaff/blob/main/\1)'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chiefofstaff"]
+
+# The README's pictures and clip are shown from GitHub (on PyPI too): not in the source archive.
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/images"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
