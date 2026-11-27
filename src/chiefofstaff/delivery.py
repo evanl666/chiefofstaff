@@ -817,7 +817,7 @@ class Delivery:
                 return 0, 0
             events = [
                 (getattr(event.type, "value", str(event.type)), event.data)
-                for event in await self.conversation(session_id, session)
+                for event in await self.conversation(session_id, session, latest=True)
             ]
         except Exception:
             logger.warning("Could not read what %s did.", session_id, exc_info=True)

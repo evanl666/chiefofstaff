@@ -525,6 +525,41 @@ async def test_a_session_failed_after_a_restart_does_not_go_on_by_itself_later(
         await runtime.stop()
 
 
+async def test_a_big_copilot_session_that_finished_its_turn_is_not_given_it_again(
+    tmp_path, monkeypatch
+):
+    """Review (Medium): a Copilot session whose log is big (the owner's Router is) is read from
+    its log, which gave its messages only: its answer never showed, so a turn it finished
+    before the stop was seen here was given again."""
+    from chiefofstaff import backend as backend_module
+
+    monkeypatch.setattr(backend_module, "BIG_LOG", 4096, raising=False)
+    harness = Harness(tmp_path / "data")
+    harness.client.home = tmp_path / "copilot"
+    runtime = await harness.connect()
+    router = harness.router_id
+    await runtime.owner_send(router, "Is the deploy done?")
+    await runtime.stop()
+    copilot = runtime.copilot_id(router)
+    log = harness.client.home / "session-state" / copilot / "events.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    said = harness.session(router).raw_sent
+    lines = [{"type": "tool.execution_complete", "data": {"result": "x" * 8000}}]
+    lines += [{"type": "user.message", "data": {"content": prompt}} for prompt in said]
+    answer = {"content": "Yes, at 9:02.", "toolRequests": []}
+    lines += [{"type": "assistant.message", "data": answer}]
+    log.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    sent = len(harness.session(router).sent)
+    again = Harness(harness.store.directory, client=harness.client)
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        assert len(again.session(router).sent) == sent, "nothing given again"
+        assert again.store.session(router)["status"] == "idle"
+    finally:
+        await runtime.stop()
+
+
 # The stop ends the agents' processes
 
 
