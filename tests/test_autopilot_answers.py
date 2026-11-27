@@ -4,10 +4,12 @@ its decisions kept apart from the owner's."""
 
 import asyncio
 import json
+import sys
 import time
 
 import pytest
 from conftest import Harness, call_tool, settle
+from test_agents_anywhere import codex_log  # noqa: F401  (a fixture)
 
 from chiefofstaff import ingress
 from chiefofstaff.autopilot.answers import SHARED
@@ -134,10 +136,42 @@ async def test_the_judge_decides_with_the_routers_model_and_effort_on_copilot(tm
     assert (options["model"], options.get("reasoning_effort")) == ("smart-model", "high")
     assert runtime.agent(judge["id"]) == "copilot"
     old = runtime.store.settings()
-    new = old.model_copy(update={"role_models": {"router": "fast-model"}})
+    new = old.model_copy(update={"role_models": {**old.role_models, "router": "other-model"}})
     runtime.store.save_settings(new)
-    assert runtime.chosen_model(harness.store.session(judge["id"])) == "fast-model"
+    assert runtime.chosen_model(harness.store.session(judge["id"])) == "other-model"
     assert runtime.chosen_model(harness.store.session(session)) == "fast-model"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Other agents need macOS/Linux")
+async def test_the_judge_runs_where_the_router_runs_with_its_model_there(
+    tmp_path,
+    codex_log,  # noqa: F811  (the fixture, imported)
+):
+    """Agents anywhere (0.1.60): the Router on Codex, the helpers on Copilot: Autopilot's judge
+    decides for the owner, so it runs on the Router's agent with the Router's model there (not
+    the helpers', not the workers'), with nothing but its one tool; never the Router's session."""
+    from test_agents_anywhere import thread_starts, tool_names
+    from test_roles import saved, started
+
+    from chiefofstaff import agents
+
+    _, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"},
+                              "models": {"router": {"codex": {"model": "gpt-big"}},
+                                         "helpers": {"codex": {"model": "gpt-mini"}}}})  # fmt: skip
+        made = await runtime.toolset.start_special("judge", "Autopilot's judge", "Judge: ok")
+        judge = made["session_id"]
+        assert runtime.agent(judge) == "codex"
+        assert runtime.role_key(runtime.store.session(judge)) == "", "a worker, not a role"
+        assert agents.runs_as("worker", "judge") == "router"
+        await until(lambda: any("propose_answer" in tool_names(p)
+                                for p in thread_starts(codex_log)), 20)  # fmt: skip
+        (params,) = [p for p in thread_starts(codex_log) if "propose_answer" in tool_names(p)]
+        assert tool_names(params) == ["propose_answer"]
+        assert params.get("model") == "gpt-big", "the Router's model on Codex"
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.parametrize(

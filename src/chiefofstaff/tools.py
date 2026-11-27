@@ -1952,7 +1952,7 @@ class Tools:
             raise ValueError(f"“{row['title']}” is at work already.")
         # Held as reopening does: a removal of its folder started when it closed waits.
         # Its run on the agent Settings put its kind on (another while that can't run it).
-        agent = await self.runtime.helper_agent(agents.kind_of(WORKER, special))
+        agent = await self.runtime.helper_agent(agents.runs_as(WORKER, special))
         async with self.states[session_id].checkouts, self.states[session_id].lifecycle:
             await self.runtime.drop_handle(session_id)
             fresh = str(uuid4())
@@ -2153,7 +2153,7 @@ class Tools:
         if special:
             # Watch for you and the helpers on the agent Settings put their kind on, once that
             # can run them (another meanwhile).
-            agent = await self.runtime.helper_agent(agents.kind_of(WORKER, special))
+            agent = await self.runtime.helper_agent(agents.runs_as(WORKER, special))
         if agent == agents.COPILOT:
             await self.runtime.check_model(params.model)
         else:
@@ -2344,8 +2344,6 @@ class Tools:
             self.store.set(f"parts:{task['id']}", json.dumps(parts))
         if special:  # Its own tools: see Runtime.tool_names.
             self.store.set(f"{special}:{session_id}", "1")
-            if special == "judge":
-                self.runtime.judges().add(session_id)  # Its model: Runtime.model_role.
         # A PR the task is to act on is followed: its reviews, replies and CI come to the worker
         # (not one its instructions only mention: news there is not this task's).
         self.runtime.follow(

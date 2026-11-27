@@ -197,6 +197,14 @@ def kind_of(role: str, special: str = "") -> str:
     return WORKERS if role == "worker" else role
 
 
+def runs_as(role: str, special: str = "") -> str:
+    """The kind of work whose agent, model and effort a session takes: its own (kind_of), but
+    Autopilot's judge, which decides for the owner, the Router's: where the Router runs (or the
+    agent the Router would go on with), with the Router's model and effort there. Never a role
+    session of its own (kind_of: a worker)."""
+    return "router" if special == "judge" else kind_of(role, special)
+
+
 def kind_model(store: Store, kind: str, agent: str, settings: Any = None) -> dict[str, str]:
     """The model and effort Settings chose for a kind of work on an agent ("" each: the
     agent's own default)."""
