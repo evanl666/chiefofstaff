@@ -72,17 +72,18 @@ Copilot session，跟踪所有进展，只在需要我做决定、或者有草�
 （Codex 和 Claude Code 支持 macOS 和 Linux；Windows 上目前只能用 Copilot）：
 
 ```bash
-npm install -g @github/copilot && copilot login   # 或者：codex login、claude auth login
 uvx chiefofstaff@latest    # 或者：uv tool install chiefofstaff && chiefofstaff
 ```
 
 Chief of Staff 会用已就绪的那个（先 Copilot，再 Codex，再 Claude Code），每个 session 都可以在
-Settings → Agents & models 里换到任意一个上运行。
+Settings → Agents & models 里换到任意一个上运行。还没有安装或登录任何一个？Home 的卡片上每个都有
+*Install* 和 *Sign in*，由它替你运行（也可以在终端里自己运行：`npm install -g @github/copilot && copilot login`、
+`codex login`、`claude auth login`）。
 
 浏览器会通过终端里打印的私密链接打开 Chief of Staff（这个链接别给别人）。告诉它你的代码放在哪，比如 `~/workspace`，然后说你要做什么。
 
 所有东西都在你的电脑上跑，数据存在 `~/Library/Application Support/chiefofstaff`（macOS）或
-`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows；若使用从应用商店安装的 Python，Windows 会把它放在该 Python 的 `%LOCALAPPDATA%\Packages\...\LocalCache` 下，启动时 `Data:` 一行会显示实际位置）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：用 `uvx` 启动时务必写 `uvx chiefofstaff@latest`（不带 `@latest` 的 `uvx chiefofstaff` 会一直运行第一次缓存的旧版本）；用 `uv tool install` 安装的，运行 `uv tool upgrade chiefofstaff`。有新版本时侧边栏会提示（可在 Settings → General 关闭）。
+`~/.local/share/chiefofstaff`（Linux）或 `%LOCALAPPDATA%\chiefofstaff\chiefofstaff`（Windows；若使用从应用商店安装的 Python，Windows 会把它放在该 Python 的 `%LOCALAPPDATA%\Packages\...\LocalCache` 下，启动时 `Data:` 一行会显示实际位置）。Ctrl+C 停止，下次启动时 session 会接着之前的进度。参数：`--port`、`--data-dir`、`--no-browser`、`--demo`。升级：用 `uvx` 启动时务必写 `uvx chiefofstaff@latest`（不带 `@latest` 的 `uvx chiefofstaff` 会一直运行第一次缓存的旧版本）；有新版本时侧边栏会提示（可在 Settings → General 关闭），点 **Update and restart** 即可（用 `uv tool`、pipx 或装进自己虚拟环境的 pip 安装的都可以）；也可以自己运行 `uv tool upgrade chiefofstaff`（或 `pipx upgrade chiefofstaff`）。
 
 Windows 支持为实验性：暂不支持 Send to Chief、Copilot 命令沙箱、沙箱内的自动检查，以及 Storage
 中的目录大小统计（依赖 `du`）；worker
