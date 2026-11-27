@@ -2122,9 +2122,10 @@ async def shepherd_views(runtime, browser, quality: Quality):
                     # Its lines are whole at 800 px: nothing of their meaning cut off.
                     cut = await page.evaluate(CUT_LINES)
                     quality.failures += [f"shepherd 800 {scheme}: cut off: {text}" for text in cut]
-                    # Its rows, as the owner reads them there.
+                    # Its rows, as the owner reads them there. (The other PR given to a task
+                    # may be paused too by then: the shepherd's own look finds its newer head.)
                     rows = page.locator("#needs .card.task.marker-kept-paused")
-                    await rows.scroll_into_view_if_needed()
+                    await rows.first.scroll_into_view_if_needed()
                     await page.screenshot(path=folder / f"rows-800-{scheme}.png")
                     await page.locator("#prepared").scroll_into_view_if_needed()
                     await page.screenshot(path=folder / f"prepared-800-{scheme}.png")
