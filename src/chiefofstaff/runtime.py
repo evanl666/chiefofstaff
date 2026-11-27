@@ -2038,13 +2038,33 @@ class Runtime:
         for row in self.store.open_sessions():
             if ids is not None and row["id"] not in ids:
                 continue
-            if row["status"] != "working" and not self.store.get(f"cutshort:{row['id']}"):
+            cut = self.cut_off(row)
+            if not cut and not self.store.get(f"cutshort:{row['id']}"):
                 continue
             on = self.agent(row["id"])
             if agent is None or on == agent:
-                if row["status"] == "working":
+                if cut:
                     self.cut_short(row["id"], why)
                 self.reconnecting.setdefault(row["id"], on)
+
+    def turn_over(self, session_id: str):
+        """Its turn cut short ends without going on (stopped, its agent can't start): taken as
+        idle up to what it was sent, never as in flight again (cut_off)."""
+        sent = int(self.store.get(f"sent:{session_id}") or 0)
+        if sent > int(self.store.get(f"idle:{session_id}") or 0):
+            self.store.set(f"idle:{session_id}", str(sent))
+
+    def cut_off(self, row: dict) -> bool:
+        """Whether a turn of it was in flight as Chief of Staff or its agent stopped, where no
+        stop marked it (cut_short_all: killed, crashed): at work, or waiting for the owner while
+        its turn went on (it asked and kept at it), which only its marks show then: it was sent
+        a message after it was last idle."""
+        if row["status"] == "working":
+            return True
+        if row["status"] != "waiting":
+            return False
+        sent = int(self.store.get(f"sent:{row['id']}") or 0)
+        return sent > int(self.store.get(f"idle:{row['id']}") or 0)
 
     async def check_agent(self, agent: str, backend: Any):
         """What Chief of Staff's checks rely on, checked once per version of another agent (its
@@ -2329,7 +2349,7 @@ class Runtime:
                 "send it a message to try again.",
             )
             return
-        if row["status"] == "working":
+        if self.cut_off(row):
             self.cut_short(worker, self.restart_words(agent, own=True))
         try:
             await self.reconcile_sends(agent, only=[worker])
@@ -2383,6 +2403,14 @@ class Runtime:
         for key in self.at_work_on(agent) if working is None else working:
             if (row := self.store.find_session(key)) and not row["closed_at"]:
                 self.fail(row, why)
+        # One waiting for the owner as its turn was cut short (cut_off) waits on, its turn over:
+        # never resumed by itself later.
+        for key in self.on_agent(
+            agent, [k.removeprefix("cutshort:") for k in self.store.keys("cutshort:")]
+        ):
+            self.store.delete(f"cutshort:{key}")
+            self.turn_over(key)
+            self.resume_over(key)
 
     # Admission: whether another agent's worker may run now. Copilot's sessions always may.
 
@@ -10114,7 +10142,7 @@ class Runtime:
         ids = [
             row["id"]
             for row in rows
-            if row["status"] == "working" or row["id"] in sending or row["id"] in cut
+            if self.cut_off(row) or row["id"] in sending or row["id"] in cut
         ]
         return self.on_agent(agent, ids)
 
@@ -10210,6 +10238,7 @@ class Runtime:
             ]
             if given:
                 self.store.set(f"sent:{session_id}", str(given[0] - 1))
+        self.turn_over(session_id)
         self.delivery.defer_pending(session_id)
         if (trying := self.resume_tries.pop(session_id, None)) and not trying.done():
             trying.cancel()
@@ -10265,7 +10294,7 @@ class Runtime:
             )
             outcome = {True: "it arrived", False: "resending", None: "unknown, resending"}
             logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
-            if row["status"] != "working":
+            if row["status"] != "working" and not self.delivery.cut_record(session_id):
                 self.resumed(session_id)
 
     async def resume_working(
@@ -10289,7 +10318,7 @@ class Runtime:
             # Not marked as its agent started (gate_resumes): its turn cut short now, before
             # anything is awaited.
             for row in rows:
-                if row["id"] in mine and row["status"] == "working":
+                if row["id"] in mine and self.cut_off(row):
                     self.cut_short(row["id"], what)
         for row in rows:
             if row["id"] not in mine:

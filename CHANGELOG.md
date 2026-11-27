@@ -16,7 +16,8 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   gets that again, once, with one line in its chat (*Chief of Staff restarted; asked the session
   to continue.*): your message to the Router, the Router's to a worker, a report to the Router.
   What its agent's own record shows it finished (Codex's turn completed, Copilot's or Claude's
-  final answer) is not given again. Your message says *Waiting to be sent* until it goes.
+  final answer) is not given again. Your message says *Waiting to be sent* until it goes. One
+  whose agent can't start again does not go back to that turn by itself later.
 - **Reconnecting, not thinking.** Until it is resumed, a session says *Reconnecting to Codex…*
   (or its agent's name) on Home and in its chat, with no *Stop*. A resume given up after three
   minutes is not the end: it is tried again by itself, waiting longer each time, and *Retry*
