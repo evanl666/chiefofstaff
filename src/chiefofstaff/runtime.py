@@ -10277,6 +10277,7 @@ class Runtime:
                 continue
             if row["role"] == SLACK and not self.slack.configured():
                 self.resume_over(row["id"])
+                self.store.delete(f"cutshort:{row['id']}")
                 continue
             if row["status"] != "working" and not self.store.get(f"cutshort:{row['id']}"):
                 if self.delivery.has_unsent(row["id"]):
@@ -10285,6 +10286,7 @@ class Runtime:
                 continue
             if agent == COPILOT_AGENT and self.too_large(row["id"]):
                 self.resume_over(row["id"])
+                self.store.delete(f"cutshort:{row['id']}")  # (Its fresh one is told.)
                 self.hold_too_large(row)  # Never resumed: it waits for a fresh one.
                 self.resumed(row["id"])
                 continue
