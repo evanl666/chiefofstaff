@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from . import ingress
 from .asks import asks_back, clock
 from .envelope import wrap
-from .ledger import related, same_value
+from .ledger import apart, likeness, option_words, related, same_value, topic
 from .models import DraftDecision, NestedArguments
 from .roles import ROUTER, WORKER
 from .store import hours_ago, now
@@ -144,6 +144,63 @@ def clean(text: str, limit: int) -> str:
     return " ".join(text.split())[:limit]
 
 
+def brief(text: str, limit: int) -> str:
+    """Text cut to `limit` at a word, marked with "…" (never cut silently mid-word)."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    if (space := cut.rfind(" ")) > limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.-\u2013\u2014") + "\u2026"
+
+
+# How long a card's parts may be: kept whole up to these (the card folds what is long, and the
+# owner opens it whole); longer, the worker is told to say it shorter (QA 0.1.61 Q11: the
+# question was cut mid-word at 300 characters, its choice lost, and nobody said so).
+QUESTION_MAX = 1500
+WHY_MAX = 3000
+CHOICE_MAX = 200
+EFFECT_MAX = 800
+OPTIONS_MAX = 4
+
+
+def card_parts(params: AskDecision) -> tuple[list[dict], str, str]:
+    """A card's options, why and recommendation as asked, whole; too long, refused with how."""
+    options = [o for o in params.options if o.choice.strip()]
+    if len(options) > OPTIONS_MAX:
+        raise ValueError(
+            f"Not asked: {len(options)} options. Give the owner {OPTIONS_MAX} at most (the ones "
+            "that matter); they can always write their own."
+        )
+    for option in options:
+        if len(" ".join(option.choice.split())) > CHOICE_MAX:
+            raise ValueError(
+                f"Not asked: an option is a few words (under {CHOICE_MAX} characters): "
+                f"“{brief(option.choice, 80)}”. Say what it means in its effect."
+            )
+        if len(" ".join(option.effect.split())) > EFFECT_MAX:
+            raise ValueError(
+                f"Not asked: the effect of “{brief(option.choice, 80)}” is too long (over "
+                f"{EFFECT_MAX} characters). Say it in a line or two."
+            )
+    why = " ".join(params.why.split())
+    recommendation = " ".join(params.recommendation.split())
+    if len(why) > WHY_MAX or len(recommendation) > EFFECT_MAX:
+        raise ValueError(
+            "Not asked: why (or the recommendation) is too long. Say it in a few lines: what you "
+            "found, and what each option changes."
+        )
+    return (
+        [
+            {"choice": clean(o.choice, CHOICE_MAX), "effect": clean(o.effect, EFFECT_MAX)}
+            for o in options
+        ],
+        why,
+        recommendation,
+    )
+
+
 class Decisions:
     def __init__(self, runtime: Runtime):
         self.runtime = runtime
@@ -222,9 +279,15 @@ class Decisions:
         row = self.store.session(caller)
         if row["role"] != WORKER:
             raise ValueError("Only workers ask the owner for decisions.")
-        question = clean(params.question, 300)
+        question = " ".join(params.question.split())
         if not question:
             raise ValueError("Say what the owner should decide.")
+        if len(question) > QUESTION_MAX:
+            raise ValueError(
+                f"Not asked: the question is {len(question)} characters. Ask it in a line or "
+                "two, with its choice in it, and put the detail in why."
+            )
+        card_parts(params)  # (Refused before anything is asked.)
         if params.task_id.strip():
             task = self.tasks.find(params.task_id.strip())
             if not task or task["session_id"] != caller:
@@ -260,6 +323,7 @@ class Decisions:
         # the asking model): joined within its request, decided already, or a card of its own.
         subject: dict | None = None
         found: list[dict] = []
+        matches: list[dict] = []
         linked = {d["id"] for d in self.for_task(task["id"])} if task else set()
         if not (params.same_as.strip() or reconsidered):
             same = [card for card in mine if same_words(question, card["target"]["question"])]
@@ -268,6 +332,17 @@ class Decisions:
                     f"Asked already: card {same[0]['id']} waits for the owner's decision. It "
                     'arrives as a type="decision" message. End your turn now, unless parts of '
                     "your task do not depend on it."
+                )
+            if alike := [c for c in mine if self.same_choice(c, question, params.options)]:
+                # Its own card asks this choice already, in other words: that card, whatever
+                # distinct says (QA 0.1.61 Q2: two cards for one choice from one worker).
+                card = alike[0]
+                return (
+                    f"Asked already: your card {card['id']} (“{card['target']['question']}”) "
+                    "asks the owner this choice; it waits for their decision. To ask it as it "
+                    f'stands now, call ask_decision with same_as="{card["id"]}" and the '
+                    "question, why and options: that card is updated. End your turn now, unless "
+                    "parts of your task do not depend on it."
                 )
             joined = [c for c in mine if any(a.get("joined") for a in c["target"]["askers"])]
             if mine and not params.distinct:
@@ -289,7 +364,9 @@ class Decisions:
                     "expired",
                     CLOSED,
                 )
-            found = [m for m in ledger.match(question, anchor) if m["level"] == "same"]
+            choices = [o.choice for o in params.options]
+            matches = ledger.match(question, anchor, options=choices)
+            found = [m for m in matches if m["level"] == "same"]
             decision = next(
                 (
                     d
@@ -304,8 +381,12 @@ class Decisions:
                     for d in reversed(self.for_task(task["id"]) if task else [])
                     if d["status"] == "active"
                     and (
-                        related(question, d["text"].partition(" \u2192 ")[0])
-                        or self.same_options(d, params.options)
+                        related(
+                            question,
+                            d["text"].partition(" \u2192 ")[0],
+                            option_words(choices) | ledger.decision_values(d),
+                        )
+                        or self.same_options(d, params.options, question)
                     )
                 ),
                 None,
@@ -359,7 +440,9 @@ class Decisions:
             target = card["target"]
             auto = not reconsidered and subject is not None and card not in mine
             if caller not in {a["session_id"] for a in target["askers"]}:
-                target["askers"].append({**asker, **({"joined": True} if auto else {})})
+                # Its own words, shown on the card when they are not the card's (QA 0.1.61 Q3).
+                own = {} if same_words(question, target["question"]) else {"question": question}
+                target["askers"].append({**asker, **({"joined": True} if auto else {}), **own})
                 self.bus.publish("draft", self.store.update_draft_target(card["id"], target))
             ledger.file(
                 "decision",
@@ -391,16 +474,12 @@ class Decisions:
                     "differs."
                 )
         else:
-            options = [
-                {"choice": clean(o.choice, 120), "effect": clean(o.effect, 300)}
-                for o in params.options
-                if o.choice.strip()
-            ][:4]
+            options, why, recommendation = card_parts(params)
             target = {
                 "question": question,
-                "why": clean(params.why, 600),
+                "why": why,
                 "options": options,
-                "recommendation": clean(params.recommendation, 300),
+                "recommendation": recommendation,
                 "askers": [asker],
                 "precedents": [p["text"] for p in precedents],
             }
@@ -445,7 +524,7 @@ class Decisions:
         # owner to answer it with that decision in one click (Merge), never by itself (E159).
         before = [
             d
-            for match in found
+            for match in matches
             if not match["joins"] and (d := self.runtime.ledger.decided(match["subject"]))
         ][:2]
         said = "".join(
@@ -458,21 +537,40 @@ class Decisions:
             f"message. End your turn now, unless parts of your task do not depend on it.{said}"
         )
 
-    def same_options(self, decision: dict, options: list[DecisionOption]) -> bool:
+    def same_options(self, decision: dict, options: list[DecisionOption], question: str) -> bool:
         """Whether a question offers the choices a decision its task relies on was made among
         (live D2: "Which file format does the export use?" with CSV and JSON, after "CSV or
-        JSON?"): two of them or more, not counting yes, no and the like."""
-        asked = {plain for o in options if (plain := same_key(o.choice)) not in TRIVIAL}
-        if len(asked) < 2:
-            return False
-        decided = {same_key(value(decision["text"]))}
+        JSON?"): two of them or more, not counting yes, no and the like, about nothing the
+        other does not name (the metrics server's port is not the API's: QA 0.1.61 Q3)."""
         subject = self.runtime.ledger.of_decision(decision)
+        decided = [value(decision["text"])]
         for row in self.store.all(
             "SELECT options FROM asks WHERE subject_id=? AND options!=''",
             (subject["id"] if subject else "",),
         ):
-            decided |= {same_key(choice) for choice in json.loads(row["options"])}
-        return len(asked & (decided - TRIVIAL)) >= 2
+            decided += json.loads(row["options"])
+        return self.alike_options(
+            [o.choice for o in options], decided, question, decision["text"].partition(" → ")[0]
+        )
+
+    @staticmethod
+    def alike_options(mine: list[str], theirs: list[str], one: str, other: str) -> bool:
+        """Two asks offering two or more of the same options (not yes, no and the like), about
+        nothing the other does not name."""
+        asked = {plain for choice in mine if (plain := same_key(choice)) not in TRIVIAL}
+        given = {same_key(choice) for choice in theirs} - TRIVIAL
+        values = option_words([*mine, *theirs])
+        return len(asked & given) >= 2 and not apart(topic(one), topic(other), values)
+
+    def same_choice(self, card: dict, question: str, options: list[DecisionOption]) -> bool:
+        """Whether a question asks the choice an open card of its asker asks (in other words,
+        or among the same options): Chief of Staff tells, not the model (E159, QA 0.1.61 Q2)."""
+        target = card["target"]
+        theirs = [o["choice"] for o in target.get("options") or []]
+        mine = [o.choice for o in options]
+        values = option_words([*mine, *theirs])
+        same = likeness(question, target["question"], values)[0] == "same"
+        return same or self.alike_options(mine, theirs, question, target["question"])
 
     def shown(self, caller: str, task: dict | None, decisions: list[dict], distinct: bool) -> bool:
         """Whether it was shown these decisions its task relies on and says its question is
@@ -489,16 +587,12 @@ class Decisions:
         """Its own open card, asked again with what it found since (E155): the same card, its
         question, why, options and recommendation as they stand now, stamped updated."""
         target = dict(card["target"])
-        options = [
-            {"choice": clean(o.choice, 120), "effect": clean(o.effect, 300)}
-            for o in params.options
-            if o.choice.strip()
-        ][:4]
+        options, why, recommendation = card_parts(params)
         changed = {
             "question": question,
-            "why": clean(params.why, 600),
+            "why": why,
             "options": options,
-            "recommendation": clean(params.recommendation, 300),
+            "recommendation": recommendation,
         }
         target |= {key: said for key, said in changed.items() if said}
         if target == card["target"]:
@@ -594,9 +688,8 @@ class Decisions:
             # first card, their words are their decision.
             return await self.note(card, kept, choice)
         tasks = [asker["task_id"] for asker in target["askers"] if asker["task_id"]]
-        replaces = [self.current(target["replaces"])["id"]] if target.get("replaces") else []
         recorded = await self.record(
-            f"{question} → {choice}", tasks, replaces, f"card:{card['id']}"
+            f"{question} → {choice}", tasks, self.replaced_by(card), f"card:{card['id']}"
         )
         best = self.recommended(target)
         self.runtime.learning.record(
@@ -786,6 +879,113 @@ class Decisions:
                 self.store.update_draft(card_id, status="pending", outcome="", resolved_at=None)
             self.bus.publish("draft", self.store.draft(card_id))
 
+    def replaced_by(self, card: dict) -> list[str]:
+        """What a card's answer replaces: the decision it reconsiders, or the one decided on its
+        choice another way while it waited (the Router recorded it, say): one in force, never
+        two (QA 0.1.61 Q1)."""
+        if replaces := card["target"].get("replaces"):
+            return [self.current(replaces)["id"]]
+        ledger = self.runtime.ledger
+        decided = ledger.decided(ledger.subject_of("decision", card["id"]))
+        return [decided["id"]] if decided else []
+
+    async def relayed(self, session_id: str, task: dict | None, text: str) -> list[dict]:
+        """The Router passed the owner's answer on to a worker waiting on its decision card
+        (message_session with answers_question): the card is answered once, through the Router
+        (QA 0.1.61 Q1: it stayed under Needs you, and answered later, two decisions were in
+        force). A message that names one of its options is their decision on it; the other
+        workers that waited on it hear it (this one has the Router's message). The cards."""
+        cards = [
+            card
+            for card in self.open_cards("decision")
+            if any(self.asker_of(a, session_id, task) for a in card["target"]["askers"])
+        ]
+        for card in cards:
+            target = card["target"]
+            picked = self.named(target, text) if target.get("options") else ""
+            recorded = None
+            if picked:
+                tasks = [a["task_id"] for a in target["askers"] if a["task_id"]]
+                result = await self.record(
+                    f"{target['question']} → {picked}",
+                    tasks,
+                    self.replaced_by(card),
+                    f"router:{card['id']}",
+                )
+                recorded = result["decision"]
+            short = brief(picked or text, 80)
+            closed = self.close(card["id"], "answered", f"Answered through the Router: {short}")
+            others = [a for a in target["askers"] if not self.asker_of(a, session_id, task)]
+            if others:
+                said = (
+                    f"The owner decided (the Router passed it on): {picked}"
+                    if picked
+                    else f"The Router answered for the owner: {text}"
+                )
+                await self.tell_askers(
+                    {**closed, "target": {**target, "askers": others}},
+                    said,
+                    f"Decision: {short}",
+                    recorded["id"] if recorded else "",
+                    f"Decided: {short}",
+                )
+            with suppress(Exception):
+                await self.runtime.ledger.settle(
+                    "decision", card["id"], picked or text, decision=recorded, by="router"
+                )
+        return cards
+
+    def withdraw(self, session_id: str, task: dict, why: str) -> list[dict]:
+        """A worker no longer waits on its decision cards on a task (it finished without the
+        owner's decision): it leaves them; one nobody else waits on closes, saying why."""
+        left = self.drop_askers(lambda a: self.asker_of(a, session_id, task), "expired", why)
+        for card in left:
+            self.runtime.ledger.drop("decision", card["id"], session_id)
+        return left
+
+    async def settled_by_router(self, decision: dict, tasks: list[str]) -> list[dict]:
+        """A decision the Router recorded for tasks that wait on a decision card of the same
+        choice (the owner told it the answer): those cards are answered with it, once (QA 0.1.61
+        Q1), the decision in force on that choice; the workers it was linked to heard it."""
+        ledger = self.runtime.ledger
+        question = decision["text"].partition(" \u2192 ")[0]
+        answered = []
+        for card in self.open_cards("decision"):
+            target = card["target"]
+            if target.get("replaces") or not any(
+                a.get("task_id") in tasks for a in target["askers"]
+            ):
+                continue
+            subject = ledger.subject_of("decision", card["id"]) or {}
+            values = option_words([o["choice"] for o in target.get("options") or []])
+            if (
+                subject.get("decision_id") != decision["id"]
+                and likeness(question, target["question"], values)[0] != "same"
+            ):
+                continue
+            short = brief(value(decision["text"]), 80)
+            closed = self.close(card["id"], "answered", f"Decided through the Router: {short}")
+            others = [a for a in target["askers"] if a.get("task_id") not in tasks]
+            if others:
+                await self.tell_askers(
+                    {**closed, "target": {**target, "askers": others}},
+                    f"The owner decided (the Router recorded it): {value(decision['text'])}",
+                    f"Decision: {short}",
+                    decision["id"],
+                    f"Decided: {short}",
+                )
+            for asker in target["askers"]:
+                task = self.tasks.find(asker.get("task_id") or "")
+                if task and task["status"] == "waiting" and asker.get("task_id") in tasks:
+                    self.tasks.move(task["id"], "running", reason="decision", progress="")
+            with suppress(Exception):
+                await ledger.settle(
+                    "decision", card["id"], value(decision["text"]), decision=decision,
+                    by="router",
+                )  # fmt: skip
+            answered.append(closed)
+        return answered
+
     def drop_task(self, task: dict):
         """A task that ended (done, failed, cancelled) no longer waits for a decision. Its
         worker hears so with its next message (bug E100: it waited on, unaware)."""
@@ -841,11 +1041,11 @@ class Decisions:
                 if self.asker_of(asker, session_id, task) and asker.get("task_id")
             ]
             try:
-                replaces = (
-                    [self.current(target["replaces"])["id"]] if target.get("replaces") else []
-                )
                 recorded = await self.record(
-                    f"{target['question']} → {text}", tasks, replaces, f"chat:{card['id']}"
+                    f"{target['question']} → {text}",
+                    tasks,
+                    self.replaced_by(card),
+                    f"chat:{card['id']}",
                 )
                 # Any answer settles its subject (E151): the others that wait on it hear it.
                 await self.runtime.ledger.settle(
@@ -922,6 +1122,8 @@ class Decisions:
         state.turn_decisions.append(decision["id"])
         if not replaces:
             self.runtime.ledger.recorded(decision, tasks)
+        # Cards of its tasks that asked this choice: answered with it (QA 0.1.61 Q1).
+        await self.settled_by_router(decision, tasks)
         head = f"Recorded {decision['id']}"
         if same:
             head += (
@@ -1007,7 +1209,14 @@ class Decisions:
         """`tell`: tasks of a new decision (replacing none) whose workers hear it now.
         `reworded`: it says what the one it replaces said, in other words (Ledger.same_value):
         nothing changed."""
-        text = clean(text, 500)
+        text = " ".join(text.split())
+        if len(text) > 500:
+            # Its question shortened, never its answer (QA 0.1.61 Q11).
+            question, arrow, said = text.partition(" \u2192 ")
+            said = brief(said, 300)
+            text = (
+                f"{brief(question, 497 - len(said))} \u2192 {said}" if arrow else brief(text, 500)
+            )
         if not text:
             raise ValueError("Say what was decided.")
         old = [self.get(identifier) for identifier in dict.fromkeys(replaces)]
@@ -1084,7 +1293,7 @@ class Decisions:
                 task = self.tasks.get(task_id)
                 if task["status"] in {"failed", "cancelled"}:
                     continue
-                if source.startswith(("card:", "chat:", "ask:")) and task_id in tasks:
+                if source.startswith(("card:", "chat:", "ask:", "router:")) and task_id in tasks:
                     continue  # It asked: the owner's answer reaches it as such.
                 workers.setdefault(task["session_id"], []).append(task)
             for its in workers.values():
