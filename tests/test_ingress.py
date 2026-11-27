@@ -49,13 +49,14 @@ async def test_an_away_answer_is_marked_away_and_input_from_nowhere_has_none(tmp
 async def test_a_decision_cards_answer_records_how_it_came(tmp_path):
     harness = Harness(tmp_path / "data")
     runtime = await harness.connect()
-    result = await call_tool(
-        runtime, "spawn_worker", harness.router_id, title="Store", instructions="Store",
-        why_new="test",
-    )  # fmt: skip
-    worker = json.loads(result.text_result_for_llm)
     options = [{"choice": "A", "effect": "a"}, {"choice": "B", "effect": "b"}]
-    for question in ("Which store?", "Which port?"):
+    # Two workers' cards (a worker's own second ask on its task waits for its first: ledger.py).
+    for title, question in (("Store", "Which store?"), ("Port", "Which port?")):
+        result = await call_tool(
+            runtime, "spawn_worker", harness.router_id, title=title, instructions=title,
+            why_new="test",
+        )  # fmt: skip
+        worker = json.loads(result.text_result_for_llm)
         await call_tool(
             runtime, "ask_decision", worker["session_id"], question=question, options=options
         )
