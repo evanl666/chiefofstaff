@@ -111,6 +111,13 @@ async def test_a_committed_result_whose_checks_pass_offline_is_accepted(
     tmp_path, git_repo, offline
 ):
     harness, runtime = await project(tmp_path, git_repo)
+    original, copies = runtime.autopilot.runner, []
+
+    async def runner(copy, lines):
+        copies.append(copy)
+        return await original(copy, lines)
+
+    runtime.autopilot.runner = runner
     info, tree = await finished(harness, runtime, git_repo)
     await verified(runtime)
     task = runtime.tasks.get(info["task_id"])
@@ -133,9 +140,8 @@ async def test_a_committed_result_whose_checks_pass_offline_is_accepted(
     # Its task says who accepted it (the page: "Accepted by Autopilot").
     assert runtime.task_actions.view(task)["accepted_by"] == "autopilot"
     assert not harness.store.all("SELECT id FROM feedback WHERE kind='accept'"), "nothing learned"
-    assert not (harness.store.directory / "autopilot-verify").exists() or not any(
-        (harness.store.directory / "autopilot-verify").iterdir()
-    ), "its private copy is gone"
+    [copy] = copies
+    assert not copy.exists(), "its private copy is gone"
     # Undo: back to review, once.
     said = runtime.autopilot.undo(accepted["id"])
     assert "waits for your Accept again" in said
@@ -339,6 +345,29 @@ async def test_the_first_check_of_a_copilot_version_is_waited_for_not_a_reason(
     found["passed"] = False
     runtime.store.delete(f"stepprobe:{TESTED_CLI}")
     assert await asyncio.wait_for(verify.refusal(runtime), 10) == verify.OFFLINE
+
+
+async def test_its_private_copy_is_in_no_folder_its_sandbox_denies(tmp_path, git_repo, offline):
+    """Live (B1, Copilot 1.0.116): the copy was in Chief's data folder, which the sandbox
+    denies, and the CLI refused to start a command there ("a sandbox denied path"). It is a
+    private folder of its own, in none of the denied ones (the data folder, the code folder,
+    the projects)."""
+    harness, runtime = await project(tmp_path, git_repo)
+    seen = []
+
+    async def runner(copy, lines):
+        seen.append(copy)
+        return [{"command": line, "exit": 0, "output": "1 passed", "seconds": 0.1,
+                 "sandboxed": True} for line in lines]  # fmt: skip
+
+    runtime.autopilot.runner = runner
+    await finished(harness, runtime, git_repo)
+    await verified(runtime)
+    settings = harness.store.settings()
+    denied = [harness.store.directory, *(Path(p) for p in settings.projects)]
+    [copy] = seen
+    assert not any(copy.resolve().is_relative_to(d.resolve()) for d in denied), copy
+    assert not copy.exists()
 
 
 async def test_its_offline_run_builds_the_sessions_tools_before_it_runs_a_step(harness, tmp_path):

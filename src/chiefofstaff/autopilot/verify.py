@@ -4,8 +4,9 @@ copy of the exact commit, and records what it ran and what came of it.
 
 1. **Committed**: the task's one checkout is clean at commit C (no uncommitted work).
 2. **A private copy**: a repository of Chief's own (its own git metadata; the owner's objects
-   shared read-only through alternates), checked out at C; its tracked tree is read before and
-   after the run: it must be C's tree both times.
+   shared read-only through alternates), checked out at C in a private temporary folder (never
+   under one its sandbox denies); its tracked tree is read before and after the run: it must be
+   C's tree both times.
 3. **A plan Chief validated**, not command text run as given: each criterion's command (each
    must be backed by a passing run the receipts observed) and the worker's last test command,
    every one a test, check or build the receipts recognize, run from the copy's root with
@@ -32,6 +33,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
@@ -279,7 +281,10 @@ async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> 
     steps, why = plan(commands)
     if why:
         return failed(why)
-    folder = runtime.store.directory / "autopilot-verify" / uuid4().hex[:12]
+    # A private folder of its own (0700), in none the sandbox denies (Chief's data folder is):
+    # a command never starts in a denied folder.
+    private = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="chiefofstaff-verify-"))
+    folder = private / "copy"
     try:
         tree = await asyncio.to_thread(made_copy, folder, objects, commit)
         record["tree"] = tree
@@ -293,7 +298,7 @@ async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> 
     except (ValueError, OSError, subprocess.SubprocessError, TimeoutError) as exc:
         return failed(f"{OFFLINE} ({str(exc)[:200]})")
     finally:
-        await asyncio.to_thread(shutil.rmtree, folder, True)
+        await asyncio.to_thread(shutil.rmtree, private, True)
     if not record["tree_after"]:
         return failed("its checks changed its committed files")
     if len(results) < len(installs) + len(steps) or any(r["exit"] != 0 for r in results):
