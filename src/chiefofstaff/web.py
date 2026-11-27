@@ -550,6 +550,24 @@ def create_app(
         """Install an agent with the official installer its row shows, word for word."""
         return await runtime.setups.install(name, payload.method)
 
+    @app.post("/api/agents/{name}/update")
+    async def agent_update(name: str):
+        """Update an agent older than the versions tested with its own updater (the command
+        the page showed, word for word, and the owner said yes to)."""
+        return await runtime.setups.update(name)
+
+    @app.post("/api/sandbox/trust")
+    async def sandbox_trust():
+        """Trust Copilot's sandbox certificate (asked first: it changes the login keychain), so
+        that gh works inside the sandbox."""
+        return await runtime.setups.trust_sandbox()
+
+    @app.post("/api/drafts/{draft_id}/signin")
+    async def draft_sign_in(draft_id: str):
+        """A sign-in card's Sign in, for an MCP server of a Codex or Claude worker: that
+        agent's own command run (agentsetup.py), the card answered once it is done."""
+        return await runtime.setups.mcp_sign_in(draft_id)
+
     @app.post("/api/agents/{name}/setup/input")
     async def agent_setup_input(name: str, payload: AgentSetupInput):
         """A code its sign-in asked to be pasted, to its stdin."""

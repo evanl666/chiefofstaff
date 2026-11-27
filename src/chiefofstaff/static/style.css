@@ -835,7 +835,9 @@ button.setup-action.compact { min-height: 24px; padding: 2px 10px; font-size: va
 .setup-waiting { display: flex; align-items: center; gap: 2px; color: var(--muted); font-size: var(--small); }
 .setup-elapsed { margin-left: 6px; font-variant-numeric: tabular-nums; }
 .setup-tail { margin: 0; max-height: 4.8em; overflow: hidden; color: var(--muted); font: var(--small)/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.setup-output summary, .setup-other summary { cursor: pointer; color: var(--muted); font-size: var(--small); }
+.setup-output summary, .setup-other summary, .setup-manual summary { cursor: pointer; color: var(--muted); font-size: var(--small); }
+.setup-manual { display: grid; gap: 6px; }
+.setup-manual > button { justify-self: start; }
 .setup-output pre { max-height: 220px; overflow: auto; margin: 6px 0 0; padding: 8px 10px; border-radius: var(--radius); background: var(--bubble); color: var(--text); font: var(--small)/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .setup-other { display: grid; gap: 4px; }
 .setup-other[open] { gap: 6px; }
@@ -2212,6 +2214,15 @@ button.receipt.changes:hover { text-decoration: underline; }
 .card.setup ol { margin: 6px 0; padding-left: 20px; color: var(--soft); }
 .card.setup code { font: var(--small) var(--mono); background: var(--hover); padding: 1px 5px; border-radius: 5px; }
 .card.setup .actions .muted { flex: 1; }
+.card.setup .setup-agents { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 6px; }
+.card.setup .setup-agent { display: flex; align-items: center; gap: 4px; min-height: 28px; color: var(--soft); }
+.card.setup .setup-agent .name { flex: none; }
+.card.setup .setup-agent .muted { flex: 1; min-width: 0; }
+.card.setup .setup-agent .setup-action { flex: none; margin-left: auto; white-space: nowrap; }
+.card.setup .setup-agent button.setup-action.compact { min-height: 28px; }
+.card.setup .setup-manual { margin: 4px 0; color: var(--soft); }
+.card.setup .setup-manual ul { margin: 6px 0; padding-left: 20px; }
+#sandbox-trust { display: block; align-self: flex-start; justify-self: start; margin-top: 4px; padding: 0; color: var(--accent); font-size: var(--small); text-align: left; }
 #session-actions .focus-on { background: var(--accent-soft); color: var(--accent); }
 
 .copy-dialog { border: 1px solid var(--line); border-radius: 16px; background: var(--card); color: var(--text); width: min(720px, 92vw); }

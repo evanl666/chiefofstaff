@@ -8,6 +8,7 @@ import { applyDraft, finalText, pendingDrafts, state } from "./state.js";
 import { select } from "./session.js";
 import { renderSidebar } from "./sidebar.js";
 import { scheduleHome } from "./inbox.js";
+import { openMcpSignIn } from "./agentsetup.js";
 // A card: its label (what kind of thing it is), then what it is about.
 function card(draft, className, label, ...content) {
   return el("div", { class: `card draft ${className}`.trim(), "data-id": draft.id, "data-session": draft.session_id || undefined }, el("div", { class: "head" }, el("span", { class: "label" }, label)), ...content);
@@ -235,6 +236,14 @@ function requestCard(draft) {
     node.append(fields.node, actionRow(error, el("button", { type: "button", text: "Submit", onclick: () => decide({ action: "answer", content: fields.values() }, "Submitted.") }), [decline("Decline")]));
   } else if (draft.kind === "link") {
     node.append(actionRow(error, link(target.url, "Open link"), [{ text: "Done", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Decline")]));
+  } else if (target.command && target.agent) {
+    // A Codex or Claude worker's: Sign in runs that agent's own command for the owner
+    // (agentsetup.js), and the card closes once it is done; the command stays under Details.
+    node.append(
+      el("div", { class: "note", text: "Sign in opens its sign-in page in your browser. This card closes by itself once you're signed in." }),
+      el("details", { class: "setup-manual" }, el("summary", { text: "Details" }), el("div", { class: "note", html: codeHtml(`Or run \`${target.command}\` in a terminal yourself, then choose I signed in.`) })),
+      actionRow(error, el("button", { type: "button", text: `Sign in to ${target.server}`, onclick: () => openMcpSignIn(draft) }), [{ text: "I signed in", onclick: () => decide({ action: "answer" }, "Done.") }, decline("Not now")]),
+    );
   } else {
     node.append(
       // Another agent's sign-in is run in a terminal: the card cannot tell when it is done.
@@ -585,7 +594,9 @@ function okLines(draft) {
     if (merging(draft)) return [{ kind: "Merging", text: `${what} · ${draft.outcome.replace(/^Merging: /, "")}`, main: { text: "Open PR", href: target.url }, more: [{ text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
     return [{ kind: "Ready to merge", text: `${what} · ${target.checks === "none" ? "no checks" : "checks pass"}${stackBelow(target)}`, main: { text: mergeButton(target), body: { action: "send" }, done: `Merging ${target.label}…` }, more: [{ text: "Open PR", href: target.url }, { text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
   }
-  if (draft.kind === "signin") return [{ kind: "Sign-in", text: draft.text || `Sign in to ${target.server}`, main: target.url ? { text: "Sign in", href: target.url } : details("Details"), more: [{ text: "I signed in", body: { action: "answer" }, done: "Done." }, { text: "Not now", body: { action: "reject" }, done: "Declined." }] }];
+  // A Codex or Claude worker's: Sign in runs that agent's own command for the owner (agentsetup.js).
+  const runs = target.agent && target.command ? { text: "Sign in", run: () => openMcpSignIn(draft) } : null;
+  if (draft.kind === "signin") return [{ kind: "Sign-in", text: draft.text || `Sign in to ${target.server}`, main: target.url ? { text: "Sign in", href: target.url } : runs || details("Details"), more: [{ text: "I signed in", body: { action: "answer" }, done: "Done." }, { text: "Not now", body: { action: "reject" }, done: "Declined." }] }];
   return [{ kind: "Link to open", text: draft.text, main: target.url ? { text: "Open link", href: target.url } : details("Details"), more: [{ text: "Done", body: { action: "answer" }, done: "Done." }, { text: "Decline", body: { action: "reject" }, done: "Declined." }] }];
 }
 // What Your OK shows: drawn again when any of its cards changes or one is opened or closed.
@@ -627,6 +638,7 @@ function okRow(draft, line) {
   const error = el("span", { class: "error" });
   const row = el("li", { class: "ok-row", "data-id": draft.id, "data-lesson": line.lesson?.id });
   const act = (action) => {
+    if (action.run) return action.run;
     if (action.href) return () => window.open(action.href, "_blank", "noreferrer");
     if (action.details) {
       return () => {

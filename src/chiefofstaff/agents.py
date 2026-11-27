@@ -510,6 +510,16 @@ SIGN_IN_FIX = {
     "codex": {"command": "codex login", "then": ""},
     "claude": {"command": "claude auth login", "then": ""},
 }
+# Each agent's own updater, which Update runs (agentsetup.py: asked first, as it changes the
+# agent for the owner's whole account) where the agent is older than the versions tested.
+UPDATE_FIX = {
+    "copilot": {"command": "copilot update", "then": ""},
+    "codex": {"command": "codex update", "then": ""},
+    "claude": {"command": "claude update", "then": ""},
+}
+# How an agent's start or look says it is older than the versions tested (or its version can't
+# be told): Update updates it.
+TOO_OLD = re.compile(r"older than the versions tested|could not tell which version", re.IGNORECASE)
 # An agent as the @ picker and Settings say it: ready, its sign-in needed, not installed.
 READY, SIGN_IN, MISSING, PROBLEM, CHECKING = "ready", "signin", "missing", "problem", "checking"
 # Why work for an agent is held for it (its card's Sign in, Install), to go on by itself after.
@@ -578,6 +588,8 @@ def status_of(name: str, why: str) -> dict[str, Any]:
         return {"status": MISSING, "said": STATUS_WORDS[MISSING], "fix": INSTALL_FIX[name]}
     if LIMIT_SAID.search(why):
         return {"status": LIMITED, "said": why}
+    if TOO_OLD.search(why) and name in UPDATE_FIX:
+        return {"status": PROBLEM, "said": why, "update": UPDATE_FIX[name]}
     return {"status": PROBLEM, "said": why}
 
 

@@ -36,7 +36,12 @@ import uuid
 from pathlib import Path
 
 HOME = Path(os.environ.get("FAKE_CODEX_HOME") or ".")
-VERSION = os.environ.get("FAKE_CODEX_VERSION", "0.167.2")
+# Its version, or the one `codex update` updated it to (kept in its home).
+VERSION = (
+    (HOME / "updated").read_text().strip()
+    if (HOME / "updated").is_file()
+    else os.environ.get("FAKE_CODEX_VERSION", "0.167.2")
+)
 # Actions it takes without asking first, as a Codex that broke the contract would: shell, mcp,
 # patch.
 UNASKED = set(filter(None, os.environ.get("FAKE_CODEX_UNASKED", "").split(",")))
@@ -1438,6 +1443,35 @@ def login(arguments: list[str]):
     sys.stderr.write("Successfully logged in\n")
 
 
+def update():
+    """`codex update`: to FAKE_CODEX_UPDATE_TO (0.167.2), or failing as FAKE_CODEX_UPDATE_FAILS
+    says."""
+    if failed := os.environ.get("FAKE_CODEX_UPDATE_FAILS"):
+        sys.stderr.write(f"Error: {failed}\n")
+        sys.exit(1)
+    newest = os.environ.get("FAKE_CODEX_UPDATE_TO", "0.167.2")
+    sys.stdout.write(f"Updating Codex from {VERSION} to {newest}…\n")
+    HOME.mkdir(parents=True, exist_ok=True)
+    (HOME / "updated").write_text(newest)
+    sys.stdout.write(f"Codex updated to {newest}.\n")
+
+
+def mcp_login(name: str):
+    """`codex mcp login <name>`: its server's page to open, then done once the owner signed in
+    there (FAKE_CODEX_HOME/approve)."""
+    sys.stdout.write(
+        f"Authorize `{name}` by opening this URL in your browser:\nhttps://mcp.acme.test/"
+        f"authorize?client_id=fake&redirect_uri=http%3A%2F%2Flocalhost%3A5555&state={os.getpid()}\n"
+    )
+    sys.stdout.flush()
+    said = approved()
+    if said != "ok":
+        sys.stderr.write(f"Error: {said}\n")
+        sys.exit(1)
+    (HOME / f"mcp-{name}").write_text("signed in")
+    sys.stdout.write(f"Successfully logged in to MCP server '{name}'.\n")
+
+
 def main():
     if runs := os.environ.get("FAKE_CODEX_RUNS"):
         with Path(runs).open("a") as file:
@@ -1448,6 +1482,12 @@ def main():
             file.write(json.dumps(dict(os.environ)) + "\n")
     if sys.argv[1:2] == ["login"]:
         login(sys.argv[2:])
+        return
+    if sys.argv[1:2] == ["update"]:
+        update()
+        return
+    if sys.argv[1:3] == ["mcp", "login"]:
+        mcp_login(sys.argv[3])
         return
     if sys.argv[1:2] == ["logout"]:
         sign_out()
