@@ -4,9 +4,9 @@ copy of the exact commit, and records what it ran and what came of it.
 
 1. **Committed**: the task's one checkout is clean at commit C (no uncommitted work).
 2. **A private copy**: a repository of Chief's own (its own git metadata; the owner's objects
-   shared read-only through alternates), checked out at C in a private temporary folder (never
-   under one its sandbox denies); its tracked tree is read before and after the run: it must be
-   C's tree both times.
+   shared read-only through alternates), checked out at C in a private folder beside workers'
+   caches, where no worker writes (never under one its sandbox denies); its tracked tree is
+   read before and after the run: it must be C's tree both times.
 3. **A plan Chief validated**, not command text run as given: each criterion's command (each
    must be backed by a passing run the receipts observed) and the worker's last test command,
    every one a test, check or build the receipts recognize, run from the copy's root with
@@ -17,8 +17,10 @@ copy of the exact commit, and records what it ran and what came of it.
    no network at all, no credentials (an empty environment but for the path, the home folder
    and the offline switches of package managers), no keychain, and nothing readable of the
    owner's code folder, projects or workers' folders but the copy; installs come only from the
-   shared package caches. Where that can't be had (no sandbox here, its check not passed), or a
-   step needs more, nothing is verified: *Couldn't verify offline: it waits for you*.
+   package caches workers share (filled from the owner's; writable, as a sandboxed worker's).
+   Where that can't be had (no sandbox here, its check not passed), or a step needs more (the
+   network, what its sandbox holds), nothing is verified: *Couldn't verify offline: it waits
+   for you*.
 5. **Passed** when every step exits 0, at least one test ran, and C changes no test, CI or
    check configuration against its base (integrity.classify).
 
@@ -33,14 +35,13 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from .. import integrity, receipts
+from .. import caches, integrity, receipts
 from ..backend import StepSandboxPolicy
 from ..shepherd import PROBING
 from ..workspaces import base_of, checkout_git, worth_committing
@@ -75,6 +76,17 @@ INSTALLS = (
     ("uv.lock", "uv sync --offline --frozen"),
 )
 EXIT = re.compile(r"COS-EXIT-(-?\d+)\s*$", re.MULTILINE)
+# What a step that failed for want of the network or of what its sandbox holds says: no
+# verdict on its code (a test that downloads, a tool that writes outside its caches).
+UNREACHED = re.compile(
+    r"Operation not permitted|sandbox is active and blocked|network connectivity is disabled"
+    r"|nodename nor servname|Name or service not known|Temporary failure in name resolution"
+    r"|Could not resolve host|getaddrinfo|ENOTFOUND|EAI_AGAIN|Network is unreachable",
+    re.IGNORECASE,
+)
+# How long a verification waits for workers' caches to be filled from the owner's, the first
+# time (Runtime.seed_caches: clones, seconds).
+SEED_SECONDS = 120
 
 
 def plan(commands: list[str]) -> tuple[list[str], str]:
@@ -147,10 +159,21 @@ def tree_holds(folder: Path, tree: str) -> bool:
         return False
 
 
-def wrapped(step: str) -> str:
-    """A step as the sandboxed shell runs it: in an empty environment but for its path, home
-    and the offline switches, then its exit code."""
-    keep = " ".join(f"{name}={shlex.quote(value)}" for name, value in OFFLINE_ENV.items())
+def cache_env(tier: Path) -> dict[str, str]:
+    """Where package managers keep their caches: the tier workers share, as their init script
+    says (caches.script), for those a check installs or runs with."""
+    return {
+        "UV_CACHE_DIR": str(tier / "uv"), "PIP_CACHE_DIR": str(tier / "pip"),
+        "npm_config_cache": str(tier / "npm"), "YARN_GLOBAL_FOLDER": str(tier / "yarn-berry"),
+        "npm_config_store_dir": str(tier / "pnpm" / "store"), "XDG_CACHE_HOME": str(tier / "xdg"),
+    }  # fmt: skip
+
+
+def wrapped(step: str, env: dict[str, str] | None = None) -> str:
+    """A step as the sandboxed shell runs it: in an empty environment but for its path, home,
+    the offline switches and its caches, then its exit code."""
+    given = {**OFFLINE_ENV, **(env or {})}
+    keep = " ".join(f"{name}={shlex.quote(value)}" for name, value in given.items())
     return (
         f'env -i PATH="$PATH" HOME="$HOME" LANG=en_US.UTF-8 TMPDIR="$PWD/.cos-tmp" {keep} '
         f"sh -c {shlex.quote(step)}; printf 'COS-%s-%s\\n' EXIT \"$?\""
@@ -160,9 +183,23 @@ def wrapped(step: str) -> str:
 Runner = Callable[[Path, list[str]], Awaitable[list[dict]]]
 
 
+async def seeded(runtime: Runtime):
+    """Workers' caches filled from the owner's once, before a first verification uses them."""
+    if not runtime.store.settings().shared_caches:
+        return
+    runtime.seed_caches_soon()
+    deadline = time.monotonic() + SEED_SECONDS
+    while runtime.cache_seeding:
+        if time.monotonic() >= deadline:
+            return  # Not filled in time: what is there already.
+        await asyncio.sleep(0.5)
+
+
 async def run_offline(runtime: Runtime, copy: Path, steps: list[str]) -> list[dict]:
     """Each step in a session of Chief's own, sandboxed with no network: {command, exit, output,
-    seconds, sandboxed}. Through the session's own tool pipeline: no model, no credits."""
+    seconds, sandboxed}. Through the session's own tool pipeline: no model, no credits. Its
+    caches are those workers share (writable, as a sandboxed worker's), nothing of the
+    owner's."""
     from copilot.generated.rpc import PermissionDecisionApproveOnce
 
     from ..policy import GITHUB_MCP
@@ -172,8 +209,10 @@ async def run_offline(runtime: Runtime, copy: Path, steps: list[str]) -> list[di
     backend = runtime.connected()
     settings = runtime.store.settings()
     others = [settings.code_folder, *settings.projects, str(runtime.store.directory)]
+    tier = runtime.cache_tier
+    await seeded(runtime)
     policy = StepSandboxPolicy(
-        readwrite=(str(copy),),
+        readwrite=(str(copy), str(tier)),
         denied=tuple(dict.fromkeys([*step_denied(), *(p for p in others if p)])),
         credentials=False, outbound=False, allowed_hosts=(), blocked_hosts=BLOCKED_HOSTS,
         keychain=False,
@@ -203,7 +242,10 @@ async def run_offline(runtime: Runtime, copy: Path, steps: list[str]) -> list[di
         for step in steps:
             started = time.monotonic()
             ran, text, sandboxed = await run_tool(
-                session, "bash", {"command": wrapped(step), "description": "Verify"}, STEP_SECONDS
+                session,
+                "bash",
+                {"command": wrapped(step, cache_env(tier)), "description": "Verify"},
+                STEP_SECONDS,
             )
             found = EXIT.findall(text or "")
             results.append({
@@ -282,9 +324,12 @@ async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> 
     steps, why = plan(commands)
     if why:
         return failed(why)
-    # A private folder of its own (0700), in none the sandbox denies (Chief's data folder is):
-    # a command never starts in a denied folder.
-    private = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="chiefofstaff-verify-"))
+    # A private folder of its own (0700) beside workers' caches, where no worker writes (not the
+    # system's temporary folder, which Copilot's sandbox lets every worker write), in none the
+    # sandbox denies (Chief's data folder is): a command never starts in a denied folder.
+    private = runtime.cache_tier.parent / caches.TEMP / f"verify-{uuid4().hex[:12]}"
+    if not await asyncio.to_thread(caches.make_temp, private):
+        return failed(OFFLINE)
     folder = private / "copy"
     try:
         tree = await asyncio.to_thread(made_copy, folder, objects, commit)
@@ -305,6 +350,8 @@ async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> 
     if len(results) < len(installs) + len(steps) or any(r["exit"] != 0 for r in results):
         bad = next((r for r in results if r["exit"] != 0), None)
         if bad is None or bad["exit"] is None or bad["command"] in installs:
+            return failed(OFFLINE)
+        if UNREACHED.search(bad["output"] or ""):
             return failed(OFFLINE)
         return failed(f"“{receipts.shown(bad['command'], 80)}” failed in Chief's own run")
     if any(not r["sandboxed"] for r in results):

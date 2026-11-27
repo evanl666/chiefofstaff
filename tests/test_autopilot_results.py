@@ -4,6 +4,7 @@ once more (autopilot/results.py)."""
 
 import asyncio
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -271,6 +272,8 @@ async def test_what_waited_on_it_starts_carrying_its_origin(tmp_path, git_repo, 
         ("outside", "reaches outside its copy"),
         ("failing", "failed in Chief's own run"),
         ("moved", "its branch moved on since"),
+        # Live (B2): a test that needs the network fails offline, which isn't its code failing.
+        ("network", "Couldn't verify offline: it waits for you"),
     ],
 )
 async def test_a_result_that_does_not_verify_waits_for_the_owner(
@@ -290,6 +293,15 @@ async def test_a_result_that_does_not_verify_waits_for_the_owner(
 
         def change(tree):
             (tree / "tests" / "test_sub.py").write_text("def test_sub():\n    assert 1 == 2\n")
+
+    elif setup == "network":
+
+        def change(tree):
+            (tree / "tests" / "test_page.py").write_text(
+                "import urllib.request\n\n\ndef test_page():\n"
+                "    raise OSError('<urlopen error [Errno 8] nodename nor servname provided, or "
+                "not known>')\n"
+            )
 
     info, tree = await finished(harness, runtime, git_repo, change=change, command=command)
     if setup == "uncommitted":
@@ -367,7 +379,44 @@ async def test_its_private_copy_is_in_no_folder_its_sandbox_denies(tmp_path, git
     denied = [harness.store.directory, *(Path(p) for p in settings.projects)]
     [copy] = seen
     assert not any(copy.resolve().is_relative_to(d.resolve()) for d in denied), copy
+    # Beside the workers' caches, where no worker writes (not the system's temporary folder,
+    # which Copilot's sandbox lets every worker write).
+    assert copy.is_relative_to(runtime.cache_tier.parent / "temp"), copy
     assert not copy.exists()
+
+
+async def test_its_offline_run_uses_the_workers_shared_caches(harness, tmp_path):
+    """Live (B1): uv, given no cache it could write (the owner's, read-only to the sandbox),
+    failed ("failed to open file ~/.cache/uv/…: Operation not permitted"). Its steps use the
+    caches workers share (the tier, writable, as a sandboxed worker's), filled from the
+    owner's first; nothing of the owner's is writable."""
+    await harness.connect()
+    runtime = harness.runtime
+    backend, policies = runtime.connected(), []
+    original = backend.sandbox
+
+    def sandbox(policy):
+        policies.append(policy)
+        return original(policy)
+
+    backend.sandbox = sandbox
+    resume, sessions = harness.client.resume_session, []
+
+    async def resumed(session_id, **options):
+        sessions.append(await resume(session_id, **options))
+        return sessions[-1]
+
+    harness.client.resume_session = resumed
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    [step] = await verify.run_offline(runtime, copy, ["echo ok"])
+    tier = runtime.cache_tier
+    [policy] = policies
+    assert set(policy.readwrite) == {str(copy), str(tier)}
+    [command] = sessions[-1].executed
+    for name, folder in (("UV_CACHE_DIR", "uv"), ("npm_config_cache", "npm")):
+        assert f"{name}={shlex.quote(str(tier / folder))}" in command, command
+    assert step["exit"] == 0
 
 
 async def test_its_offline_run_builds_the_sessions_tools_before_it_runs_a_step(harness, tmp_path):
@@ -399,7 +448,7 @@ async def test_its_offline_run_builds_the_sessions_tools_before_it_runs_a_step(h
     client.resume_session = resume
     copy = tmp_path / "copy"
     copy.mkdir()
-    [step] = await verify.run_offline(runtime, copy, ["pytest -q"])
+    [step] = await verify.run_offline(runtime, copy, ["echo ok"])
     assert built and (step["exit"], step["sandboxed"]) == (0, True), step
 
 
