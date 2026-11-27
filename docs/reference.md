@@ -1197,7 +1197,9 @@ line says what it does now and what it spent today.
 **Your worker PRs.** When a PR a worker opened for you fails CI or gets review comments, Chief of
 Staff prepares what it needs in that same worker: a fix, checked, or replies to the comments.
 Nothing reaches GitHub until you approve it. The PR keeps its row under *Needs you*; only the
-row's words and its one action change:
+row's words and its one action change. The row names the PR, with its link, says what happened,
+and says what its action does (*keel#2 paused: its worker was closed, then reopened. Resume to
+keep it moving.*); opened, it shows the task's whole result too:
 
 - *Fix it*: it found what fails and can prepare a fix (each kind's level is *Suggest*: nothing
   runs until you click);
@@ -1213,7 +1215,9 @@ row's words and its one action change:
   progress), or what you approved did not go out. *Look* shows what it did, attempt by attempt.
 
 The row's ⋯ adds *Stop looking after this PR* (its news then comes to its worker as before),
-*Merge when ready* and *Accept this commit…*.
+*Merge when ready* and *Accept this commit…*. Once the PR merges or is closed, the row leaves
+*Needs you* for *Recently finished*, saying so (*keel#2 merged.*); it doesn't wait for a review
+of a PR that merged.
 
 **How a fix is checked.** The fix is a commit on top of the PR's latest commit, made in the worker's
 checkout when that is at the same commit with nothing uncommitted; otherwise in a fresh copy,

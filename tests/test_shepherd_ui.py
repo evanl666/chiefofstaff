@@ -17,6 +17,7 @@ TEXT = (
 KEPT = {
     "target": "github:acme/api#12",
     "label": "api#12",
+    "url": "https://github.com/acme/api/pull/12",
     "line": "A fix for the failing CI is ready: test_timeout passes now.",
     "action": {"kind": "review", "label": "Review fix", "step": "s1"},
     "keep": True,
@@ -37,23 +38,34 @@ def test_a_kept_prs_row_says_what_it_needs_by_its_one_action():
           p.why, b.MARKERS[p.marker]]; };
         const done = (kind, line) => ({ id: "t", status: "done", attention: "prepared",
           attention_why: line, shepherd: { ...kept, line, action: { kind } } });
+        // Its PR merged or closed (owner report 0.1.61): it waits on it no more.
+        const over = (how, monitoring) => ({ id: "t", status: "done", attention: "", monitoring,
+          watching: [kept.target], shepherd: { ...kept, line: `api#12 ${how}.`, action: null,
+            ended: how, ended_at: "2026-11-16T09:00:00+00:00" } });
         return [place(done("review", "A fix is ready")),
-          place(done("resume", "Someone else pushed 9f8e7d6, so it's waiting for you.")),
+          place(done("resume", "api#12 paused: commit 9f8e7d6 wasn't pushed by its worker.")),
           place(done("look", "Stopped: two attempts in a row made no progress")),
           place({ id: "t", status: "review", shepherd: kept }),
-          place({ id: "t", status: "review", shepherd: { ...kept, action: null } })];
+          place({ id: "t", status: "review", shepherd: { ...kept, action: null } }),
+          place(over("merged", [])), place(over("closed", [])),
+          place(over("merged", [{ key: "slack:C1:1.2", kind: "thread", waiting_for: "a reply" }]))];
         """
     )
     assert found[0] == ["needs", "prepared", "A fix is ready", "Prepared for you"]
     assert found[1][1:] == [
         "kept-paused",
-        "Someone else pushed 9f8e7d6, so it's waiting for you.",
+        "api#12 paused: commit 9f8e7d6 wasn't pushed by its worker.",
         "Paused",
     ]
     assert found[2][1] == "kept-stopped" and found[2][3] == "Stopped"
     # Awaiting acceptance: what it prepared says more than the PR's standing.
     assert found[3] == ["needs", "review", KEPT["line"], "Awaiting acceptance"]
     assert found[4][2] == ""
+    # Merged or closed: out of Needs you, saying so, not "Waiting for review" (owner report
+    # 0.1.61); still monitored for something else, there.
+    assert found[5] == ["finished", "kept-merged", "api#12 merged.", "Merged"]
+    assert found[6] == ["finished", "kept-closed", "api#12 closed.", "Closed"]
+    assert found[7][0] == "monitoring"
 
 
 def test_its_one_action_and_its_menu():
@@ -78,9 +90,12 @@ def test_its_one_action_and_its_menu():
           off: menu(task({ keep: false })),
           accepted: menu(task({ head: "a".repeat(40) })),
           running: menu(task({}, "running")),
+          ended: menu(task({ ended: "merged", action: null })),
           line: text(p.keptLine(task({
             accept_note: "Accepted, but the PR changed after what you reviewed" }))),
           noLine: p.keptLine(task({ line: "" })),
+          described: ["fix", "review", "resume", "look"].map((kind) => p.keptButton(
+            task({ action: { kind, label: "X" } }), act).attrs["aria-description"]),
         };
         """
     )
@@ -96,11 +111,81 @@ def test_its_one_action_and_its_menu():
     assert found["off"] == ["Look after this PR", "Accept this commit…", "What it did"]
     assert "Accept this commit…" not in found["accepted"]
     assert found["running"] == []
+    assert found["ended"] == ["What it did"]  # Merged: nothing to change on it.
+    # Its PR named; what its one action does said in words, not only on hover.
     assert found["line"] == (
-        "A fix for the failing CI is ready: test_timeout passes now. Accepted, but the PR "
-        "changed after what you reviewed"
+        "api#12 · A fix for the failing CI is ready: test_timeout passes now. Review fix to see "
+        "exactly what would be published, and approve it. Accepted, but the PR changed after "
+        "what you reviewed Nothing is published until you approve it."
     )
     assert found["noLine"] is None
+    # (Focus and screen readers too.)
+    assert all(words and words.endswith("(api#12)") for words in found["described"])
+    assert "Look after it again" in found["described"][2]
+
+
+def test_a_kept_rows_words_name_its_pr_and_say_what_its_action_does():
+    """Owner report 0.1.61: "A decision card asked me to Resume. I didn't understand what it
+    was for." Its row names its PR (linked: where its line says it, else first) and says what
+    happened and what its button does, in words on the page."""
+    found = run_js(
+        PREPARED
+        + f"const kept = {json.dumps(KEPT)};\n"
+        + """
+        const shape = (nodes) => nodes.map((node) => typeof node === "string" ? node
+          : { tag: node.tag, text: node.textContent, href: node.attrs.href });
+        const paused = { ...kept, line: "api#12 paused: its worker was closed, then reopened.",
+          action: { kind: "resume", label: "Resume" } };
+        return {
+          paused: shape(p.keptSays(paused)),
+          folded: shape(p.keptSays(paused, paused.line, false)),
+          review: shape(p.keptSays(kept)),
+          fix: shape(p.keptSays({ ...kept, line: "CI failing on api#12",
+            action: { kind: "fix", label: "Fix it" } })),
+          look: shape(p.keptSays({ ...kept, line: "Stopped: two attempts made no progress.",
+            action: { kind: "look", label: "Look" } })),
+          merged: shape(p.keptSays({ ...kept, line: "api#12 merged.", action: null })),
+        };
+        """
+    )
+    link = {"tag": "a", "text": "api#12", "href": "https://github.com/acme/api/pull/12"}
+    assert found["paused"] == [
+        link,
+        " paused: its worker was closed, then reopened.",
+        " Resume to keep it moving.",
+    ]
+    assert found["folded"] == [link, " paused: its worker was closed, then reopened."]
+    assert found["review"] == [
+        link,
+        " · A fix for the failing CI is ready: test_timeout passes now.",
+        " Review fix to see exactly what would be published, and approve it.",
+    ]
+    assert found["fix"] == [
+        "CI failing on ",
+        link,
+        " Fix it to have its worker prepare a fix for your approval.",
+    ]
+    assert found["look"][-1] == " Look to see what was tried, and why it stopped."
+    assert found["merged"] == [link, " merged."]
+
+
+def test_a_finished_row_whose_kept_pr_merged_says_so_newest_first():
+    found = run_js(
+        BOARD
+        + TASKS
+        + f"const kept = {json.dumps(KEPT)};\n"
+        + """
+        s.state.snapshot = { settings: { max_workers: 3 }, sessions: [], tasks: [] };
+        const task = { id: "t", status: "done", result: "Fixed it: PR acme/api#12.",
+          ended_at: "2026-01-01T00:00:00+00:00", updated_at: "2026-01-01T00:00:00+00:00",
+          monitoring: [], shepherd: { ...kept, line: "api#12 merged.", action: null,
+            ended: "merged", ended_at: "2026-11-16T09:00:00+00:00" } };
+        const phase = b.taskPhase(task, null);
+        return [k.rowWhy(task, null, phase).text, b.endedAt(task),
+          b.endedAt({ ...task, shepherd: undefined })];
+        """
+    )
+    assert found == ["api#12 merged.", "2026-11-16T09:00:00+00:00", "2026-01-01T00:00:00+00:00"]
 
 
 def test_homes_section_shows_three_rows_then_all_found():
@@ -172,7 +257,7 @@ def test_a_kept_rows_line_is_its_one_line():
         const result = "Fixed it: PR acme/api#12.";
         return [line({ id: "t", status: "review", result, shepherd: kept }),
           line({ id: "t", status: "done", result, attention: "prepared",
-            attention_why: "Someone else pushed 9f8e7d6, so it's waiting for you.",
+            attention_why: "api#12 paused: commit 9f8e7d6 wasn't pushed by its worker.",
             shepherd: { ...kept, action: { kind: "resume" } } }),
           line({ id: "t", status: "review", result, shepherd: { ...kept, action: null } })];
         """
@@ -180,7 +265,7 @@ def test_a_kept_rows_line_is_its_one_line():
     review, paused, plain = found
     assert review == [{"text": KEPT["line"], "help": ""}, ""]
     assert paused == [
-        {"text": "Someone else pushed 9f8e7d6, so it's waiting for you.", "help": ""},
+        {"text": "api#12 paused: commit 9f8e7d6 wasn't pushed by its worker.", "help": ""},
         "",
     ]
     assert plain[1] == "Fixed it: PR acme/api#12."  # Not kept moving: as today.

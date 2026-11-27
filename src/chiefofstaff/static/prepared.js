@@ -91,12 +91,39 @@ export function shepherdAction(target, action, extra = {}) {
 }
 
 // A worker PR's row: its line (where the shepherd stands), its one action, its menu.
+// What the row's one action does, in words the row says (not only on hover: focus, touch and
+// screen readers get them too): after its line, and in whole once it is unfolded.
+const KEPT_SAYS = {
+  fix: () => "Fix it to have its worker prepare a fix for your approval.",
+  review: (label) => (label === "Run it again" ? "Run it again to see why CI failed and approve a new run." : `${label} to see exactly what would be published, and approve it.`),
+  resume: () => "Resume to keep it moving.",
+  look: () => "Look to see what was tried, and why it stopped.",
+};
+const KEPT_DOES = {
+  fix: "Its worker prepares the fix and checks it; it's charged to today's credits.",
+  review: "Nothing is published until you approve it.",
+  resume: "Its worker looks after it again from its PR as it is now. Fixes still wait for your approval, and merging still needs your Accept of this commit.",
+};
+// Its PR, linked: in its line where the line names it, else first.
+function keptPr(kept) {
+  return el("a", { class: "pr", href: kept.url, target: "_blank", rel: "noreferrer", text: kept.label, "data-tip": `${kept.target.replace(/^github:/, "")} on GitHub` });
+}
+// The words a kept PR's row says: what happened (its PR linked) and, when it has one, what its
+// action does. `does`: that too.
+export function keptSays(kept, line = kept.line, does = true) {
+  const at = kept.label && kept.url ? line.indexOf(kept.label) : -1;
+  const words = at >= 0 ? [line.slice(0, at), keptPr(kept), line.slice(at + kept.label.length)] : kept.label && kept.url ? [keptPr(kept), line ? ` · ${line}` : ""] : [line];
+  const action = kept.action;
+  const says = does && action && KEPT_SAYS[action.kind] ? KEPT_SAYS[action.kind](action.label) : "";
+  return [...words, says ? ` ${says}` : ""].filter(Boolean);
+}
 export function keptLine(task) {
   const kept = task.shepherd;
   if (!kept) return null;
-  const words = [kept.line, kept.accept_note].filter(Boolean);
-  if (!words.length) return null;
-  return el("div", { class: `kept-line${kept.refused ? " refused" : ""}`, text: words.join(" ") });
+  if (!kept.line && !kept.accept_note) return null;
+  const line = el("div", { class: `kept-line${kept.refused ? " refused" : ""}${kept.ended ? " ended" : ""}` }, ...(kept.line ? keptSays(kept) : []), kept.accept_note ? `${kept.line ? " " : ""}${kept.accept_note}` : "");
+  const does = kept.action && KEPT_DOES[kept.action.kind];
+  return does ? el("div", { class: "kept" }, line, el("div", { class: "kept-does", text: does })) : line;
 }
 // The row's one action, or null (refused: today's Ask it to fix… stays the action).
 export function keptButton(task, act) {
@@ -115,12 +142,14 @@ export function keptButton(task, act) {
     review: "See exactly what would be published, and approve it",
     look: "What was tried, and why it stopped",
   };
-  return el("button", { type: "button", text: action.label, "data-tip": tips[action.kind], onclick: run });
+  return el("button", { type: "button", text: action.label, "data-tip": tips[action.kind], "aria-description": `${tips[action.kind]} (${kept.label})`, onclick: run });
 }
 export function keptMenu(task, act) {
   const kept = task.shepherd;
   if (!kept || !["review", "done"].includes(task.status)) return [];
   const items = [];
+  // Its PR merged or closed: nothing to change on it, what it did still to read.
+  if (kept.ended) return kept.journal?.length ? [{ text: "What it did", onclick: () => openJournal(task) }] : [];
   if (kept.keep) items.push({ text: "Stop looking after this PR", onclick: () => act(() => shepherdAction(kept.target, "keep", { on: false }), "It's yours again: its news comes to its worker as before.") });
   else items.push({ text: "Look after this PR", onclick: () => act(() => shepherdAction(kept.target, "keep", { on: true }), "Looking after it again.") });
   if (kept.merge_when_ready) items.push({ text: "Don't merge it by itself", onclick: () => act(() => shepherdAction(kept.target, "merge-when-ready", { on: false }), "It won't merge by itself.") });

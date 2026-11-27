@@ -46,6 +46,8 @@ export const MARKERS = {
   prepared: "Prepared for you",
   "kept-paused": "Paused",
   "kept-stopped": "Stopped",
+  "kept-merged": "Merged",
+  "kept-closed": "Closed",
   mergeable: "Ready to merge",
   reviewed: "Reviewed",
   "still-following": "Still following",
@@ -304,6 +306,10 @@ export function taskPhase(task, worker, { active = "", activeTitle = "", stopped
     if (task.news) return at("needs", "update", "");
     // Prepared for you: a plan to review, or its PR paused or stopped, waits for the owner.
     if (task.attention === "prepared") return { ...at("needs", KEPT_MARKERS[task.shepherd?.action?.kind] || "prepared", task.attention_why || ""), kept: true };
+    // Its kept PR merged or closed, and nothing else to wait on: over, its row says so (never
+    // "Waiting for review" on a PR that merged).
+    const ended = task.shepherd?.ended;
+    if (ended && !obligationsOf(task).length) return { ...at("finished", `kept-${ended}`, task.shepherd.line), kept: true };
     // Cancelled after it finished, before it was accepted: over, not done.
     if (task.set_aside) return at("finished", "set-aside", "Cancelled after it finished: not accepted");
     // Accepted, and still waiting on what comes next (a review, the merge, a reply): monitored
@@ -420,7 +426,8 @@ export function boardOf(tasks, workers, { now = Date.now(), stallHours = 4, onCa
   sections.finished.sort((a, b) => endedAt(b).localeCompare(endedAt(a)));
   return { sections, phases };
 }
-export const endedAt = (task) => task.ended_at || task.updated_at || "";
+// (Its kept PR merged or closed since it finished: as of then, its row saying so.)
+export const endedAt = (task) => [task.ended_at || task.updated_at || "", task.shepherd?.ended_at || ""].sort().pop();
 // Monitoring, one list: what went quiet first (overdue, nothing to wait on), then the rest,
 // newest first, then the queued ones in the order they start (the oldest first).
 const URGENT = { overdue: 0, idle: 1, queued: 3 };

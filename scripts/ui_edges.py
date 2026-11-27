@@ -5245,6 +5245,10 @@ async def round_qa8_approvals(runtime, browser, failures: list[str]):
         await merge_row.locator(".more-button").click()
         await merge_row.get_by_role("menuitem", name="Details").click()
         await expect(ok.locator(".ok-details .card.merge")).to_contain_text("Checks pass")
+        # Which PR, linked, in what Details shows (QA 0.1.61 P3: its head is not shown there).
+        await expect(ok.locator(".ok-details .card.merge a.pr")).to_have_attribute(
+            "href", merge["target"]["url"]
+        )
         await expect(ok.locator(".ok-details .card.merge").get_by_role("button", name="Merge"))\
             .to_be_visible()  # fmt: skip
         # Its action once, in the card opened: the line's own buttons step aside for Hide details.
@@ -6354,7 +6358,7 @@ async def main():
                           round_qa8_report,
                           round_layout, round_fresh_start, round_qa8_auth,
                           round_qa8_approvals, round_e125, round_teams,
-                          round_usage, round_relations, round_shepherd,
+                          round_usage, round_relations, round_shepherd, round_kept_rows,
                           round_stacked_merge, round_fork, round_needs_dots,
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
@@ -13434,6 +13438,121 @@ async def round_long_report(runtime, browser, failures: list[str]):
     runtime.tasks.move(survey["id"], "cancelled")
     await settle(runtime)
     log("A long report: read in its own box, its end and Accept in reach, the column goes on")
+
+
+async def round_kept_rows(runtime, browser, failures: list[str]):
+    """Owner report 0.1.61 (QA U1): "A decision card asked me to Resume. I didn't understand
+    what it was for, and its content couldn't be expanded." A kept PR's paused row names its PR
+    (linked) and says why and what Resume does, in words on the page; unfolded, its result
+    reads whole; once its PR merges (or closes) it leaves Needs you saying so, under Recently
+    finished, not "Waiting for review"."""
+    shots = Path(os.environ.get("KEPT_ROWS_SHOTS", SHOTS / "kept-rows"))
+    shots.mkdir(parents=True, exist_ok=True)
+    store = runtime.store
+    shepherd = runtime.shepherd
+    old = store.settings()
+    new = old.model_copy(update={"proactive": True})
+    store.save_settings(new)
+    await runtime.settings_changed(old, new)
+    shepherd.control.ensure()
+    long = (
+        "The ledger export now pages through accounts 500 at a time, so a large tenant no "
+        "longer times out. "
+    )
+    seeded = {}
+    for index, (number, title) in enumerate(((7, "Page the ledger export"),
+                                             (8, "Retry the ledger import"))):  # fmt: skip
+        session_id = f"44444444-4444-4444-8444-{index + 1:012d}"
+        store.create_session(session_id, "worker", title, "idle", cwd=str(ROOT))
+        task = runtime.tasks.create(session_id, title, title, status="running")
+        target = f"github:acme/ledger#{number}"
+        url = f"https://github.com/acme/ledger/pull/{number}"
+        runtime.follow(session_id, [target], task_id=task["id"], asked=[target])
+        result = f"{title}: PR acme/ledger#{number}.\n\n" + long * 14 + "\n\nThe last line."
+        runtime.tasks.move(task["id"], "done", result=result)
+        shepherd.control.give(target, task["id"], "b" * 40)
+        shepherd.control.update_claim(target, details={"url": url, "state": "OPEN",
+                                                       "head": "9f8e7d6" + "0" * 33})  # fmt: skip
+        shepherd.control.pause(target, "new commits it didn't push (9f8e7d6)", "9f8e7d6" + "0" * 33)
+        # Not read from GitHub meanwhile (this page's is the shepherd round's fake): as seeded.
+        shepherd.read_at[target] = time.time() + 3600
+        runtime.task_actions.publish(runtime.tasks.get(task["id"]))
+        seeded[number] = (task["id"], target, url)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    try:
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        task_id, target, url = seeded[7]
+        row = page.locator(f'#needs .card.task[data-task="{task_id}"]')
+        await expect(row).to_be_visible(timeout=10000)
+        # Folded: its PR named and linked, why, and what Resume does, whole (not cut off).
+        line = row.locator(".row-line")
+        await expect(line).to_have_text(
+            re.compile(
+                r"^ledger#7 paused: commit 9f8e7d6 wasn't pushed by its worker\. "
+                r"Resume to keep it moving\."
+            )
+        )
+        await expect(line.locator("a.pr")).to_have_attribute("href", url)
+        cut = await line.locator(".why").evaluate("n => n.scrollWidth > n.clientWidth + 1")
+        assert not cut, "the paused row's line is cut off"
+        resume = row.get_by_role("button", name="Resume")
+        assert "Look after it again" in (await resume.get_attribute("aria-description") or "")
+        await row.screenshot(path=shots / "paused-folded.png")
+        # Unfolded: its result whole (a long one folded first, Show more), and what Resume does.
+        await row.locator(":scope > .head .title").click()
+        await expect(row).to_have_class(re.compile(r"\bunfolded\b"))
+        await expect(row.locator(".kept-line a.pr")).to_have_attribute("href", url)
+        await expect(row.locator(".kept-does")).to_contain_text(
+            "Fixes still wait for your approval"
+        )
+        result = row.locator(".task-body .result")
+        await result.get_by_role("button", name="Show more").click()
+        await expect(result.get_by_role("button", name="Show less")).to_be_visible()
+        body = result.locator(".body")
+        await body.evaluate("n => { n.scrollTop = n.scrollHeight; }")
+        await expect(body).to_contain_text("The last line.")
+        await expect(body.get_by_text("The last line.")).to_be_in_viewport()
+        await row.screenshot(path=shots / "paused-unfolded.png")
+        await row.locator(":scope > .head .title").click()
+        log("a paused kept PR's row: its PR linked, why and what Resume does; its result whole")
+
+        # Its PR merged: out of Needs you, saying so under Recently finished.
+        claim = shepherd.control.claim(target)
+        await shepherd.ended(claim, "merged")
+        await expect(row).to_have_count(0, timeout=10000)
+        done = page.locator(f'#tasks-recent .card.task[data-task="{task_id}"]')
+        await expect(done).to_be_visible(timeout=10000)
+        await expect(done.locator(".row-line .why")).to_have_text("ledger#7 merged.")
+        await expect(done.locator(".meta")).to_contain_text("Merged")
+        await expect(done.locator(".row-line a.pr")).to_have_attribute("href", url)
+        monitored = page.locator(f'#tasks-monitoring .card.task[data-task="{task_id}"]')
+        await expect(monitored).to_have_count(0)
+        await done.screenshot(path=shots / "merged.png")
+        # Closed (not merged): the same, "closed".
+        closed_id, closed_target, _ = seeded[8]
+        shepherd.control.update_claim(
+            closed_target,
+            details={**(shepherd.control.claim(closed_target)["details"] or {}), "state": "CLOSED"},
+        )
+        shepherd.over_lately(shepherd.control.claim(closed_target))
+        closed = page.locator(f'#tasks-recent .card.task[data-task="{closed_id}"]')
+        await expect(closed.locator(".row-line .why")).to_have_text(
+            "ledger#8 closed.", timeout=10000
+        )
+        await expect(page.locator(f'#needs .card.task[data-task="{closed_id}"]')).to_have_count(0)
+        await page.locator("#tasks-recent").screenshot(path=shots / "recently-finished.png")
+        log("its PR merged or closed: out of Needs you, saying so under Recently finished")
+    finally:
+        await context.close()
+        for task_id, target, _ in seeded.values():
+            store.unfollow(target)
+            runtime.task_actions.publish(runtime.tasks.get(task_id))
+        now_settings = store.settings()
+        back = now_settings.model_copy(update={"proactive": old.proactive})
+        store.save_settings(back)
+        await runtime.settings_changed(now_settings, back)
 
 
 async def round_stacked_merge(runtime, browser, failures: list[str]):

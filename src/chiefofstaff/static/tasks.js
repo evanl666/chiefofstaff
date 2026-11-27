@@ -11,7 +11,7 @@ import { continueWith, refreshChips, select } from "./session.js";
 import { focusDraft, focusQuestion, scheduleHome } from "./inbox.js";
 import { agentName, agentsOn, markOf, ready, statusOf } from "./agentpick.js";
 import { showChanges } from "./diff.js";
-import { keptButton, keptLine, keptMenu } from "./prepared.js";
+import { keptButton, keptLine, keptMenu, keptSays } from "./prepared.js";
 import { openShare } from "./share.js";
 // Chief of Staff's own helpers (learning how the owner works, checks, the profile): their
 // results come as cards to approve; the work itself is not the owner's.
@@ -185,7 +185,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}${keptKey(task)}${task.nudge_failed ? `:nudge-failed:${task.nudge_failed.at}` : ""}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}${task.shepherd ? `:${task.shepherd.line}|${task.shepherd.accept_note}` : ""}${task.texts_key ? ":cut" : ""}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}${task.shepherd ? `:${task.shepherd.line}|${task.shepherd.accept_note}|${task.shepherd.url}` : ""}${task.texts_key ? ":cut" : ""}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -893,12 +893,13 @@ function taskBody(task, phase = {}) {
   }
   if (task.status === "done" || task.status === "cancelled") {
     // Over: what it came to, and what it delivered in reach (its PRs, its documents, the run
-    // it made, the threads it still follows); on a row, what it reported before, folded.
-    const first = isRow(phase) ? gist(task.result || "") : "";
+    // it made, the threads it still follows); on a row, what it reported before, folded. A row
+    // is shown whole once unfolded: its result whole too (a long one folded, Show more).
+    const result = isRow(phase) ? wholeResult(task.result || "") : null;
     // Monitoring: what it waits on; under Needs you for its PR: what is wrong there.
     const waits = phase.section === "monitoring" || [...PR_TO_FIX, "runs-unknown"].includes(phase.marker) ? waitLine(task, worker, phase) : null;
     const found = artifacts(task, worker, { active: phase.section === "monitoring" || phase.marker === "still-following" });
-    const nodes = [first ? el("div", { class: "outcome", text: first }) : null, waits, keptLine(task), found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
+    const nodes = [result, waits, keptLine(task), found, isRow(phase) ? earlierBlock(task) : null].filter(Boolean);
     return nodes.length ? el("div", { class: "task-body" }, ...nodes) : null;
   }
   if (task.status === "review") {
@@ -917,6 +918,14 @@ function taskBody(task, phase = {}) {
   const earlier = earlierFold(task, progressNow(task).earlier, "updates");
   if (earlier) wrapper.append(earlier);
   if (found) wrapper.append(found);
+  return wrapper;
+}
+// A finished task's whole result on its unfolded row, as its report reads (a long one folded
+// at first, Show more).
+function wholeResult(text) {
+  if (!text.trim()) return null;
+  const wrapper = el("div", { class: "result" });
+  foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { label: "Result" });
   return wrapper;
 }
 // A step as a line on a card: what it is for (a command's description, when it gave one), or
@@ -1262,6 +1271,7 @@ function rowLine(task, worker, phase) {
   const why = rowWhy(task, worker, phase);
   const latest = rowLatest(task, worker, phase);
   const watched = ["watching", "delivered", "mergeable"].includes(phase.marker) ? monitorBits(task) : null;
+  const kept = !watched && phase.kept && task.shepherd && why.text ? task.shepherd : null;
   const tip = (text, help) => (help && help !== text ? `${text}\n${help}` : text || undefined);
   const parts = watched
     ? [
@@ -1270,9 +1280,13 @@ function rowLine(task, worker, phase) {
         watched.more ? el("span", { class: "also", text: `+${watched.more}`, "data-tip": why.help }) : "",
         watched.quiet ? el("span", { class: "quiet", text: watched.quiet, "data-tip": why.help || watched.quiet }) : "",
       ]
-    : [why.text ? el("span", { class: `why${why.warn ? " warn" : ""}`, text: why.text, "data-tip": tip(why.text, why.help) }) : ""];
+    : kept
+      ? // Prepared for you: its PR named and linked, what happened and what its action does,
+        // whole (it wraps rather than cut what it says off).
+        [el("span", { class: "why" }, ...keptSays(task.shepherd, why.text, phase.section === "needs"))]
+      : [why.text ? el("span", { class: `why${why.warn ? " warn" : ""}`, text: why.text, "data-tip": tip(why.text, why.help) }) : ""];
   const session = worker || closedWorkers().find((item) => item.id === task.session_id);
-  return el("div", { class: "row-line" }, ...parts, latest.text ? el("span", { class: "latest", text: latest.text, "data-tip": latest.help || latest.text }) : "", workerRef(session, task.title, task.id));
+  return el("div", { class: `row-line${kept ? " kept" : ""}` }, ...parts, latest.text ? el("span", { class: "latest", text: latest.text, "data-tip": latest.help || latest.text }) : "", workerRef(session, task.title, task.id));
 }
 // A row's foot: when its watch is looked at, whether what the owner sent from here reached its
 // worker, cards about it under Needs you and what it delivered. Shown whole, the card has
@@ -1341,7 +1355,7 @@ export function rowLatest(task, worker, phase) {
 // What a finished task came to, in its first words ("Cancelled by you." is not said twice);
 // never as if done when it was cancelled or set aside.
 export function finishedWords(task, phase) {
-  if (phase.marker === "still-following" || phase.marker === "reviewed") return phase.why;
+  if (phase.marker === "still-following" || phase.marker === "reviewed" || phase.kept) return phase.why;
   const said = gist(task.result || task.progress || "");
   if (task.status === "cancelled") return !said ? "Cancelled" : /^cancel/i.test(said) ? said : `Cancelled: ${said}`;
   if (phase.marker === "set-aside") return said ? `Set aside, not accepted: ${said}` : phase.why;
