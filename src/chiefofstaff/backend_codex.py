@@ -2691,16 +2691,18 @@ class CodexSession:
         self.effort = reasoning_effort or ""
 
     async def get_events(self) -> list[Any]:
-        """Its conversation (the latest turns): what it received and what it said."""
+        """Its conversation (the latest turns): what it received and what it said, each answer
+        `final` when its turn completed (one cut short or failed answered nothing in full)."""
         found = []
         for turn in await self.backend.latest_turns(self.session_id):
+            final = turn.get("status") == "completed"
             for item in turn.get("items") or []:
                 text = text_of(item.get("content"))
                 ours = str(item.get("clientId") or "").startswith("cos-")
                 if item.get("type") == "userMessage" and ours and not text.startswith(REFUSED_NOTE):
                     found.append(event("user.message", content=text))
                 elif item.get("type") == "agentMessage" and item.get("text"):
-                    found.append(event("assistant.message", content=item["text"]))
+                    found.append(event("assistant.message", content=item["text"], final=final))
         return found
 
     async def running_background(self) -> int:

@@ -912,6 +912,15 @@ def create_app(
         await runtime.workers.interrupt(session_id)
         return {"ok": True, **runtime.view(store.session(session_id))}
 
+    @app.post("/api/sessions/{session_id}/reconnect")
+    async def reconnect_session(session_id: str):
+        """Retry, on a session reconnecting after a restart: its next try now."""
+        try:
+            runtime.retry_resume(session_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"ok": True, **runtime.view(store.session(session_id))}
+
     @app.post("/api/sessions/{session_id}/reopen")
     async def reopen(session_id: str):
         return await runtime.workers.reopen(session_id, restore=True)

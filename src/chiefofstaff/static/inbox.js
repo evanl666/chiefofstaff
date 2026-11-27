@@ -79,7 +79,7 @@ export function workerStates() {
     let dot = "idle";
     if (session.elsewhere) dot = `open${session.terminal?.working ? " busy" : ""}`;
     else if (asking.has(session.id)) dot = "waiting";
-    else if (["working", "starting"].includes(session.status) || section === "running") dot = "working";
+    else if (["working", "starting", "resuming"].includes(session.status) || section === "running") dot = "working";
     else if (section === "monitoring") dot = "watching";
     // A marker in words, not a color of its own: queued, overdue, checks back…
     const markers = [...new Set(list.map((task) => MARKED[phases.get(task.id)?.marker]).filter(Boolean))];
@@ -124,10 +124,11 @@ export function homeItem() {
   const count = needsCount();
   const router = byId(routerId());
   const working = router?.status === "working";
+  const resuming = router?.status === "resuming";
   return el(
     "button",
     { type: "button", class: `item home-item${state.selected === HOME ? " selected" : ""}`, onclick: () => select(HOME) },
-    el("span", { class: `dot${working ? " working" : ""}`, title: working ? "Your chief of staff is working" : "Your chief of staff" }),
+    el("span", { class: `dot${working ? " working" : ""}`, title: working ? "Your chief of staff is working" : resuming ? router.activity : "Your chief of staff" }),
     el("span", { class: "label", text: "Home" }),
     count ? el("span", { class: "badge amber", text: String(count), title: `${count} need${count === 1 ? "s" : ""} you` }) : null,
   );

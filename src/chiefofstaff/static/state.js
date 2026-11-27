@@ -12,12 +12,14 @@ import { heardSetup } from "./agentsetup.js";
 // Home: the Router's conversation, with what needs the owner and every task beside it.
 export const HOME = "home";
 // Workers in the sidebar: running first.
-export const STATUS_ORDER = { working: 0, starting: 0, waiting: 1, queued: 2, failed: 3, idle: 4, done: 5 };
+export const STATUS_ORDER = { working: 0, starting: 0, resuming: 0, waiting: 1, queued: 2, failed: 3, idle: 4, done: 5 };
 // A worker whose Copilot session a fresh one takes over meanwhile (Runtime.continue_fresh).
 export const RECONNECTING = "Reconnecting this worker…";
 export const STATUS_TEXT = {
   working: "Working",
   starting: "Starting",
+  // At work when Chief of Staff restarted, not resumed yet: nothing of it runs meanwhile.
+  resuming: "Reconnecting",
   queued: "Queued",
   idle: "Idle",
   waiting: "Waiting for an answer",
@@ -28,6 +30,7 @@ export const STATUS_TEXT = {
 export const DOT_HELP = {
   working: "Working",
   starting: "Starting",
+  resuming: "Reconnecting: it goes on once its agent has it open again",
   queued: "Queued: waits for a free worker slot, or for another task",
   idle: "Idle: between tasks",
   waiting: "Waiting for your answer",

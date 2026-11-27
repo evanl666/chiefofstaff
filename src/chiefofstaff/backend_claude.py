@@ -538,6 +538,32 @@ def text_of(content: Any) -> str:
     )
 
 
+def ends_turn(messages: list[Any], index: int) -> bool:
+    """Whether the assistant message at `index` of Claude's transcript (get_session_messages)
+    ended its turn: as its stop reason says; where that is not written, it asks for no tool
+    and is the last of its turn (what comes next is the owner's, not a tool's result nor
+    another step; nor Claude saying the turn was interrupted)."""
+
+    def blocks(message: Any) -> list[dict]:
+        content = mapping(message.message).get("content")
+        return [mapping(block) for block in content] if isinstance(content, list) else []
+
+    stop = mapping(messages[index].message).get("stop_reason")
+    if stop:
+        return stop == "end_turn"
+    if any(block.get("type") == "tool_use" for block in blocks(messages[index])):
+        return False
+    for later in messages[index + 1 :]:
+        if later.type == "assistant":
+            return False  # Another step of the same turn.
+        found = blocks(later)
+        if any(block.get("type") == "tool_result" for block in found):
+            return False
+        text = owners_text(mapping(later.message).get("content"))
+        return not text.startswith("[Request interrupted")
+    return False  # Its last word, its turn's end not written: not known to have ended.
+
+
 def owners_text(content: Any) -> str:
     """A message's text as Chief of Staff wrote it: without the blocks it added (the lines
     naming files attached to it)."""
@@ -1999,12 +2025,14 @@ class ClaudeWorker:
         return True
 
     async def get_events(self) -> list[Any]:
-        """Its conversation, from Claude's transcript: what it received and what it said."""
+        """Its conversation, from Claude's transcript: what it received and what it said, each
+        answer `final` when it ended its turn (as Claude says, or, where it does not, the last
+        of its turn that asks for no tool)."""
         from claude_agent_sdk import get_session_messages
 
         messages = await asyncio.to_thread(get_session_messages, self.session_id, self.cwd)
         found = []
-        for message in messages:
+        for index, message in enumerate(messages):
             content = mapping(message.message).get("content")
             if message.type == "user":
                 if isinstance(content, list) and any(
@@ -2015,7 +2043,9 @@ class ClaudeWorker:
                 if text and text != PROBE and not text.startswith(NOTIFICATION):
                     found.append(event("user.message", content=text))
             elif message.type == "assistant" and (text := text_of(content)):
-                found.append(event("assistant.message", content=text))
+                found.append(
+                    event("assistant.message", content=text, final=ends_turn(messages, index))
+                )
         return found
 
     def running_background(self) -> int:

@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import agents, compat
 from .backend import (
@@ -32,7 +32,7 @@ from .backend import (
     stop_background,
     take_queued,
 )
-from .envelope import news_tasks, tasks_named
+from .envelope import news_tasks, tasks_named, wrap
 from .roles import ROUTER, SLACK, WORKER
 from .settings_guard import SettingsChangedError
 from .sources.slack import describe
@@ -90,6 +90,16 @@ def refused_for_version(error: BaseException | None) -> bool:
             return True
         error = error.__cause__ or error.__context__
     return False
+
+
+class Settled(NamedTuple):
+    """A turn cut short by a restart, settled (Delivery.settle_cut): the note that goes with what
+    it is given again ("" when its record shows it finished), why it was cut short, and whether
+    the note goes before what it is given again (it was at work on it) or after."""
+
+    note: str
+    why: str
+    first: bool = False
 
 
 class FreshStartError(RuntimeError):
@@ -485,7 +495,10 @@ class Delivery:
 
     def has_unsent(self, session_id: str) -> bool:
         """Whether it has messages to receive that are worth a turn (a deferred note, such as
-        a cancellation, only rides along with the next one)."""
+        a cancellation, only rides along with the next one): also what a turn of it cut short
+        was given (settle_cut)."""
+        if self.store.get(f"cutshort:{session_id}"):
+            return True
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         return any(
             not m["meta"].get("deferred") for m in self.store.prompts(session_id, after=mark)
@@ -510,6 +523,21 @@ class Delivery:
         """flush, with the session's `sending` lock held."""
         # The Router's Copilot session may have been replaced while this waited.
         session = self.states.handle(session_id) or session
+        if self.store.get(f"cutshort:{session_id}"):
+            # A turn of it a restart cut short, open again here first (not by its resume, the
+            # owner's next message, say): what it had not finished goes first, once.
+            settled = await self.settle_cut(session_id, session)
+            if settled and settled.note:
+                self.runtime.add_message(
+                    session_id,
+                    "notice",
+                    f"{settled.why}; asked the session to continue.",
+                    {
+                        "prompt": wrap("system", "restart", settled.note),
+                        **({"restart": True} if settled.first else {}),
+                    },
+                )
+            self.runtime.resume_over(session_id)
         mark = int(self.store.get(f"sent:{session_id}") or 0)
         pending = self.store.prompts(session_id, after=mark)
         if not pending:
@@ -524,7 +552,9 @@ class Delivery:
             # No turn starts while its folder's agent settings are changed (see deliver).
             self.runtime.background(self.runtime.settings_stop(session_id))
             return False
-        prompts = [self.runtime.told_prompt(message) for message in pending]
+        # A restart's note goes before what it is about (Delivery.settle_cut).
+        ordered = sorted(pending, key=lambda message: not message["meta"].get("restart"))
+        prompts = [self.runtime.told_prompt(message) for message in ordered]
         # What workers that work together told each other since: who and how often, with what
         # still waits (Teams.digest), riding along with this turn of the Router's.
         team_digest, digest_upto = (
@@ -718,6 +748,96 @@ class Delivery:
                 last = index
         return messages[: last + 1]
 
+    # A turn cut short (Runtime.cut_short: Chief of Staff stopped, or its agent did, while it
+    # ran): what it was given then goes to it again, once, as soon as it is open again; never
+    # what its own record shows it finished.
+
+    def cut_record(self, session_id: str) -> dict | None:
+        try:
+            found = json.loads(self.store.get(f"cutshort:{session_id}") or "null")
+        except ValueError:
+            return None
+        return found if isinstance(found, dict) else None
+
+    async def settle_cut(self, session_id: str, session) -> Settled | None:
+        """Its turn cut short (cut_record), it is open again: what it was given in that turn
+        and its record does not show it finished is put back to be sent (queued again: the
+        chats say so), and the note that goes with it is returned (Settled), with why it was
+        cut short; no note when its record shows it finished all of it (taken as handled).
+        None when no turn of it was cut short. Once: the record goes with this."""
+        record = self.cut_record(session_id)
+        if record is None:
+            return None
+        self.store.delete(f"cutshort:{session_id}")
+        why = str(record.get("why") or "Chief of Staff restarted")
+        mark = int(self.store.get(f"sent:{session_id}") or 0)
+        upto = min(int(record.get("upto") or 0), mark)
+        given = [
+            message
+            for message in self.store.prompts(session_id, after=int(record.get("after") or 0))
+            if message["id"] <= upto
+        ]
+        if not given:
+            return Settled(f"{why} while you were working. Continue where you left off.", why)
+        received, finished = await self.agent_record(session_id, session, given)
+        if finished == len(given):
+            # Its turn ended before the stop was seen here: handled, nothing goes again.
+            for key in ("seen", "handled"):
+                if int(self.store.get(f"{key}:{session_id}") or 0) < upto:
+                    self.store.set(f"{key}:{session_id}", str(upto))
+            self.publish_delivery(session_id, given)
+            return Settled("", why)
+        again = given[finished:]
+        self.store.set(f"sent:{session_id}", str(again[0]["id"] - 1))
+        self.publish_delivery(session_id, again)  # Waiting to be sent, until it goes.
+        logger.info(
+            "%s's turn was cut short: %d message(s) go to it again.", session_id, len(again)
+        )
+        if received > finished:
+            # It was at work on them: the note first, then them again.
+            return Settled(
+                f"{why} while you were working on the message(s) below, before you finished "
+                "them: they come again. Continue where you left off: your conversation shows "
+                "what you did of them already, which you do not do again.",
+                why,
+                first=True,
+            )
+        return Settled(
+            f"{why} just after sending you the message(s) above, before they reached you: they "
+            "are new to you.",
+            why,
+        )
+
+    async def agent_record(self, session_id: str, session, messages: list[dict]) -> tuple[int, int]:
+        """Of messages given in one turn (oldest first), how many its agent's own record of its
+        conversation shows it received (up to the last one shown) and finished (up to the last
+        one a final answer came after, in a turn that ended); (0, 0) when it cannot be read."""
+        try:
+            if not hasattr(session, "get_events"):
+                return 0, 0
+            events = [
+                (getattr(event.type, "value", str(event.type)), event.data)
+                for event in await self.conversation(session_id, session)
+            ]
+        except Exception:
+            logger.warning("Could not read what %s did.", session_id, exc_info=True)
+            return 0, 0
+        received = finished = 0
+        for index, message in enumerate(messages):
+            texts = (message["meta"]["prompt"], self.runtime.told_prompt(message))
+            shown = [
+                at
+                for at, (kind, data) in enumerate(events)
+                if kind == "user.message"
+                and any(text in (getattr(data, "content", "") or "") for text in texts)
+            ]
+            if not shown:
+                continue
+            received = index + 1
+            if answered(events, shown[-1]):
+                finished = index + 1
+        return received, finished
+
     # Delivery, as the chats show it: queued (not sent yet) -> sent -> received (its
     # conversation shows it) -> processed (the turn it was in ended); or resending, undelivered;
     # or held (for its next message: it was stopped).
@@ -726,8 +846,12 @@ class Delivery:
         seen = self.store.get(f"seen:{session_id}")
         handled = self.store.get(f"handled:{session_id}")
         waiting = self.states[session_id].echo_wait.values()
+        sent = int(self.store.get(f"sent:{session_id}") or 0)
+        if (cut := self.cut_record(session_id)) is not None:
+            # What a turn cut short by a restart was given waits to go to it again.
+            sent = min(sent, int(cut.get("after") or 0))
         return {
-            "sent": int(self.store.get(f"sent:{session_id}") or 0),
+            "sent": sent,
             "seen": int(seen) if seen else None,
             "handled": int(handled) if handled else None,
             "waiting": [(first, last, resent) for first, last, _, _, resent in waiting],
@@ -1052,6 +1176,30 @@ class Delivery:
 
 def digest(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+# How Claude Code's record says a turn was stopped before it ended.
+INTERRUPTED = "[Request interrupted"
+
+
+def answered(events: list[tuple[str, Any]], index: int) -> bool:
+    """Whether an agent's record of its conversation (as get_events has it: each event's type
+    and data) shows a final answer after the event at `index` (a message it received): an
+    answer that ended its turn. Codex's say so (`final`: its turn completed); Copilot's and
+    Claude's are those that ask for no tool. A turn stopped before (Copilot's abort, Claude's
+    interrupt) answered nothing."""
+    for kind, data in events[index + 1 :]:
+        content = getattr(data, "content", "") or ""
+        if kind == "abort" or (kind == "user.message" and content.startswith(INTERRUPTED)):
+            return False
+        if kind != "assistant.message" or not content.strip():
+            continue
+        final = getattr(data, "final", None)
+        if final is None:
+            final = not getattr(data, "tool_requests", None)
+        if final:
+            return True
+    return False
 
 
 def instructs(message: dict) -> bool:
