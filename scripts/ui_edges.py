@@ -6361,7 +6361,7 @@ async def main():
                           round_settings, round_teams_v2,
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer, round_decision_ledger,
-                          round_ci_not_run, round_team_v4,
+                          round_ci_not_run, round_merge_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
                           round_router_appears, round_agent_words, round_payload,
                           round_reconnecting, round_self_handle, round_autopilot,
@@ -13189,6 +13189,81 @@ async def round_router_appears(runtime, browser, failures: list[str]):
         store.update_session(made, closed_at=datetime.now(UTC).isoformat())
         runtime.publish_state()
     log("router appears: Home shows its chat once there is one, no reload, nothing empty between")
+
+
+async def round_merge_ci_not_run(runtime, browser, failures: list[str]):
+    """Owner report 0.1.61 (sly-town#17): a PR whose CI GitHub never started (billing) is on
+    Your OK as a line of its own: Merge?, that CI didn't run and why, what its worker checked
+    itself, Merge as its button (never Approve all safe); GitHub's reason once its branch's
+    rules held a Merge back. Light and dark, 800 and 1280 px."""
+    store = runtime.store
+    router = store.get("router_id")
+    title = "Leave the betting games out"
+    result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                             why_new="test")  # fmt: skip
+    worker = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    why = "GitHub Actions minutes are used up"
+    merge = store.create_draft(worker, "merge", {
+        "label": "acme/sly-town#17", "repo": "acme/sly-town", "number": 17,
+        "url": "https://github.com/acme/sly-town/pull/17", "title": "1.0.1: fits a 390pt phone",
+        "head": "2540e830b82e", "task_id": task["id"], "review": "", "checks": "not_run",
+        "at": datetime.now(UTC).isoformat(), "not_run": ["rules-and-server", "e2e"],
+        "not_run_why": why, "merge_state": "UNSTABLE", "verified": ["npm test passed"],
+    }, "1.0.1: fits a 390pt phone")  # fmt: skip
+    runtime.bus.publish("draft", merge)
+    await settle(runtime)
+    said = f"sly-town#17 · {why} · its worker checked: npm test passed"
+    shots = Path(os.environ.get("MERGE_CI_SHOTS", SHOTS / "merge-ci-not-run"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for width, scheme in itertools.product((1280, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 1000}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        row = page.locator(f'#needs .your-ok .ok-row[data-id="{merge["id"]}"]')
+        await expect(row.locator(".ok-kind")).to_have_text("Merge? · CI didn't run")
+        await expect(row.locator(".ok-text")).to_have_text(said)
+        await expect(row.get_by_role("button", name="Merge")).to_be_visible()
+        await expect(row.locator(".ok-safe")).to_have_count(0)
+        await row.screenshot(path=shots / f"your-ok-{width}-{scheme}.png")
+        # Details: its whole card, its title too.
+        await row.locator(".more-button").click()
+        await row.get_by_role("menuitem", name="Details").click()
+        opened = page.locator("#needs .your-ok .ok-details .card")
+        await expect(opened.locator(".note.strong")).to_have_text("“1.0.1: fits a 390pt phone”")
+        await expect(opened).to_contain_text(f"CI didn't run: {why}")
+        await expect(opened).to_contain_text("Its worker checked: npm test passed")
+        await opened.screenshot(path=shots / f"details-{width}-{scheme}.png")
+        assert not errors, errors
+        await context.close()
+    # Merge held back by its branch's rules: GitHub's reason on its line.
+    reason = (
+        f"Not merged: GitHub's rules for its branch require checks that didn't run ({why}): it "
+        "can merge once they run and pass."
+    )
+    runtime.bus.publish("draft", store.update_draft(merge["id"], outcome=reason))
+    context = await browser.new_context(viewport={"width": 1280, "height": 1000})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    row = page.locator(f'#needs .your-ok .ok-row[data-id="{merge["id"]}"]')
+    await expect(row).to_contain_text(reason, timeout=15000)
+    await row.screenshot(path=shots / "your-ok-refused.png")
+    await row.locator(".more-button").click()
+    await row.get_by_role("menuitem", name="Not now").click()
+    await expect(row).to_have_count(0, timeout=10000)
+    await context.close()
+    runtime.tasks.move(task["id"], "cancelled")
+    await settle(runtime)
+    log("Merge?: a PR whose CI never ran, saying so and what its worker checked; Merge is yours")
 
 
 async def round_ci_not_run(runtime, browser, failures: list[str]):
