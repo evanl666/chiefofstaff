@@ -14264,6 +14264,11 @@ async def settings_long_states(runtime, browser):
     log("settings: long and combined states: statuses and controls apart, 800 to 1440")
 
 
+# Where the page is scrolled to, and where each card under Needs you is in the window.
+PLACES = """() => [document.scrollingElement.scrollTop,
+  ...[...document.querySelectorAll("#needs .card")].map((c) => c.getBoundingClientRect().top)]"""
+
+
 async def round_payload(runtime, browser, failures: list[str]):
     """0.1.61: the page's state cuts a finished task's long result to what its row and chips read
     (its start, its links) and its earlier reports to when they were said; the page asks once for
@@ -14335,6 +14340,90 @@ async def round_payload(runtime, browser, failures: list[str]):
     log(
         "a long finished result and its earlier reports: the state cut, the whole asked once "
         "and shown in its tooltip, fold and links; a state read again asks nothing more"
+    )
+
+    # Opened before the whole came (its ask failed, then the next is slow): a report shown and
+    # its Earlier reports open, a draft's Result of open, stay open and get the whole once it
+    # comes, nothing on the page moved.
+    result = await call_tool(runtime, "spawn_worker", router, title="Compare the queue options",
+                             instructions="Compare the queue options", why_new="test")  # fmt: skip
+    queuer = json.loads(result.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    queued = runtime.tasks.current(queuer)
+    runtime.tasks.move(queued["id"], "review", result="Kafka fits best: ordered and replayable.")
+    store.set(
+        f"results:{queued['id']}",
+        json.dumps([{"at": datetime.now(UTC).isoformat(), "text": "RabbitMQ at first, then not."}]),
+    )
+    draft = store.create_draft(
+        worker, "reply", {"to": "Al", "where": "email", "task_id": task["id"]}, "Redis it is."
+    )
+    runtime.bus.publish("draft", store.draft(draft["id"]))
+    await settle(runtime)
+    context = await browser.new_context(viewport={"width": 1280, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    calls: list[str] = []
+    release = asyncio.Event()
+
+    async def failing_then_slow(route):
+        calls.append(route.request.url)
+        if len(calls) == 1:
+            await route.fulfill(status=503, json={"detail": "Busy."})
+            return
+        await release.wait()
+        await route.continue_()
+
+    await page.route("**/api/task-texts*", failing_then_slow)
+    # (Marked read, a task comes whole in its own event: not that way here.)
+    await page.route("**/api/tasks/*/read", lambda route: route.fulfill(json={"read": True}))
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    shown = page.locator("#needs .card.task", has_text="Compare the queue options")
+    await expect(shown).to_have_count(1, timeout=15000)
+    for _ in range(100):
+        if calls:
+            break
+        await page.wait_for_timeout(100)
+    await shown.get_by_role("button", name="View report").click()
+    await expect(shown).to_have_class(re.compile(r"\bexpanded\b"))
+    earlier_fold = shown.locator(".report details.earlier-reports")
+    await expect(earlier_fold.locator("summary")).to_have_text("Earlier reports (1)")
+    await earlier_fold.locator("summary").click()
+    await expect(earlier_fold).to_have_attribute("open", "")
+    await expect(earlier_fold.locator(".earlier-report")).to_have_count(0)
+    about = page.locator(".card.draft > details.context", has_text="Survey the cache options")
+    await about.locator("summary").click()
+    await expect(about).to_have_attribute("open", "")
+    await expect(about.locator(".markdown")).not_to_contain_text("Option 79: measured")
+    where = await page.evaluate(PLACES)
+    # The state read again (an event): the whole asked for again, slowly this time.
+    runtime.bus.publish("state")
+    for _ in range(100):
+        if len(calls) > 1:
+            break
+        await page.wait_for_timeout(100)
+    assert len(calls) == 2, calls
+    release.set()
+    await expect(earlier_fold.locator(".earlier-report .body")).to_have_text(
+        "RabbitMQ at first, then not.", timeout=10000
+    )
+    await expect(earlier_fold).to_have_attribute("open", "")
+    await expect(shown).to_have_class(re.compile(r"\bexpanded\b"))
+    await expect(shown.locator(".report > .body")).to_contain_text("Kafka fits best")
+    await expect(about.locator(".markdown")).to_contain_text("Option 79: measured")
+    await expect(about).to_have_attribute("open", "")
+    after = await page.evaluate(PLACES)
+    assert len(after) == len(where) and all(
+        abs(a - b) < 1 for a, b in zip(after, where, strict=True)
+    ), (
+        where,
+        after,
+    )
+    assert not errors, errors
+    await context.close()
+    log(
+        "opened before the whole came (its ask failed, then slow): a report, its earlier "
+        "reports and a draft's Result of stay open and get the whole, nothing moved"
     )
 
 
