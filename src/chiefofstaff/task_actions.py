@@ -2534,11 +2534,23 @@ class TaskActions:
         cards = [draft for draft in self.store.drafts() if draft["kind"] == "merge"]
         for pr in prs:
             label = pr["label"].lower()
+            # CI GitHub never started (the account's Actions minutes used up), and nothing that
+            # ran failed: the owner's call, on a card that says so (owner report 0.1.61), though
+            # GitHub calls it unstable; one branch protection holds back says why at Merge.
+            never_ran = pr.get("checks") == "not_run" and (
+                pr.get("merge_state") == "UNSTABLE"
+                or (pr.get("merge_state") == "BLOCKED" and pr.get("review") != "REVIEW_REQUIRED")
+            )
             mergeable = (
                 pr.get("state") == "OPEN"
                 and not pr.get("draft")
-                and pr.get("checks") in {"passing", "none"}
-                and pr.get("merge_state") in {"CLEAN", "HAS_HOOKS"}
+                and (
+                    (
+                        pr.get("checks") in {"passing", "none", "not_run"}
+                        and pr.get("merge_state") in {"CLEAN", "HAS_HOOKS"}
+                    )
+                    or never_ran
+                )
                 and pr.get("review") != "CHANGES_REQUESTED"
                 and pr.get("head")
             )
@@ -2603,15 +2615,35 @@ class TaskActions:
                 # When the PR was read as ready: a copy read before says nothing of it now.
                 "at": pr.get("at") or now(),
             }
+            if pr.get("checks") == "not_run":
+                # Why its CI didn't run, and what its worker checked itself instead.
+                target |= {
+                    "not_run": pr.get("not_run") or [],
+                    "not_run_why": pr.get("not_run_why") or "",
+                    "merge_state": pr.get("merge_state") or "",
+                    "verified": self.verified_locally(task),
+                }
             card = self.store.create_draft(task["session_id"], "merge", target, pr.get("title", ""))
             self.bus.publish("draft", card)
             alerted = f"mergealert:{label}@{pr['head']}"
             if not self.store.get(alerted):  # Offered again at the same commit: said once.
                 self.store.set(alerted, "1")
                 self.runtime.alert(
-                    f"{pr['label']} is ready to merge", session_id=task["session_id"],
-                    needs_action=True, title="Ready to merge",
+                    f"{pr['label']} can be merged: its CI didn't run"
+                    if pr.get("checks") == "not_run"
+                    else f"{pr['label']} is ready to merge",
+                    session_id=task["session_id"], needs_action=True, title="Ready to merge",
                 )  # fmt: skip
+
+    def verified_locally(self, task: dict) -> list[str]:
+        """What its worker's own runs showed pass (its tests, lint, build), as its receipts
+        have them: what a PR whose CI didn't run has instead ([] for nothing)."""
+        found = self.receipts(task) or {}
+        return [
+            f"{item['command']} passed"
+            for item in (found.get(kind) for kind in ("tests", "checks", "build"))
+            if item and item.get("passed") is True and not item.get("running") and item["command"]
+        ]
 
     async def refresh_prs(self, task_id: str, first: str = "") -> bool:
         """The PR chips of a task show what is true now, not what was when it reported: a PR

@@ -748,7 +748,10 @@ tests. A PR shows in a few words, as GitHub has it now: *app#7 · ✓ CI · appr
 running*, *✗ CI* (hover for the failing checks), *merged*. CI GitHub never started (the
 account's Actions minutes or spending limit used up, the account locked) is no failure: the
 card says once *CI didn't run on app#7: GitHub Actions minutes are used up*, and nothing asks
-you or its worker to fix it. When the PR's checks passed after
+you or its worker to fix it. A PR of yours whose only checks that did not pass never ran is
+offered to merge all the same, yours to decide: *Merge? · CI didn't run* on *Your OK*, with why
+and what its worker checked itself (*Details*: its whole card); when its branch's rules require
+those checks, *Merge* says so. When the PR's checks passed after
 the last local test run failed, the card says so (*✗ tests locally*, and *The last local test
 run failed (exit 1), but the checks on … pass now*): CI has the newer word.
 
