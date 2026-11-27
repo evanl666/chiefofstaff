@@ -390,3 +390,49 @@ async def test_the_pages_state_stays_quick_with_long_chats_and_many_commands(har
         runtime.snapshot()
         took.append(time.perf_counter() - started)
     assert sorted(took)[1] < 0.25, f"the page's state took {sorted(took)[1]:.2f} s"
+
+
+# 0.1.61: the page's state, read again after each burst of events, carries finished work's long
+# words cut (891 KB on the owner's data, 340 KB now); the page asks once for the rest.
+
+
+def test_the_pages_state_cuts_finished_works_long_words_and_gives_them_once(http):
+    """A finished task's long result is carried as far as its row and chips read it (its start,
+    every line with a link), its earlier reports by when only; /api/task-texts gives the rest,
+    which puts each back as the whole state has it. A guard on the size, too."""
+    store: Store = http.app.state.store
+    runtime: Runtime = http.app.state.runtime
+    store.create_session("w1", "worker", "Long reports", "idle")
+    store.execute("UPDATE sessions SET report=?, repos=? WHERE id='w1'", ("R" * 4000, "[]"))
+    body = "\n".join(f"Finding {i}: measured, with what it means." for i in range(300))
+    for i in range(25):
+        task = runtime.tasks.create("w1", f"Research {i}", "Find out", status="running")
+        result = (
+            f"Done {i}: see [the plan](https://docs.example.com/plan/{i}).\n\n{body}\n\n"
+            f"```\ncurl https://in.code.example.com/{i}\n```\nThe run: https://ci.example.com/{i}"
+        )
+        runtime.tasks.move(task["id"], "done", result=result)
+        earlier = [{"at": "2026-11-20T10:00:00+00:00", "text": body, "read": "1"}] * 5
+        store.set(f"results:{task['id']}", json.dumps([*earlier, {"at": "", "text": "  "}]))
+    whole = json.loads(json.dumps(runtime.snapshot()))
+    answer = http.get("/api/state")
+    page = answer.json()
+    assert len(answer.content) < 150_000 < 2_000_000 < len(json.dumps(whole)), len(answer.content)
+    assert all("report" not in row and "repos" not in row for row in page["sessions"])
+    cut = [task for task in page["tasks"] if task.get("texts_key")]
+    assert len(cut) == 25
+    for task in cut:
+        number = task["title"].split()[-1]
+        assert task["result"].startswith(f"Done {number}: see [the plan]")
+        assert task["result"].endswith(f"The run: https://ci.example.com/{number}")
+        assert "in.code.example.com" not in task["result"], "a link in code is no link"
+        assert task["earlier_results"] == [{"at": "2026-11-20T10:00:00+00:00"}] * 5
+    texts = http.get("/api/task-texts", params={"ids": ",".join(t["id"] for t in cut)}).json()
+    shown = {task["id"]: task for task in whole["tasks"]}
+    for task in cut:
+        found = texts[task["id"]]
+        assert found["texts_key"] == task["texts_key"]
+        back = {**task, "result": found["result"], "earlier_results": found["earlier_results"]}
+        del back["texts_key"]
+        assert back == shown[task["id"]]
+    assert http.get("/api/task-texts", params={"ids": "tmissing"}).json() == {}

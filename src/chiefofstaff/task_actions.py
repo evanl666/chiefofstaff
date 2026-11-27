@@ -26,6 +26,7 @@ from . import agents, prompts, receipts, threads
 from .backend import stop_background
 from .envelope import TASK_CONTINUED, wrap
 from .models import this_computer as loopback
+from .pagestate import texts_key
 from .policy import within
 from .roles import WORKER
 from .sources.github import MISSING_TRIES, NOT_FOUND
@@ -2792,6 +2793,24 @@ class TaskActions:
         if label.lower() not in {known.lower() for known in merged}:
             self.store.set(f"mergedprs:{task['id']}", json.dumps([*merged, label]))
             self.publish(self.tasks.get(task["id"]))
+
+    def texts(self, task_ids: list[str]) -> dict[str, dict]:
+        """Tasks' whole words, as their view has them (its result as shown, its earlier
+        reports), for those the page's state cut (pagestate.page_task), each with what they are
+        now (texts_key); a task not found is left out."""
+        found = {}
+        for task_id in dict.fromkeys(task_ids):
+            task = self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+            if not task:
+                continue
+            result = self.shown_result(task)
+            earlier = json.loads(self.store.get(f"results:{task_id}") or "[]")
+            found[task_id] = {
+                "result": result,
+                "earlier_results": earlier,
+                "texts_key": texts_key(result, earlier),
+            }
+        return found
 
     def shown_result(self, task: dict) -> str:
         """Its result as its card shows it (the stored one stays as reported): once its PR is
