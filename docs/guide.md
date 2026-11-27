@@ -1108,12 +1108,14 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   migration, a release).
 - A finished result is accepted only after its own run of the task's checks: at the exact
   commit, in a private copy, offline (no network, no credentials, no keychain), with only the
-  dependencies already there, the tree checked before and after. Uncommitted work, a weakened
-  test or checks that reach outside the copy are left for you; where this computer can't run them
-  offline, results wait for you (*Couldn't verify offline: it waits for you*). A result it
-  accepted says *Accepted by Autopilot* (*Why* opens its entry), in its worker's chat too, and is
-  never said to be yours. What waited on it starts; a stalled worker is asked once more where it
-  stands.
+  dependencies already there (the package caches workers share, filled from yours), the tree
+  checked before and after. Uncommitted work, a weakened test or checks that reach outside the
+  copy are left for you; where this computer can't run them offline (a test that downloads, uv
+  before 0.9.29, which crashes in the macOS sandbox), results wait for you (*Couldn't verify
+  offline: it waits for you*). The first time on a new Copilot version it waits for that
+  version's safety check first. A result it accepted says *Accepted by Autopilot* (*Why* opens
+  its entry), in its worker's chat too, and is never said to be yours. What waited on it starts;
+  a stalled worker is asked once more where it stands.
 - Nothing goes out in your name: no Slack reply, PR, comment or merge. What a turn it continued
   would send (a reply you handed over, a note to another session) waits for you as a card.
 
