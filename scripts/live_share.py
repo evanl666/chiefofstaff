@@ -325,9 +325,12 @@ async def scenario(guard: Guard, base: str, page):
     check(await gist_status(report_gist) == 404, "revoked: its gist is gone")
 
     print("S9 a title cut through a token")
+    # A Chief of its own (the owner's has as many workers at work as it starts by now).
+    cutter = await chief("cut", guard)
+    shares = cutter.runtime.shares
     token = "gh" + "p_" + "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78"
     asked = f"Check the staging API: token {token} at http://10.0.4.17:8080/health"
-    task = await finished_task(owner, title=asked[:60], result=f"Checked it with {token}.")
+    task = await finished_task(cutter, title=asked[:60], result=f"Checked it with {token}.")
     preview = await shares.preview(task["id"])
     check(
         sorted(where for hit in preview["hits"] for where in hit["where"]) == ["Result", "Title"],
