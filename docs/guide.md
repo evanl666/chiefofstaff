@@ -522,6 +522,14 @@ if you trust the change.
 it was at work; once its agent has it open again, it gets what that turn was given, once, and goes
 on. It is tried again by itself; *Retry* tries now. Nothing is lost to a restart.
 
+**A session says *Codex stopped answering; restarting it…*** (or Claude). Its agent hung (alive,
+answering nothing): Chief of Staff ended it and started it again, and the turn goes on. After
+*Stop*, it starts again with the next message.
+
+**Chief of Staff won't start: its database is damaged, held, or empty.** The line it ends with
+names the file and what to do: close the program holding it, or restore it from a backup (or move
+it aside to start with a new, empty one).
+
 **Update and restart** waits for the turns running to end (two minutes at most; one still running
 then goes on after the restart). If it fails, Home says why, and the version you had keeps running.
 Installed into a system's Python, or on Windows, update with the command the sidebar shows.
