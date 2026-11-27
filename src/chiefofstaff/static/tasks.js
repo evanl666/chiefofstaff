@@ -1,6 +1,6 @@
 // Task cards on Home: what runs and what it does now, what waits, what is finished.
 
-import { api, el, foldable, FRESH_START, freshButton, moreMenu, once, startFresh, submits, toast } from "./dom.js";
+import { api, boxed, el, foldable, FRESH_START, freshButton, moreMenu, once, startFresh, submits, toast } from "./dom.js";
 import { monitorParts, obligationsOf, PLAN_STOP, PR_TO_FIX, resetTime, SECTION_DOT, SECTIONS, statusWord, taskPhase, workerContext } from "./board.js";
 import { ago, changesText, clock, compactPaths, displayPath, gist, linkKey, linkName, markdown, notCountedText, plural, prTitle, shorten, since, taskLinks, threadLabel, uncheckedText } from "./text.js";
 import { deliverablesOf, isHidden, PR_ROLES, prStatus, runStanding, setHidden, toneOf } from "./artifacts.js";
@@ -706,7 +706,9 @@ function taskCard(task, phase = phaseOf(task)) {
   function viewReport() {
     if (row) unfoldTask(node, true, true);
     expandTask(node, true, true);
-    node.querySelector(":scope > .report")?.scrollIntoView({ block: "nearest" });
+    // The card in sight with its actions, then the report's start if both do not fit.
+    node.querySelector(":scope > .actions")?.scrollIntoView({ block: "nearest" });
+    (node.querySelector(":scope > .report > .body") || node.querySelector(":scope > .report"))?.scrollIntoView({ block: "nearest" });
   }
   function showActions() {
     delete actions.dataset.editing;
@@ -911,7 +913,7 @@ function taskBody(task, phase = {}) {
   const found = artifacts(task, worker);
   if (!text && !found) return null;
   const wrapper = el("div", { class: "task-body" });
-  if (text) foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5 });
+  if (text) foldable(wrapper, el("div", { class: "body markdown", html: markdown(text) }), text, { chars: 360, lines: 5, label: "Update" });
   const earlier = earlierFold(task, progressNow(task).earlier, "updates");
   if (earlier) wrapper.append(earlier);
   if (found) wrapper.append(found);
@@ -1375,7 +1377,7 @@ export function followedOnce(keys) {
 function newsBlock(task) {
   if (!task.news || !["review", "done"].includes(task.status)) return null;
   const wrapper = el("div", { class: "news" }, el("div", { class: "news-head" }, el("span", { class: "chip progress", text: "Update" }), el("span", { class: "when", text: since(task.news.at) })));
-  foldable(wrapper, el("div", { class: "body markdown", html: markdown(task.news.text) }), task.news.text, { chars: 360, lines: 4 });
+  foldable(wrapper, el("div", { class: "body markdown", html: markdown(task.news.text) }), task.news.text, { chars: 360, lines: 4, label: "Update" });
   return wrapper;
 }
 // Someone else's PR it reviewed: whether that review was sent, or waits on its card (rejected
@@ -1497,7 +1499,10 @@ function report(task) {
     : null;
   // A report only (no code, no PR, nothing failing): read, it is accepted for the owner (E123).
   const settles = task.report_only ? el("div", { class: "settles", text: "A report with no code or PR: accepted for you a few minutes after you've read it." }) : null;
-  return el("div", { class: "report" }, text ? el("div", { class: "body markdown", html: markdown(text) }) : null, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, settles, earlierFold(task, keptWords(task.progress_updates), "updates"), earlierBlock(task));
+  // A long one reads in a box of its own, Accept under it (as long text folds elsewhere).
+  const body = text ? el("div", { class: "body markdown", html: markdown(text) }) : null;
+  if (body && (text.length > 700 || text.split("\n").length > 10)) boxed(body, "Report");
+  return el("div", { class: "report" }, body, criteria, more.length ? el("div", { class: "receipts" }, ...more) : null, settles, earlierFold(task, keptWords(task.progress_updates), "updates"), earlierBlock(task));
 }
 // Words of its worker's kept with a task (`progress_updates`, `earlier_results`): newest first,
 // each with when it was said.
@@ -1531,7 +1536,7 @@ function earlierFold(task, list, kind) {
     el("summary", { text: `${label} (${list.length})`, "data-tip": tip }),
     ...list.map((item) => {
       const entry = el("div", { class: "earlier-report" }, item.at ? el("div", { class: "when", text: `Reported ${since(item.at)}`, "data-tip": new Date(item.at).toLocaleString() }) : "");
-      foldable(entry, el("div", { class: "body markdown", html: markdown(item.text) }), item.text, { chars: 360, lines: 5 });
+      foldable(entry, el("div", { class: "body markdown", html: markdown(item.text) }), item.text, { chars: 360, lines: 5, label: kind === "updates" ? "Earlier update" : "Earlier report" });
       return entry;
     }),
   );

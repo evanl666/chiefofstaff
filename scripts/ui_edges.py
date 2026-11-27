@@ -6360,7 +6360,7 @@ async def main():
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
-                          round_share_from_report):  # fmt: skip
+                          round_share_from_report, round_long_report):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -13079,6 +13079,162 @@ async def round_ci_not_run(runtime, browser, failures: list[str]):
     runtime.tasks.move(task["id"], "cancelled")
     await settle(runtime)
     log("CI didn't run: one calm line on its card, said once, nothing more to act on")
+
+
+def long_report_text() -> str:
+    """A done report as long as the owner's (16k characters of markdown: headings, numbered
+    lists, tables, a code block), its last line known."""
+    opening = "The plan, its people and its dates, part by part. " * 8
+    parts = [f"# Launch plan for the support agents\n\n{opening}\n"]
+    step = "Write the guide for `agent_{}_{}`, open its repository, announce it and answer issues."
+    part = 0
+    while sum(map(len, parts)) < 15600:
+        part += 1
+        parts.append(f"\n## Part {part}: step {part} of the launch\n\n")
+        parts.extend(f"{item}. {step.format(part, item)}\n" for item in range(1, 7))
+        if part % 3 == 1:
+            parts.append("\n| Channel | Owner | Date |\n|---|---|---|\n")
+            parts.extend(f"| channel-{part}-{row} | person {row} | 2026-12-{row:02d} |\n"
+                         for row in range(1, 9))  # fmt: skip
+        if part == 2:
+            lines = "".join(f"gh repo create example/agent-{k} --public\n" for k in range(6))
+            parts.append(f"\n```bash\n{lines}```\n")
+    return "".join(parts) + "\nEnd of the launch plan.\n"
+
+
+async def in_sight(page, locator) -> bool:
+    """Shown in the window and the first thing under its middle (nothing over it, not cut off by
+    a box it is in): what a click there reaches."""
+    return await locator.evaluate(
+        """(node) => {
+          const box = node.getBoundingClientRect();
+          const x = box.left + box.width / 2, y = box.top + Math.min(box.height / 2, 8);
+          if (box.height === 0 || y < 0 || y > innerHeight || x < 0 || x > innerWidth) return false;
+          const top = document.elementFromPoint(x, y);
+          return Boolean(top) && (top === node || node.contains(top));
+        }"""
+    )
+
+
+async def round_long_report(runtime, browser, failures: list[str]):
+    """Owner report 0.1.60 ("can't scroll down the card"): a done report of 16k characters,
+    opened on its card under Needs you, made the card twelve screens tall: Accept and the rest
+    of the report out of reach far down the column. Open, a long report reads in a box of its
+    own as tall as most of the window, its end reached with the wheel or the keyboard, Accept in
+    sight right under it, and the column still scrolls past it to Artifacts. A long update
+    opened with Show more reads the same way. Light and dark, 1440 and 800 px."""
+    store = runtime.store
+    router = store.get("router_id")
+    made = await call_tool(runtime, "spawn_worker", router, title="Plan the agents launch",
+                           instructions="Plan the agents launch", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    text = long_report_text()
+    assert len(text) > 15800, len(text)
+    runtime.tasks.move(task["id"], "review", result=text)
+    runtime.update_session(worker, status="idle", activity="")
+    # Failed, with a long update: shown whole, Show more opens it.
+    made = await call_tool(runtime, "spawn_worker", router, title="Survey the agent guides",
+                           instructions="Survey the agent guides", why_new="test")  # fmt: skip
+    surveyor = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    survey = runtime.tasks.current(surveyor)
+    found = "".join(f"- Guide {n}: read, notes kept, two gaps found.\n" for n in range(1, 70))
+    update = f"Surveyed so far:\n\n{found}\nLast guide surveyed."
+    runtime.tasks.move(survey["id"], "failed")
+    runtime.task_actions.publish(runtime.tasks.update(survey["id"], progress=update))
+    runtime.update_session(surveyor, status="idle", activity="")
+    await settle(runtime)
+    runtime.publish_state()
+    shots = Path(os.environ.get("LONG_REPORT_SHOTS", SHOTS / "long-report"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for width, scheme in itertools.product((1440, 800), ("light", "dark")):
+        context = await browser.new_context(
+            viewport={"width": width, "height": 900}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        if width < 1100:
+            await page.locator("#home-tabs [data-tab=needs]").click()
+        card = page.locator("#needs .card.task", has_text="Plan the agents launch")
+        await expect(card).to_have_count(1, timeout=15000)
+        await card.get_by_role("button", name="View report").click()
+        report = card.locator(":scope > .report > .body")
+        await expect(report).to_contain_text("End of the launch plan.")
+        accept = card.get_by_role("button", name="Accept")
+        await page.wait_for_timeout(300)
+        # Opened: the report from its start, and Accept under it, in sight at once.
+        assert await in_sight(page, report.locator("h4").first), f"{width} {scheme}: its start"
+        assert await in_sight(page, accept), f"{width} {scheme}: Accept out of reach"
+        await card.screenshot(path=shots / f"open-{width}-{scheme}.png")
+        # Its end with the wheel over it; Accept still in sight.
+        end = report.get_by_text("End of the launch plan.")
+        box = await report.bounding_box()
+        await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + min(box["height"] / 2, 200))
+        for _ in range(60):
+            if await in_sight(page, end):
+                break
+            await page.mouse.wheel(0, 500)
+            await page.wait_for_timeout(40)
+        assert await in_sight(page, end), f"{width} {scheme}: its end out of reach"
+        assert await in_sight(page, accept), f"{width} {scheme}: Accept after reading"
+        await card.screenshot(path=shots / f"end-{width}-{scheme}.png")
+        # With the keyboard: Home, then End.
+        await report.focus()
+        await page.keyboard.press("Home")
+        await page.wait_for_timeout(200)
+        assert not await in_sight(page, end), f"{width} {scheme}: Home"
+        await page.keyboard.press("End")
+        await page.wait_for_timeout(200)
+        assert await in_sight(page, end), f"{width} {scheme}: End"
+        # The column goes on past it to its end (Artifacts, on a wide window), with the wheel.
+        end_of = "(node) => node.scrollTop + node.clientHeight >= node.scrollHeight - 2"
+        head = await card.locator(":scope > .head").bounding_box()
+        await page.mouse.move(head["x"] + 20, max(head["y"] + 10, 80))
+        for _ in range(30):
+            if await page.locator("#panel").evaluate(end_of):
+                break
+            await page.mouse.wheel(0, 500)
+            await page.wait_for_timeout(40)
+        assert await page.locator("#panel").evaluate(end_of), f"{width} {scheme}: the column"
+        if width >= 1100:
+            assert await in_sight(page, page.locator("#tasks-artifacts > summary")), "Artifacts"
+        # A long update the same: Show more, its end, Show less.
+        failed = page.locator("#needs .card.task", has_text="Survey the agent guides")
+        await failed.locator(":scope > .head .title").click()
+        await failed.get_by_role("button", name="Show more").click()
+        body = failed.locator(".task-body > .body")
+        last = body.get_by_text("Last guide surveyed.")
+        await body.focus()
+        await page.keyboard.press("End")
+        await page.wait_for_timeout(200)
+        assert await in_sight(page, last), f"{width} {scheme}: the update's end"
+        await failed.screenshot(path=shots / f"update-{width}-{scheme}.png")
+        # Show less right under it: reached, nothing over it, and it folds the update again.
+        less = failed.get_by_role("button", name="Show less")
+        await less.scroll_into_view_if_needed()
+        assert await in_sight(page, less), f"{width} {scheme}: Show less"
+        await less.click()
+        await expect(body).to_have_class(re.compile(r"\bfolded\b"))
+        assert not errors, errors
+        await context.close()
+    # Accepted from there.
+    context = await browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    await page.goto(f"{BASE}/#token={TOKEN}")
+    card = page.locator("#needs .card.task", has_text="Plan the agents launch")
+    await card.get_by_role("button", name="View report").click()
+    await card.get_by_role("button", name="Accept").click()
+    await expect(card).to_have_count(0, timeout=5000)
+    assert runtime.tasks.get(task["id"])["status"] == "done"
+    await context.close()
+    runtime.tasks.move(survey["id"], "cancelled")
+    await settle(runtime)
+    log("A long report: read in its own box, its end and Accept in reach, the column goes on")
 
 
 async def round_stacked_merge(runtime, browser, failures: list[str]):

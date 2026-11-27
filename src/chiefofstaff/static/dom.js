@@ -297,17 +297,31 @@ export function watchPanel(panel) {
     for (const record of records) for (const node of record.addedNodes) if (node.nodeType === 1) ownTips(node);
   }).observe(panel, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "open", "style"] });
 }
-// Long text shows its start, with Show more. `wrapper` gets the content and the toggle.
-export function foldable(wrapper, content, text, { chars = 700, lines = 10 } = {}) {
+// Long text shows its start, with Show more. `wrapper` gets the content and the toggle. With a
+// `label` (on a card), open, it reads in a box of its own (`boxed`).
+export function foldable(wrapper, content, text, { chars = 700, lines = 10, label = "" } = {}) {
   wrapper.append(content);
   if (text.length <= chars && text.split("\n").length <= lines) return;
   content.classList.add("folded");
+  if (label) boxed(content, label, false);
   const toggle = el("button", { type: "button", class: "more", text: "Show more" });
   toggle.addEventListener("click", () => {
     const folded = content.classList.toggle("folded");
     toggle.textContent = folded ? "Show more" : "Show less";
+    if (label) content.tabIndex = folded ? -1 : 0;
   });
   wrapper.append(toggle);
+}
+// A long text on a card, read in a box of its own that scrolls (with the keyboard too, once
+// focused) rather than as tall as it is: the card's actions stay in reach under it, and the
+// column goes on past it (owner report 0.1.60: a 16k-character report put Accept twelve
+// screens down).
+export function boxed(node, label, open = true) {
+  node.classList.add("boxed");
+  node.setAttribute("role", "region");
+  node.setAttribute("aria-label", label);
+  node.tabIndex = open ? 0 : -1;
+  return node;
 }
 // Keeps nodes whose key did not change; `refresh` updates their content when only their
 // `version` did, so a button under the mouse is never swapped out mid-click. A card whose key

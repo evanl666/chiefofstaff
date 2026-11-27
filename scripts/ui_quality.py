@@ -108,7 +108,8 @@ CHECKS = r"""
     const box = card.getBoundingClientRect();
     for (const child of card.querySelectorAll("*")) {
       if (!shown(child) || child.closest(".menu") !== card.closest(".menu")) continue;
-      if (getComputedStyle(child).position === "absolute" || child.closest(".folded, .clamp, .markdown table, pre")) continue;
+      // Cut off by a box it scrolls in (a long report open on its card) is not sticking out.
+      if (getComputedStyle(child).position === "absolute" || child.closest(".folded, .clamp, .markdown table, pre") || child.parentElement.closest(".boxed")) continue;
       if (!inside(box, child.getBoundingClientRect())) problems.push(`${name(child)} sticks out of ${name(card)}`);
     }
     for (const row of [card, ...card.querySelectorAll(".head, .actions, .receipts, .choices, .options, summary, .learn-row, .row")]) {
@@ -1071,6 +1072,57 @@ async def needs_dots_views(runtime, browser, quality: Quality):
         quality.failures += [f"page error {scheme}: {error}" for error in errors]
         await context.close()
     needs_dots_done(runtime, seeded)
+
+
+async def long_report_views(runtime, browser, quality: Quality):
+    """Owner report 0.1.60: a 16k-character report open on its card under Needs you reads in a
+    box of its own, Accept in sight under it; 800 to 1440 px, light and dark, at its start and
+    its end (browser-shots/long-report/)."""
+    from ui_edges import long_report_text
+
+    folder = SHOTS / "long-report"
+    folder.mkdir(exist_ok=True)
+    router = runtime.store.get("router_id")
+    made = await call_tool(runtime, "spawn_worker", router, title="Plan the agents launch",
+                           instructions="Plan the agents launch", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    task = runtime.tasks.current(worker)
+    runtime.tasks.move(task["id"], "review", result=long_report_text())
+    runtime.update_session(worker, status="idle", activity="")
+    await settle(runtime)
+    runtime.publish_state()
+    own = f'#needs .card.task[data-task="{task["id"]}"]'
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1440, "height": 900}, color_scheme=scheme, bypass_csp=True
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))  # noqa: B023
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        card = page.locator(own)
+        await expect(card).to_have_count(1, timeout=15000)
+        for width in WIDTHS:
+            await page.set_viewport_size({"width": width, "height": 900})
+            if width < 1100:
+                await page.locator("#home-tabs [data-tab=needs]").click()
+            if "expanded" not in (await card.get_attribute("class") or "").split():
+                await card.get_by_role("button", name="View report").click()
+            report = card.locator(":scope > .report > .body")
+            await report.evaluate("(node) => { node.scrollTop = 0; }")
+            await card.get_by_role("button", name="Accept").scroll_into_view_if_needed()
+            await page.wait_for_timeout(150)
+            await page.screenshot(path=folder / f"quality-{width}-{scheme}-start.png")
+            await quality.check(page, f"long report {width} {scheme}", "#needs", KNOWN_ROW_FINDINGS)
+            await report.evaluate("(node) => { node.scrollTop = node.scrollHeight; }")
+            await page.wait_for_timeout(150)
+            await card.screenshot(path=folder / f"quality-{width}-{scheme}-end.png")
+        await quality.contrast(page, f"long report {scheme}", "#needs")
+        quality.failures += [f"page error {scheme}: {error}" for error in errors]
+        await context.close()
+    runtime.tasks.move(task["id"], "cancelled")
+    await settle(runtime)
 
 
 async def teams_views(runtime, browser, quality: Quality):
@@ -2238,11 +2290,13 @@ async def main():
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
             # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views; `=teams`: only Teams';
-            # `=share`: only share links'.
+            # `=share`: only share links'; `=long-report`: only a long report's card.
             only = os.environ.get("UI_QUALITY_ONLY", "")
             if only == "teams":
                 await teams_views(runtime, browser, quality)
                 await relations_views(runtime, browser, quality)
+            elif only == "long-report":
+                await long_report_views(runtime, browser, quality)
             elif only == "share":
                 await share_views(runtime, browser, quality)
                 await secret_views(runtime, browser, quality)
@@ -2276,7 +2330,9 @@ async def main():
                 log("Needs you's dots, read or not, and a new result's word (needs-dots/)")
                 await fork_views(runtime, browser, quality)
                 log("a busy worker's second worker (fork/)")
-            if only not in {"teams", "share"}:
+                await long_report_views(runtime, browser, quality)
+                log("a 16k-character report open on its card (long-report/)")
+            if only not in {"teams", "share", "long-report"}:
                 await shepherd_views(runtime, browser, quality)
             if not only:
                 await share_views(runtime, browser, quality)

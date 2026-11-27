@@ -4,14 +4,22 @@
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
 choice is asked of you once, and your answer reaches every worker that asked it; a team's page is
-where you run your request; a finished report can be shared from its chat; and Home answers at
-once.
+where you run your request; a finished report can be shared from its chat, and a long one read
+to its end on its card; and Home answers at once.
 
 - **Share a report from its chat.** A finished report in its worker's chat, and its line on Home
   (beside *View*), has a quiet *Share…*: the same dialog as its card's *Share…*, for that report's
   task, with the same preview, private-data check, expiry, link and *Revoke*. From an earlier
   report whose card has a newer result since, the dialog says it shares the card as it is now: its
   latest result, with the checks and criteria that go with it. A report of no task has none.
+- **A long report open on its card can be read to its end, and accepted.** On Home, a done
+  report of 16,000 characters opened with View report made its card about twelve screens tall:
+  the rest of the report and the card's Accept were far down the right column, past the parts
+  below it, and could seem out of reach. A long report (or an update opened with Show more) now
+  reads in a box of its own, at most half the window tall, that scrolls with the wheel, the
+  trackpad or the keyboard (Home, End, Page Down once it has focus); its edges shade while there
+  is more above or below, and its code wraps in it. The card's actions stay right under it, and
+  the column goes on past it to the parts below. Light and dark, wide and narrow windows.
 
 Every session runs on the agent you choose, and Chief of Staff runs without Copilot.
 

@@ -492,6 +492,27 @@ summary { min-height: 28px; }
 .card .head .share-from { flex: none; font-size: var(--small); border-radius: 6px; }
 .card:hover .head .share-from, .card .head .share-from:focus-visible { color: var(--accent); }
 .card .head .share-from:not(:disabled):hover { background: var(--hover); color: var(--accent); }
+/* A long text open on a card (a report, an update after Show more) reads in a box of its own,
+   half the window tall at most, so the card's actions stay in reach under it and the column
+   goes on past it. Its edges shade while there is more above or below; at its end, they don't. */
+.card .body.boxed:not(.folded) {
+  --shade: color-mix(in srgb, var(--text) 16%, transparent);
+  max-height: max(240px, 50vh);
+  overflow-y: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background:
+    linear-gradient(var(--bg) 30%, transparent) top / 100% 24px no-repeat local,
+    linear-gradient(transparent, var(--bg) 70%) bottom / 100% 24px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--shade), transparent) top / 100% 10px no-repeat,
+    radial-gradient(farthest-side at 50% 100%, var(--shade), transparent) bottom / 100% 10px no-repeat,
+    var(--bg);
+}
+/* Code wraps in it: no box that scrolls sideways inside one that scrolls down. */
+.card .body.boxed pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.card .body.boxed:not(.folded) > :first-child { margin-top: 0; }
+.card .body.boxed:not(.folded) > :last-child { margin-bottom: 0; }
 /* Status is said by a chip, not by colored edges; what needs the owner is tinted. */
 .card.attention { background: var(--amber-soft); border-color: transparent; }
 
