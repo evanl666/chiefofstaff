@@ -426,7 +426,11 @@ class Decisions:
             )
             self.bus.publish("draft", card)
             self.runtime.alert(
-                question, session_id=caller, needs_action=True, title=f"Decision · {row['title']}"
+                question,
+                session_id=caller,
+                needs_action=True,
+                title=f"Decision · {row['title']}",
+                draft_id=card["id"],
             )
         if task and task["status"] in OPEN:
             self.tasks.move(task["id"], "waiting", progress=f"Needs your decision: {question}")

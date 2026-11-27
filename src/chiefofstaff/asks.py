@@ -738,7 +738,11 @@ class Asks:
         self.bus.publish("draft", draft)
         who = "Chief of Staff" if row["role"] != "worker" else self.runtime.display_title(row)
         self.runtime.alert(
-            text, session_id=session_id, needs_action=True, title=f"{LABELS[kind]} · {who}"
+            text,
+            session_id=session_id,
+            needs_action=True,
+            title=f"{LABELS[kind]} · {who}",
+            draft_id=draft["id"],
         )
         answer = asyncio.get_running_loop().create_future()
         self.requests[draft["id"]] = answer
@@ -784,7 +788,11 @@ class Asks:
         )
         self.bus.publish("draft", draft)
         self.runtime.alert(
-            text, session_id=session_id, needs_action=True, title=title or LABELS[kind]
+            text,
+            session_id=session_id,
+            needs_action=True,
+            title=title or LABELS[kind],
+            draft_id=draft["id"],
         )
         answer = asyncio.get_running_loop().create_future()
         self.requests[draft["id"]] = answer
