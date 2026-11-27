@@ -3213,10 +3213,6 @@ class Tools:
             "something: task='note'."
         )
 
-    def accepter(self, task: dict) -> str:
-        """Who accepted a done task, in the Router's words."""
-        return "Autopilot" if self.runtime.autopilot.accepted_entry(task) else "the owner"
-
     @staticmethod
     def not_in_parallel(target: dict, why: str) -> str:
         said = (

@@ -184,8 +184,10 @@ async def test_what_autopilot_accepted_says_so_wherever_it_is_said(tmp_path, git
     assert "was accepted by Autopilot and is done" in said.text_result_for_llm
     assert "by the owner" not in said.text_result_for_llm
     assert "accepted by Autopilot" in prompts.AUTOPILOT_RULE
+    assert harness.store.get(f"acceptedby:{info['task_id']}") == "autopilot", "E141's key"
     # Undone, then the owner's own Accept: said as theirs.
     runtime.autopilot.undo(accepted["id"])
+    assert harness.store.get(f"acceptedby:{info['task_id']}") is None
     runtime.task_actions.accept(info["task_id"])
     task = runtime.tasks.get(info["task_id"])
     assert "accepted_by" not in runtime.task_actions.view(task)

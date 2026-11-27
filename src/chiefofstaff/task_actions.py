@@ -4200,11 +4200,15 @@ class TaskActions:
 
     def finished_words(self, task: dict) -> str:
         """How a cancelled or done task ended, as the Router is told ("its task t1 “X” …"):
-        accepted by the owner only when they did (E141: said of tasks nobody reviewed)."""
+        accepted by the owner only when they did (E141: said of tasks nobody reviewed), by
+        Autopilot when it did (its own offline run of the checks: autopilot/results.py)."""
         if task["status"] == "cancelled":
             return "was cancelled"
-        if self.store.get(f"acceptedby:{task['id']}") == "owner":
+        accepted = self.store.get(f"acceptedby:{task['id']}")
+        if accepted == "owner":
             return "was accepted by the owner and is done"
+        if accepted == "autopilot":
+            return "was accepted by Autopilot and is done"
         return "is done"
 
     def finished_at(self, task: dict) -> str:

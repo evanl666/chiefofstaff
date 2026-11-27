@@ -122,6 +122,8 @@ class Results:
                 return False
             self.store.delete(f"news:{task['id']}")
             self.store.delete(f"setaside:{task['id']}")
+            # Who accepted it, as the Router is told (TaskActions.finished_words): never the owner.
+            self.store.set(f"acceptedby:{task['id']}", "autopilot")
             tasks.move(task["id"], "done")
             entry = self.book.append(
                 run.get("id", ""), "accepted",
@@ -199,6 +201,7 @@ class Results:
             tasks.move(task["id"], "review")
             self.store.set(f"autopilot:tried:{task['id']}", self.result_version(task))
             self.store.delete(f"autopilot:accepted:{task['id']}")
+            self.store.delete(f"acceptedby:{task['id']}")
             self.book.append(
                 entry["run_id"], UNDONE, f"Undone: “{task['title']}” waits for your Accept",
                 state=UNDONE, of=entry_id, subject=entry["subject"], task_id=task["id"],
