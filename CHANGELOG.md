@@ -2,14 +2,84 @@
 
 ## Unreleased
 
-A team's page is where you run your request, a finished report can be shared from its chat,
-and Home answers at once.
+Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
+choice is asked of you once, and your answer reaches every worker that asked it; a team's page is
+where you run your request; a finished report can be shared from its chat; and Home answers at
+once.
 
 - **Share a report from its chat.** A finished report in its worker's chat, and its line on Home
   (beside *View*), has a quiet *Share…*: the same dialog as its card's *Share…*, for that report's
   task, with the same preview, private-data check, expiry, link and *Revoke*. From an earlier
   report whose card has a newer result since, the dialog says it shares the card as it is now: its
   latest result, with the checks and criteria that go with it. A report of no task has none.
+
+Every session runs on the agent you choose, and Chief of Staff runs without Copilot.
+
+- **Every one of Chief of Staff's own sessions runs on the agent you choose.** Settings → *Agents &
+  models* starts with *Who does the work*: a row each for *New workers*, the *Router*, the
+  *Watchdog*, *Slack*, *Watch for you* and the *Helpers* (learning how you work, checks, your
+  profile, messages when you're away), with the agent it runs on, and its model and effort there.
+  Codex and Claude Code can run every one of them, the Slack session and *Watch for you* too, and
+  workers that read Slack (on Claude in its sandbox; on Codex asking first: see SECURITY.md).
+  Each row's model is its own on each agent, kept as you switch; the *Default* model and the
+  folded *Chief of Staff's own sessions* are gone, and what took the Default model has it as its
+  own, so nothing changes until you change it. A choice an earlier version held back (*Watch for
+  you* on Claude) runs as you chose; Home says so once.
+- **When an agent can't run one, the next one does.** A session whose agent can't run it
+  (signed out, not installed, its limit, a turn that lost its sign-in) goes on with the next agent
+  on that can, in the order Copilot, Codex, Claude Code, says so in one line, with that agent's
+  model and whose plan it uses, and goes back by itself; *Wait, and ask me* holds it with one card
+  instead. Each agent that failed one is tried again after a growing wait, also across a restart;
+  with none that can, it waits, and goes on by itself once one can. New workers do the same.
+- **Chief of Staff runs without Copilot.** With only Codex or only Claude Code, it runs everything
+  there: a first start picks the agent that is installed and signed in, and says so (with only
+  Claude Code, on an install without the Claude extra, it sets Claude up first, saying *Setting up
+  Claude Code* on Home, and starts on it once done). Copilot's row has *Use* like the others (the
+  last agent on stays on); signed out, not installed, or stopped answering with a new one unable to
+  run, the next agent runs its work meanwhile, and Copilot is tried again by itself. With no agent
+  ready, Home's *Set up a coding agent* card says what each needs, and Chief of Staff starts by
+  itself once one is, also when the only agent signs out and in again. On Windows, it runs on
+  Copilot for now.
+- **Every worker says its agent**, Copilot's too: a mark on its row and a chip on its line in
+  your chat, also once it is closed.
+- **No agent is ever given your Slack token.** Slack's read tools are Chief of Staff's own on
+  every agent, Copilot included: it calls Slack with the token it holds.
+
+Every ask of you is filed under the choice it is about, and decided once.
+
+- **One choice is asked once, and one answer reaches everyone who asked it.** Workers asked you
+  the same choice on different channels: one on a decision card, another as a question, a third
+  on a question card, and the Router in a note of its own; you answered each separately, and
+  your last answer was not the one kept (the decision in force still said k 1.1 after you
+  picked 1.12 on a question). Every ask is now filed under the choice it is about, whatever it
+  came by, and Chief of Staff (not the asking worker) tells which asks are the same. Within one
+  of your requests they are one card under *Needs you*: *Asked by 2 workers + the Router: one
+  answer reaches them all*, what each asked folded in it, counted once. Across requests the card
+  says *Possibly the same as “…”*, and **Merge** makes them one. Any answer (a pick on any card,
+  your reply in a worker's chat, the Router passing yours on) answers every ask of that choice
+  where it was asked, each worker once, and a pick is kept as your decision on it, replacing
+  the one before; a card of a choice you decided before says *Decided before: you picked “1.11”
+  at 10:01*. The Router's own note on a choice a worker asked already joins that ask instead of
+  being a second item, and one on a choice you decided is not shown again. A decision the Router
+  records on a choice you decided replaces the one in force (its tasks' workers told once each),
+  never a second value beside it; the same value in other words is kept quietly (nobody is told
+  to redo anything, nothing reopens); one only possibly the same stays, and the Router hears
+  which it may change.
+- **Another question on a decided task is asked.** On a task linked to any decision (one you
+  gave the Router with the request that made the task, say), an unrelated question came back
+  *already decided*, and its worker had to insist. Now only the same choice (in other words, or
+  among the same options, too) gets your decision back.
+- **An ask at the end of a finished task is not lost.** A worker that reported its task done
+  while still waiting on you ("I'm blocked: I asked you for three things") took its blocked
+  question off *Needs you*; one ending "Want me to open a PR for it?" lost the ask once you
+  accepted the result. Such a report is held once, with how to ask; sent again, the open ask
+  stays, and one at its end is kept as its question under *Needs you*.
+- **Workers keep up with your decisions.** A worker whose open tasks rely on a decision it was
+  not told reads *Decisions in force for your tasks* with its next message, once (nothing is
+  added when there is none).
+
+A team's page is where you run your request.
+
 - **A team's page is where you run it.** It had the request, the one thing that needs you, a flow
   map and what the parts handed each other: a pile to read, with nothing to do there. *The brief*
   now says where your request stands and the one thing that moves it, done right there: a part's
@@ -71,65 +141,6 @@ waits for its worker, and the page's state is read several times faster.
 - **A burst of events reads the state once.** The page read the whole state 150 ms after each
   event that asked for it, however many came, several at a time; now once shortly after the
   first, at most once a second while more come, one at a time.
-- **Every one of Chief of Staff's own sessions runs on the agent you choose.** Settings → *Agents &
-  models* starts with *Who does the work*: a row each for *New workers*, the *Router*, the
-  *Watchdog*, *Slack*, *Watch for you* and the *Helpers* (learning how you work, checks, your
-  profile, messages when you're away), with the agent it runs on, and its model and effort there.
-  Codex and Claude Code can run every one of them, the Slack session and *Watch for you* too, and
-  workers that read Slack (on Claude in its sandbox; on Codex asking first: see SECURITY.md).
-  Each row's model is its own on each agent, kept as you switch; the *Default* model and the
-  folded *Chief of Staff's own sessions* are gone, and what took the Default model has it as its
-  own, so nothing changes until you change it. A choice an earlier version held back (*Watch for
-  you* on Claude) runs as you chose; Home says so once.
-- **When an agent can't run one, the next one does.** A session whose agent can't run it
-  (signed out, not installed, its limit, a turn that lost its sign-in) goes on with the next agent
-  on that can, in the order Copilot, Codex, Claude Code, says so in one line, with that agent's
-  model and whose plan it uses, and goes back by itself; *Wait, and ask me* holds it with one card
-  instead. Each agent that failed one is tried again after a growing wait, also across a restart;
-  with none that can, it waits, and goes on by itself once one can. New workers do the same.
-- **Chief of Staff runs without Copilot.** With only Codex or only Claude Code, it runs everything
-  there: a first start picks the agent that is installed and signed in, and says so (with only
-  Claude Code, on an install without the Claude extra, it sets Claude up first, saying *Setting up
-  Claude Code* on Home, and starts on it once done). Copilot's row has *Use* like the others (the
-  last agent on stays on); signed out, not installed, or stopped answering with a new one unable to
-  run, the next agent runs its work meanwhile, and Copilot is tried again by itself. With no agent
-  ready, Home's *Set up a coding agent* card says what each needs, and Chief of Staff starts by
-  itself once one is, also when the only agent signs out and in again. On Windows, it runs on
-  Copilot for now.
-- **Every worker says its agent**, Copilot's too: a mark on its row and a chip on its line in
-  your chat, also once it is closed.
-- **No agent is ever given your Slack token.** Slack's read tools are Chief of Staff's own on
-  every agent, Copilot included: it calls Slack with the token it holds.
-- **One choice is asked once, and one answer reaches everyone who asked it.** Workers asked you
-  the same choice on different channels: one on a decision card, another as a question, a third
-  on a question card, and the Router in a note of its own; you answered each separately, and
-  your last answer was not the one kept (the decision in force still said k 1.1 after you
-  picked 1.12 on a question). Every ask is now filed under the choice it is about, whatever it
-  came by, and Chief of Staff (not the asking worker) tells which asks are the same. Within one
-  of your requests they are one card under *Needs you*: *Asked by 2 workers + the Router: one
-  answer reaches them all*, what each asked folded in it, counted once. Across requests the card
-  says *Possibly the same as “…”*, and **Merge** makes them one. Any answer (a pick on any card,
-  your reply in a worker's chat, the Router passing yours on) answers every ask of that choice
-  where it was asked, each worker once, and a pick is kept as your decision on it, replacing
-  the one before; a card of a choice you decided before says *Decided before: you picked “1.11”
-  at 10:01*. The Router's own note on a choice a worker asked already joins that ask instead of
-  being a second item, and one on a choice you decided is not shown again. A decision the Router
-  records on a choice you decided replaces the one in force (its tasks' workers told once each),
-  never a second value beside it; the same value in other words is kept quietly (nobody is told
-  to redo anything, nothing reopens); one only possibly the same stays, and the Router hears
-  which it may change.
-- **Another question on a decided task is asked.** On a task linked to any decision (one you
-  gave the Router with the request that made the task, say), an unrelated question came back
-  *already decided*, and its worker had to insist. Now only the same choice (in other words, or
-  among the same options, too) gets your decision back.
-- **An ask at the end of a finished task is not lost.** A worker that reported its task done
-  while still waiting on you ("I'm blocked: I asked you for three things") took its blocked
-  question off *Needs you*; one ending "Want me to open a PR for it?" lost the ask once you
-  accepted the result. Such a report is held once, with how to ask; sent again, the open ask
-  stays, and one at its end is kept as its question under *Needs you*.
-- **Workers keep up with your decisions.** A worker whose open tasks rely on a decision it was
-  not told reads *Decisions in force for your tasks* with its next message, once (nothing is
-  added when there is none).
 
 ## 0.1.59 (2026-11-26)
 
