@@ -353,9 +353,8 @@ export async function refreshUsageLink() {
     const sum = others.reduce((all, part) => all + part.tokens, 0);
     const copilot = agentsOn().includes("copilot") || usage.total.calls > 0;
     const shown = [copilot ? `${usage.total.credits.toFixed(1)} credits` : "", sum || !copilot ? `${tokens(sum)} tokens` : ""].filter(Boolean);
-    const said = [copilot ? `${usage.total.credits.toFixed(1)} Copilot credits` : "", ...others.map((part) => `${tokens(part.tokens)} tokens on ${part.name}`)].filter(Boolean);
     $("#usage-today").textContent = `${shown.join(" · ")} today`;
-    $("#usage-button").title = `Usage today: ${said.join(", ") || "nothing yet"}`;
+    $("#usage-button").title = `Usage: ${shown.join(" · ")} today`;
   } catch {
     $("#usage-today").textContent = "";
     $("#usage-button").title = "Usage";
