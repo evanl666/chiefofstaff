@@ -391,12 +391,24 @@ async def current_task(run: Run, session_id: str) -> str:
 # Shard B: results.
 
 CALC = "def add(a, b):\n    return a + b\n"
-CALC_TEST = "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+# Its module imported whole: a test added to it changes none of its lines (a changed line of an
+# existing test is the owner's to accept). Run with Python's own unittest (TESTS): nothing to
+# install, so Chief's offline run needs no package manager (uv before 0.9.29 crashes in
+# Copilot's macOS sandbox).
+CALC_TEST = (
+    "import unittest\n\nimport calc\n\n\nclass AddTest(unittest.TestCase):\n"
+    "    def test_add(self):\n        self.assertEqual(calc.add(2, 3), 5)\n"
+)
+TESTS = "python3 -m unittest -v"
 
 
 def calc_project(project: Path):
     write(project / "calc.py", CALC)
+    write(project / "tests" / "__init__.py", "")
     write(project / "tests" / "test_calc.py", CALC_TEST)
+    # As a project's own: what running its tests leaves (a .pyc among tests is a binary file
+    # there, the owner's to accept) is never committed.
+    write(project / ".gitignore", "__pycache__/\n.pytest_cache/\n.venv/\n")
     git(project, "add", ".")
     git(project, "-c", "user.email=p@test", "-c", "user.name=p", "commit", "-qm", "calc")
 
@@ -404,10 +416,11 @@ def calc_project(project: Path):
 async def b1_accepted_its_dependent_starts_undo(run: Run):
     mark = await run.say(
         f"In the project {run.project}, start two tasks. First 'Add subtract': add subtract(a, "
-        "b) to calc.py with a test in tests/test_calc.py, run the tests with `uv run --with "
-        "pytest pytest -q`, and commit on your branch. Then 'Add multiply', depending on 'Add "
-        "subtract' and waiting until it is accepted (wait_for accepted): add multiply(a, b) "
-        "with a test, run the tests, commit."
+        "b) to calc.py with a new unittest TestCase class at the end of tests/test_calc.py "
+        f"(change none of its existing lines), run the tests with `{TESTS}`, and commit on "
+        "your branch. Then 'Add multiply', depending on 'Add subtract' and waiting until it is "
+        "accepted (wait_for accepted): add multiply(a, b) the same way. Each has one acceptance "
+        f"criterion (done_when), nothing else: `{TESTS}` passes."
     )
     router = await run.router()
 
@@ -423,6 +436,12 @@ async def b1_accepted_its_dependent_starts_undo(run: Run):
     run.check("B1 the dependent waits", second["status"] == "queued", second["status"])
     entry = await run.entry_for(first["id"], {"accepted", "not-done"}, 1800)
     run.check("B1 accepted after its own offline run", entry["kind"] == "accepted", entry["text"])
+    if entry["kind"] != "accepted":
+        evidence = (await run.entry(entry["id"]))["evidence"] or {}
+        for step in evidence.get("steps") or []:
+            log(f"its step {step['command']!r}: exit {step['exit']}, sandboxed "
+                f"{step.get('sandboxed')}\n{(step.get('output') or '')[-2000:]}")  # fmt: skip
+        return
     whole = await run.entry(entry["id"])
     evidence = whole["evidence"] or {}
     run.check(
@@ -458,8 +477,8 @@ async def b2_tests_that_need_the_network(run: Run):
     worker = await run.worker(
         "Fixture test",
         "add tests/test_fixture.py whose test downloads https://example.com with urllib and "
-        "asserts the page has 'Example Domain' in it; run the tests with `uv run --with pytest "
-        "pytest -q` (they pass here), and commit on your branch.",
+        "asserts the page has 'Example Domain' in it (a unittest TestCase); run the tests with "
+        f"`{TESTS}` (they pass here), and commit on your branch.",
     )
     entry = await run.entry_for(worker["task_id"], {"accepted", "not-done"}, 1800)
     run.check("B2 not accepted", entry["kind"] == "not-done", entry["text"])
@@ -467,16 +486,16 @@ async def b2_tests_that_need_the_network(run: Run):
     reasons = (state.get("autopilot") or {}).get("set_aside") or {}
     run.check(
         "B2 couldn't verify offline, said so",
-        any(OFFLINE in str(why) for why in reasons.values()) or OFFLINE in entry["text"],
-        str(reasons)[:300],
+        OFFLINE in entry["text"] and OFFLINE in str(reasons.get(worker["task_id"])),
+        f"{entry['text']} · {reasons.get(worker['task_id'])}",
     )
 
 
 async def b3_uncommitted_edits_are_left(run: Run):
     worker = await run.worker(
         "Uncommitted",
-        "add divide(a, b) to calc.py with a test, run the tests with `uv run --with pytest "
-        "pytest -q`, and do NOT commit anything: leave the changes uncommitted.",
+        "add divide(a, b) to calc.py with a test, run the tests with "
+        f"`{TESTS}`, and do NOT commit anything: leave the changes uncommitted.",
     )
     task = await run.finished(worker["task_id"])
     await asyncio.sleep(60)
