@@ -190,6 +190,39 @@ export function setRecipient(worker) {
   showChip();
 }
 
+// Agents named in what the owner typed on Home in one go ("@claude compare…", never picked from
+// the list), in the order typed: "@" starting a word, an agent's name in any case, then a space,
+// punctuation (and a space, or the end), Chinese, or the end. Not an address (me@claude.ai), a
+// longer word (@codexbot, @claude-team), nor an open worker's name that starts like an agent's
+// ("@Codex migration: rerun it", to the worker "Codex migration").
+const TYPED_AGENT = /(^|\s)@(copilot|codex|claude)(?=$|\s|[,.:;!?)]+(?:\s|$)|[\u3000-\u303f\u3400-\u9fff\uff00-\uffef])/giu;
+export function typedAgents(text) {
+  const names = sessions()
+    .filter((session) => session.role === "worker" && !session.helper && !session.closed_at)
+    .flatMap((session) => [workerTitle(session), session.title])
+    .map((name) => (name || "").toLowerCase());
+  const found = [];
+  for (const match of text.matchAll(TYPED_AGENT)) {
+    const name = match[2].toLowerCase();
+    // The word after it, when a space comes first: one that goes on a worker's name.
+    const next = /^\s+([^\s,.:;!?]+)/u.exec(text.slice(match.index + match[0].length))?.[1]?.toLowerCase() || "";
+    const worker = next && names.some((title) => {
+      if (!title.startsWith(`${name} `)) return false;
+      const rest = title.slice(name.length + 1).split(/\s+/)[0];
+      return rest.startsWith(next) || next.startsWith(rest);
+    });
+    if (!worker && !found.includes(name)) found.push(name);
+  }
+  return found;
+}
+// Typed so, as if picked from the list (one: "On Claude"; two or three: Compare).
+export function pickTyped(text) {
+  for (const name of typedAgents(text)) {
+    const chosen = mention.agents.length ? mention.agents : mention.agent ? [mention.agent.name] : [];
+    if (!chosen.includes(name)) setAgent({ agent: name, label: agentName(name) });
+  }
+}
+
 // The agent the owner chose for what this message asks (removable): the Router starts the work
 // on it. A second one picked: the task runs on each (Compare).
 export function setAgent(option) {
