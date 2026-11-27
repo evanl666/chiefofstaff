@@ -20,10 +20,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
+
 from . import agents
 from .bus import Bus
 from .models import Settings
-from .runtime import AgentConnection, Runtime
+from .runtime import AgentConnection, Runtime, described
 from .scripted import (
     AgentLikeBackend,
     CallTool,
@@ -37,6 +39,7 @@ from .scripted import (
     agent_capabilities,
 )
 from .shares import Shares
+from .sources.github import GitHubError, GitHubSource
 from .sources.slack import SlackSource
 from .store import Store
 from .watchdog import WatchConfig
@@ -46,6 +49,8 @@ KICKOFF = (
     "Also ask Claude to compare a few feature-flag services for us."
 )
 MAYA_DM = "D0DEMOMAYA"
+# What the demo's Codex and Claude use, as Settings says it: nothing.
+SCRIPTED = "Scripted for the demo: nothing to sign in to, nothing used"
 # Codex and Claude, scripted as well and ready as if installed and signed in, so the demo has a
 # worker on each of the three agents. As their adapters show them (backend_codex.CODEX,
 # backend_claude.CLAUDE): both steer and give exit codes; Codex chooses its threads' ids.
@@ -603,6 +608,8 @@ class DemoSlackMcp:
         self.ready_at = time.time() + delay
         self.delivered = False
         self.sent: list[dict] = []
+        # Maya's message's ts, as Slack stamps one (seconds and six digits): read back with it.
+        self.stamp = f"{int(self.ready_at)}.000200"
 
     async def list_tools(self):
         def tool(name, read_only=True, description=""):
@@ -636,15 +643,15 @@ class DemoSlackMcp:
                 and time.time() >= self.ready_at
             ):
                 self.delivered = True
-                stamp = f"{int(time.time())}000200"
+                self.stamp = f"{int(time.time())}.000200"
                 return (
                     "Results:\n1. DM from Maya Chen: hey! is the login fix going out today? "
                     "support keeps asking\n"
-                    f"   https://demo.slack.com/archives/{MAYA_DM}/p{stamp}"
+                    f"   https://demo.slack.com/archives/{MAYA_DM}/p{self.stamp.replace('.', '')}"
                 )
             return "No results found."
         return (
-            f"Channel: <#{MAYA_DM}> | From: <@U0MAYA01> (Maya Chen) | ts: 1\n"
+            f"Channel: <#{MAYA_DM}> | From: <@U0MAYA01> (Maya Chen) | ts: {self.stamp}\n"
             "Text: hey! is the login fix going out today? support keeps asking"
         )
 
@@ -660,27 +667,76 @@ class DemoTokens:
         pass
 
 
+# The demo's GitHub account, and what its share dialogs and links say (QA U6).
+DEMO_LOGIN = "you"
+DEMO_ONLY = (
+    "In the demo, only links made in this demo open: nothing leaves this machine, so a link "
+    "from anywhere else isn't fetched."
+)
+
+
 class DemoGitHub:
-    """GitHub as the demo's share links see it: one account signed in; a link is sealed as for
-    real, but its gist is made nowhere (nothing leaves this machine)."""
+    """GitHub as the demo has it, in place of `gh` (GitHubSource's gh_command): one account
+    signed in, no repository private, nobody posted anything, and gists kept here (a share link's
+    card, sealed as for real). What else is asked of it fails, saying so: nothing runs `gh` or
+    leaves this machine (QA U4)."""
 
-    async def signed_in(self, fresh: bool = False) -> list[dict]:
-        return [{"login": "you", "active": True}]
+    def __init__(self):
+        # Its gists: a link's sealed card, by gist id ("" once deleted: the link was revoked).
+        self.gists: dict[str, str] = {}
 
-    async def gh(self, *args: str, **options) -> str:
-        return "false"  # No repository is private.
-
-    async def bound_user(self, login: str) -> tuple[str, int]:
-        return "demo", 1
-
-    async def raw(self, *args: str, payload: dict | None = None, token: str = "") -> str:
-        if payload is not None:
-            return json.dumps({"id": uuid4().hex})  # The gist a link would be kept in.
-        return "[]" if args[:2] == ("api", "gists?per_page=30") else ""
+    async def __call__(self, *arguments: str, payload: dict | None = None, token: str = "") -> str:
+        said = [word for word in arguments if word not in {"--method", "--paginate", "--input"}]
+        if said[:2] == ["auth", "status"]:
+            found = [{"login": DEMO_LOGIN, "active": True, "state": "success"}]
+            return json.dumps({"hosts": {"github.com": found}})
+        if said[:2] == ["auth", "token"]:
+            return "demo"
+        if said[:2] == ["api", "user"]:
+            return json.dumps({"login": DEMO_LOGIN, "id": 1})
+        if said[:3] == ["api", "gists", "POST"] and payload:
+            gist = uuid4().hex
+            self.gists[gist] = payload["files"]["share.txt"]["content"]
+            return json.dumps({"id": gist})
+        if said[:2] == ["api", "DELETE"] and said[2].startswith("gists/"):
+            if (gist := said[2].removeprefix("gists/")) in self.gists:
+                self.gists[gist] = ""
+            return ""
+        if said[:2] == ["api", "gists?per_page=30"]:
+            return "[]"
+        if len(said) > 1 and said[0] == "api" and said[1].startswith("repos/"):
+            # Its repositories are public; nobody posted on its PRs.
+            return "false" if "--jq" in said else "[]"
+        raise GitHubError("The demo has no GitHub of its own: nothing leaves this machine.")
 
 
 class DemoShares(Shares):
-    github = DemoGitHub()  # type: ignore[assignment]
+    """Share links in the demo: sealed as for real, kept in the demo's GitHub, so a link opens
+    here (pasted on Home) until it is revoked or expires; the dialogs say it is the demo's."""
+
+    @property
+    def gists(self) -> dict[str, str]:
+        return self.runtime.github.raw.gists  # type: ignore[attr-defined]
+
+    async def read_gist(self, gist_id: str) -> tuple[int, httpx.Headers, bytes]:
+        if gist_id not in self.gists:
+            raise ValueError(DEMO_ONLY)
+        if not self.gists[gist_id]:
+            return 404, httpx.Headers(), b""
+        gist = {
+            "files": {"share.txt": {"content": self.gists[gist_id], "truncated": False}},
+            "owner": {"login": DEMO_LOGIN, "id": 1},
+        }
+        return 200, httpx.Headers(), json.dumps(gist).encode()
+
+    async def preview(self, task_id: str, message_id: int | None = None) -> dict:
+        return {**await super().preview(task_id, message_id), "demo": True}
+
+    async def create(self, *arguments, **options) -> dict:
+        return {**await super().create(*arguments, **options), "demo": True}
+
+    def shown(self, row: dict) -> dict:
+        return {**super().shown(row), "gist_url": "", "demo": True}
 
 
 class DemoRuntime(Runtime):
@@ -721,6 +777,8 @@ class DemoRuntime(Runtime):
                 brain, others=terminal_sessions(project), home=store.directory / "copilot-home"
             ),
             watch=watch or WatchConfig(interval=3, stall=12, long=600, cooldown=30),
+            # The demo's own GitHub, never the owner's `gh` (QA U4).
+            github=GitHubSource(store, self, gh_command=DemoGitHub()),
         )
         self.slack = SlackSource(store, self, tokens=DemoTokens(), mcp=DemoSlackMcp(slack_delay))
         self.autoplay = autoplay
@@ -746,9 +804,45 @@ class DemoRuntime(Runtime):
         return list(DEMO_AGENTS)
 
     async def glance_agent(self, name: str) -> dict:
-        facts = {"version": "demo", "account": "chatgpt" if name == "codex" else "claudePlan"}
+        facts = {"version": "demo", "account": ""}
         self.seen_ready(name, facts)
         return facts
+
+    def agent_status(self, name: str) -> dict:
+        if name not in DEMO_AGENTS:
+            return super().agent_status(name)
+        on = name in agents.turned_on(self.store)
+        return {"name": name, "label": agents.display(name), "on": on, "status": agents.READY,
+                "said": agents.STATUS_WORDS[agents.READY], "pays": SCRIPTED}  # fmt: skip
+
+    async def looked_at_agent(self, name: str) -> dict:
+        """Settings → Agents & models: the demo's Codex and Claude as they are, scripted and
+        ready, never looked for on this computer (QA U7: "Not installed", or the owner's own
+        run and "Can't run here")."""
+        if name not in DEMO_AGENTS:
+            return await super().looked_at_agent(name)
+        chosen = agents.configured(self.store).get(name, {})
+        models = [described(model) for model in await ScriptedBackend().list_models()]
+        self.agent_models_cache[name] = (time.monotonic(), models)
+        return {
+            "name": name,
+            "label": agents.display(name),
+            "enabled": bool(chosen.get("enabled")),
+            "model": chosen.get("model") or "",
+            "effort": chosen.get("effort") or "",
+            "limit": agents.limit(self.store, name),
+            "found": True,
+            "state": "",
+            "problem": "",
+            "models": models,
+        }
+
+    async def cache_facts_now(self):
+        """Workers' caches need nothing of the owner's tools: the demo's run no commands of
+        theirs (`uv --version`, `go env` are never run)."""
+
+    async def ready_caches(self, row: dict):
+        return
 
     async def start(self):
         await super().start()

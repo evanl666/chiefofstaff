@@ -29,7 +29,6 @@ from .updates import installed
 
 if TYPE_CHECKING:
     from .runtime import Runtime
-    from .sources.github import GitHubSource
 
 logger = logging.getLogger(__name__)
 
@@ -136,12 +135,6 @@ class Shares:
         self.copies_made = False
         # GitHub's API as an import reads it (tests answer from fixtures).
         self.transport: httpx.AsyncBaseTransport | None = None
-
-    @property
-    def github(self) -> GitHubSource:
-        """The owner's GitHub, where links' gists are made and deleted (the demo's own makes
-        none)."""
-        return self.runtime.github
 
     # The table: made with the first link, never at upgrade.
 
@@ -255,7 +248,7 @@ class Shares:
     async def accounts(self) -> list[dict]:
         """The github.com accounts signed in to gh, gh's active one first."""
         try:
-            found = await self.github.signed_in(fresh=True)
+            found = await self.runtime.github.signed_in(fresh=True)
         except Exception:
             return []
         return sorted(found, key=lambda account: not account["active"])
@@ -277,7 +270,7 @@ class Shares:
                 return False
             try:
                 async with asyncio.timeout(5):
-                    said = await self.github.gh("api", f"repos/{repo}", "--jq", ".private")
+                    said = await self.runtime.github.gh("api", f"repos/{repo}", "--jq", ".private")
             except Exception:
                 return False
             return said.strip() == "true"
@@ -322,7 +315,7 @@ class Shares:
             self.table()
             self.limited(chosen)
             try:
-                token, account_id = await self.github.bound_user(chosen)
+                token, account_id = await self.runtime.github.bound_user(chosen)
             except RuntimeError as exc:
                 raise ValueError(f"@{chosen}: {exc}") from exc
             now = self.clock().replace(microsecond=0)
@@ -365,7 +358,7 @@ class Shares:
             }
             try:
                 made = json.loads(
-                    await self.github.raw(
+                    await self.runtime.github.raw(
                         "api",
                         "gists",
                         "--method",
@@ -425,12 +418,14 @@ class Shares:
     async def reconcile(self, share_id: str, token: str) -> bool:
         """A create that may have gone through: the account's newest gists are read, and one
         whose description holds the share id is deleted. Whether one was."""
-        listed = json.loads(await self.github.raw("api", "gists?per_page=30", token=token) or "[]")
+        listed = json.loads(
+            await self.runtime.github.raw("api", "gists?per_page=30", token=token) or "[]"
+        )
         for gist in listed if isinstance(listed, list) else []:
             if share_id in str(gist.get("description") or "") and GIST_ID.fullmatch(
                 str(gist.get("id") or "")
             ):
-                await self.github.raw(
+                await self.runtime.github.raw(
                     "api", "--method", "DELETE", f"gists/{gist['id']}", token=token
                 )
                 return True
@@ -485,11 +480,13 @@ class Shares:
         """The gist deleted as the account that made it: "" once it is gone (404: already),
         else why not, in the owner's words."""
         try:
-            token, _ = await self.github.bound_user(login)
+            token, _ = await self.runtime.github.bound_user(login)
         except RuntimeError:
             return f"@{login} isn't signed in to gh on this computer"
         try:
-            await self.github.raw("api", "--method", "DELETE", f"gists/{gist_id}", token=token)
+            await self.runtime.github.raw(
+                "api", "--method", "DELETE", f"gists/{gist_id}", token=token
+            )
         except RuntimeError as exc:
             if "HTTP 404" in str(exc):
                 return ""
@@ -524,7 +521,7 @@ class Shares:
             return
         for row in self.store.all("SELECT * FROM shares WHERE state='creating'"):
             with suppress(Exception):
-                token, _ = await self.github.bound_user(row["login"])
+                token, _ = await self.runtime.github.bound_user(row["login"])
                 await self.reconcile(row["id"], token)
             self.update(row["id"], state="failed", ended_at=stamp(self.clock()))
         await self.sweep(retry_all=True)
