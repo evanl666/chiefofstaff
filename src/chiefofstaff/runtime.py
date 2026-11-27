@@ -269,6 +269,9 @@ PROMPTS = {
 # and how often an update waiting for the running work to end looks again.
 UPDATE_DELAY = 60
 UPDATE_POLL = 2.0
+# Update and restart waits this long at most for the turns running to end: one still running
+# then is cut short by the restart, and goes on after it with what it was given (cut_short).
+UPDATE_WAIT = float(os.environ.get("CHIEFOFSTAFF_UPDATE_WAIT", "120"))
 
 ROUTER_TOOLS = [
     "spawn_worker",
@@ -1142,15 +1145,35 @@ class Runtime:
                 self.publish_state()
             await asyncio.sleep(3600)
 
-    def work_running(self) -> bool:
-        """Whether any session has a turn running or starting (an update waits for none)."""
-        return any(
-            row["status"] in {"working", "starting"} or self.states[row["id"]].busy
-            for row in self.store.open_sessions()
-        )
+    def turns_running(self) -> str:
+        """The turns running or starting now, as what an update waits for: "the Router's turn
+        ends", "2 workers' turns end", "the Router's and a worker's turns end"; "" when none.
+        Not a session reconnecting after a restart: nothing of it runs."""
+        router, workers, others = False, 0, []
+        for row in self.store.open_sessions():
+            if row["id"] in self.reconnecting:
+                continue
+            if not (row["status"] in {"working", "starting"} or self.states[row["id"]].busy):
+                continue
+            if row["role"] == ROUTER:
+                router = True
+            elif row["role"] == WORKER:
+                workers += 1
+            else:
+                label = agents.ROLES.get(row["role"], f"The {row['role']}")
+                others.append(label[0].lower() + label[1:] + "'s")
+        named = (["the Router's"] if router else []) + others
+        if workers:
+            named.append("a worker's" if workers == 1 else f"{workers} workers'")
+        if not named:
+            return ""
+        if len(named) == 1:
+            return f"{named[0]} turn{'s end' if workers > 1 else ' ends'}"
+        return f"{', '.join(named[:-1])} and {named[-1]} turns end"
 
     async def update_now(self, cancel: bool = False) -> dict:
-        """The owner's Update and restart: once no turn runs (never stopping one), Chief of
+        """The owner's Update and restart: once the turns running end (UPDATE_WAIT seconds at
+        most: one still running then is cut short, and goes on after the restart), Chief of
         Staff updates itself and starts again in its own place, as after any restart; or, with
         `cancel`, it doesn't. ValueError when it can't update itself (the command says how)."""
         if cancel:
@@ -1166,7 +1189,12 @@ class Runtime:
         if not launch.restart or not self.restarter:
             raise ValueError(f"Update it with: {launch.command}")
         if not (self.updater and not self.updater.done()):
-            self.updating = {"to": found["version"], "state": "waiting"}
+            after = self.turns_running()
+            self.updating = {
+                "to": found["version"],
+                "state": "waiting",
+                **({"after": after} if after else {}),
+            }
             launch = launch.to(found["version"])
             self.updater = self.background(self.update_when_idle(launch, found["version"]))
         self.publish_state()
@@ -1174,9 +1202,10 @@ class Runtime:
 
     async def update_when_idle(self, launch: updates.Launch, version: str):
         fetched = False
+        until = time.monotonic() + UPDATE_WAIT
         while True:
-            if self.work_running():
-                self.set_updating("waiting")
+            if (after := self.turns_running()) and time.monotonic() < until:
+                self.set_updating("waiting", after=after)
                 await asyncio.sleep(UPDATE_POLL)
                 continue
             if fetched:
@@ -1193,15 +1222,18 @@ class Runtime:
         if self.restarter:
             self.restarter(launch)
 
-    def set_updating(self, state: str, error: str = ""):
-        if self.updating and (self.updating.get("state"), self.updating.get("error")) != (
-            state,
-            error or None,
-        ):
+    def set_updating(self, state: str, error: str = "", after: str = ""):
+        """Where an update stands; `after`: what it waits for ("the Router's turn ends")."""
+        if self.updating and (
+            self.updating.get("state"),
+            self.updating.get("error"),
+            self.updating.get("after"),
+        ) != (state, error or None, after or None):
             self.updating = {
                 "to": self.updating["to"],
                 "state": state,
                 **({"error": error} if error else {}),
+                **({"after": after} if after else {}),
             }
             self.publish_state()
 
