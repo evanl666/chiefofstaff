@@ -7,8 +7,8 @@ a drawn cursor and a caption per step: one request becomes a team on Copilot, Co
 one worker tells another what it changed, one decision comes to the owner, and the result is
 accepted on its receipts. Chromium's own screencast keeps every painted frame with its time
 (waits play faster); ffmpeg (on the PATH) makes hero.mp4 (H.264), hero.gif (1200 px wide) and
-hero.png (its first frame). Then the tour's stills (tour-*.png, at twice the pixels) from the
-same run. HERO_PORT (21710) is the app's port.
+hero.png (a still from its last step, as the clip's poster). Then the tour's stills (tour-*.png,
+at twice the pixels) from the same run. HERO_PORT (21710) is the app's port.
 """
 
 import argparse
@@ -30,6 +30,7 @@ from playwright.async_api import async_playwright
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from chiefofstaff import demo  # noqa: E402
+from chiefofstaff.watchdog import WatchConfig  # noqa: E402
 from chiefofstaff.web import create_app  # noqa: E402
 
 PORT = int(os.environ.get("HERO_PORT", "21710"))
@@ -145,6 +146,10 @@ class Walk:
     async def click(self, locator, fx: float = 0.5, fy: float = 0.5, ms: int = 600):
         await self.to(locator, fx, fy, ms)
         await self.page.wait_for_timeout(160)
+        box = await locator.bounding_box()
+        x, y = box["x"] + box["width"] * fx, box["y"] + box["height"] * fy
+        if abs(x - self.x) > 3 or abs(y - self.y) > 3:
+            await self.glide(x, y, 200)  # It moved meanwhile (a card above it changed).
         await self.page.mouse.down()
         await self.page.wait_for_timeout(70)
         await self.page.mouse.up()
@@ -185,14 +190,22 @@ def card_of(page, title: str):
     return page.locator(".card.task", has=page.get_by_text(title, exact=True)).first
 
 
-async def walk_through(w: Walk, out: Path):
+async def ask(w: Walk):
+    """The request, sent before the recording starts: the clip opens on it in the chat, never on
+    an empty Home."""
     page = w.page
-    composer = page.locator("#composer-input")
     await w.caption("1", "Ask once, in plain words")
-    await w.click(composer, 0.3, 0.5, 600)
-    await page.keyboard.type(REQUEST, delay=7)
-    await page.wait_for_timeout(300)
+    await page.locator("#composer-input").click()
+    await page.keyboard.type(REQUEST)
+    await w.to(page.locator('#composer button[type="submit"]'), 0.5, 0.5, 300)
     await page.keyboard.press("Enter")
+    await page.locator(".msg.owner", has_text=REQUEST).wait_for()
+    await page.get_by_text("routing updates").first.wait_for()
+
+
+async def walk_through(w: Walk, out: Path, frames_dir: Path):
+    page = w.page
+    await page.wait_for_timeout(1400)
 
     await w.caption("2", "It forms a team: each part on its own agent")
     await page.get_by_text("Started three tasks").wait_for()
@@ -240,6 +253,7 @@ async def walk_through(w: Walk, out: Path):
     await w.to(receipts, 1.05, 1.6, 600)
     await page.wait_for_timeout(1500)
     await w.still(out / "tour-receipts.png", fix)
+    await w.still(frames_dir / "poster.png")  # hero.png: the team, its agents, the receipts.
     await w.spot()
     await w.click(fix.get_by_role("button", name="Accept", exact=True), 0.5, 0.5, 600)
     await page.wait_for_timeout(1000)
@@ -304,15 +318,15 @@ async def record(url: str, frames_dir: Path, out: Path, runtime):
                 await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
 
         cdp.on("Page.screencastFrame", lambda params: asyncio.ensure_future(on_frame(params)))
+        walk = Walk(page)
+        await page.mouse.move(walk.x, walk.y)
+        await ask(walk)
         await cdp.send(
             "Page.startScreencast",
             {"format": "jpeg", "quality": 95, "maxWidth": WIDTH, "maxHeight": HEIGHT},
         )
-        walk = Walk(page)
-        await page.mouse.move(walk.x, walk.y)
-        await page.wait_for_timeout(700)
         try:
-            await walk_through(walk, out)
+            await walk_through(walk, out, frames_dir)
         except Exception:
             await page.screenshot(path=str(out / "failed.png"))
             raise
@@ -376,8 +390,8 @@ def encode(frames: list, paces: list, frames_dir: Path, out: Path, fps: int = 30
         check=True,
     )  # fmt: skip
     subprocess.run(
-        [ffmpeg, "-y", "-loglevel", "error", "-i", str(frames[0][0]),
-         "-vf", "scale=1200:-1:flags=lanczos", str(out / "hero.png")],
+        [ffmpeg, "-y", "-loglevel", "error", "-i", str(frames_dir / "poster.png"),
+         "-vf", "scale=1800:-1:flags=lanczos", str(out / "hero.png")],
         check=True,
     )  # fmt: skip
     return ticks / fps
@@ -391,7 +405,11 @@ async def main(out: Path):
         made = []
 
         def factory(store, bus):
-            made.append(demo.DemoRuntime(store, bus, project, autoplay=False, slack_delay=3600))
+            # The research worker stalls until the Watchdog nudges it: not within the clip.
+            watch = WatchConfig(interval=3, stall=120, long=600, cooldown=30)
+            made.append(
+                demo.DemoRuntime(store, bus, project, autoplay=False, watch=watch, slack_delay=3600)
+            )
             return made[0]
 
         app = create_app(root / "data", TOKEN, PORT, runtime_factory=factory)

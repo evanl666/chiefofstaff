@@ -1,4 +1,5 @@
-"""The README's drawn pictures: how it works (docs/images/how-it-works.png) and, with --social,
+"""The README's drawn pictures: how it works (docs/images/how-it-works.png, and .zh-CN.png for
+the Chinese README) and, with --social,
 the repository's 1280 x 640 social preview.
 
     uv run --extra dev --with playwright python scripts/readme_art.py [--social <file.png>]
@@ -6,6 +7,9 @@ the repository's 1280 x 640 social preview.
 Plain HTML drawn by Chromium at twice the pixels. The screenshots and the hero clip come from
 the app itself (record_hero.py).
 """
+
+# The Chinese diagram's words have Chinese punctuation.
+# ruff: noqa: RUF001
 
 import argparse
 import asyncio
@@ -29,40 +33,89 @@ body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, 
 HOW = """
 <div class="frame">
   <div class="col">
-    <div class="head">Comes to you</div>
-    <div class="in">Your words, in one chat</div>
-    <div class="in">Slack: DMs, mentions, a 🤖 reaction</div>
-    <div class="in">GitHub: reviews for you, your PRs</div>
-    <div class="in">Watches: docs, mail, your search</div>
-    <div class="in">A hotkey from any app</div>
+    <div class="head">{to_you}</div>
+    <div class="in">{words}</div>
+    <div class="in">{slack}</div>
+    <div class="in">{github}</div>
+    <div class="in">{watches}</div>
+    <div class="in">{hotkey}</div>
   </div>
   <div class="arrow">→</div>
   <div class="mid">
     <div class="router"><b>Router</b>
-      <span>splits the request, starts the workers, keeps the decisions</span></div>
+      <span>{router}</span></div>
     <div class="down">↓</div>
     <div class="team">
-      <div class="label">A team, one worker per part, each in its own worktree</div>
-      <div class="worker copilot"><i class="mark"></i><b>Copilot</b> Fix the flaky test</div>
-      <div class="talk">↕ tell and ask each other</div>
-      <div class="worker codex"><i class="mark"></i><b>Codex</b> Rate-limit logins</div>
-      <div class="worker claude"><i class="mark"></i><b>Claude</b> Compare flag services</div>
+      <div class="label">{team}</div>
+      <div class="worker copilot"><i class="mark"></i><b>Copilot</b> {fix}</div>
+      <div class="talk">↕ {talk}</div>
+      <div class="worker codex"><i class="mark"></i><b>Codex</b> {limit}</div>
+      <div class="worker claude"><i class="mark"></i><b>Claude</b> {compare}</div>
     </div>
   </div>
   <div class="arrow">→</div>
   <div class="col">
-    <div class="head">Comes back to you</div>
-    <div class="out strong">Only the decisions: one card each</div>
-    <div class="out">Drafts in your voice, sent on your OK</div>
-    <div class="out">Results with receipts of what ran</div>
-    <div class="out">A share link that expires</div>
+    <div class="head">{back}</div>
+    <div class="out strong">{decisions}</div>
+    <div class="out">{drafts}</div>
+    <div class="out">{receipts}</div>
+    <div class="out">{share}</div>
   </div>
   <div class="foot">
-    <div><b>Sees it through</b> PRs to merged · CI and reviews · check-backs · Watchdog</div>
-    <div><b>Learns you</b> how you write · habits you approve · checks from fixed mistakes</div>
+    <div><b>{through}</b> {through_how}</div>
+    <div><b>{learns}</b> {learns_how}</div>
   </div>
 </div>
 """
+# Its words in each README's language.
+WORDS = {
+    "": {
+        "to_you": "Comes to you",
+        "words": "Your words, in one chat",
+        "slack": "Slack: DMs, mentions, a 🤖 reaction",
+        "github": "GitHub: reviews for you, your PRs",
+        "watches": "Watches: docs, mail, your search",
+        "hotkey": "A hotkey from any app",
+        "router": "splits the request, starts the workers, keeps the decisions",
+        "team": "A team, one worker per part, each in its own worktree",
+        "fix": "Fix the flaky test",
+        "talk": "tell and ask each other",
+        "limit": "Rate-limit logins",
+        "compare": "Compare flag services",
+        "back": "Comes back to you",
+        "decisions": "Only the decisions: one card each",
+        "drafts": "Drafts in your voice, sent on your OK",
+        "receipts": "Results with receipts of what ran",
+        "share": "A share link that expires",
+        "through": "Sees it through",
+        "through_how": "PRs to merged · CI and reviews · check-backs · Watchdog",
+        "learns": "Learns you",
+        "learns_how": "how you write · habits you approve · checks from fixed mistakes",
+    },
+    ".zh-CN": {
+        "to_you": "找上你的事",
+        "words": "你的话，一个对话框",
+        "slack": "Slack：私信、@ 你、点一下 🤖",
+        "github": "GitHub：等你 review 的、你的 PR",
+        "watches": "盯着的来源：文档、邮件、搜索",
+        "hotkey": "任何 app 里按快捷键",
+        "router": "拆开请求，启动 worker，记住每个决定",
+        "team": "一个团队：每部分一个 worker，各有自己的 worktree",
+        "fix": "修复不稳定的测试",
+        "talk": "互相告知、互相提问",
+        "limit": "登录限流",
+        "compare": "比较 feature flag 服务",
+        "back": "回到你这里的",
+        "decisions": "只有决定：每个问题一张卡片",
+        "drafts": "用你的口吻起草，你点头才发",
+        "receipts": "带证据的结果：实际跑了什么",
+        "share": "会过期的分享链接",
+        "through": "跟到底",
+        "through_how": "PR 直到合并 · CI 和 review · 定时回看 · Watchdog",
+        "learns": "越来越像你",
+        "learns_how": "你的写法 · 你认可的习惯 · 从修好的错误里学到的检查",
+    },
+}
 
 HOW_STYLE = """
 .frame { width: 1200px; padding: 28px 30px 24px; display: grid;
@@ -143,8 +196,10 @@ async def draw(html: str, style: str, path: Path, selector: str, scale: int = 2)
 
 
 async def main(social: Path | None):
-    await draw(HOW, HOW_STYLE, IMAGES / "how-it-works.png", ".frame")
-    print(IMAGES / "how-it-works.png")
+    for language, words in WORDS.items():
+        path = IMAGES / f"how-it-works{language}.png"
+        await draw(HOW.format(**words), HOW_STYLE, path, ".frame")
+        print(path)
     if social:
         html = SOCIAL.format(
             duck=inline(ROOT / "src" / "chiefofstaff" / "static" / "favicon.svg", "svg+xml"),
