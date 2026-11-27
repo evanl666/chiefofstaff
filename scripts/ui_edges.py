@@ -6810,6 +6810,10 @@ async def round_decision_ledger(runtime, browser, failures: list[str]):
     store.save_settings(new)
     await runtime.settings_changed(old, new)
     runtime.states[router].turn_decisions.clear()
+    # A turn of the Router's own, not the owner's: round_agents' handover (Copilot off and on
+    # again, a new Router told what the owner said) is its last turn otherwise, and there its
+    # notify_owner is refused (said in its reply instead), so the Router never joins the card.
+    runtime.states[router].owner_reply = False
 
     async def start(title, request):
         result = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
