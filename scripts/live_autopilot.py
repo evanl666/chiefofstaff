@@ -48,12 +48,17 @@ C7  prepare-downgrade right after an answer was received: the worker's session i
     stopped by you, no check-back left; the record kept
 
 Shard D, parity (the design's: Copilot answers in its turn; Codex and Claude are reopened in Ask
-first before they are continued, never mid-turn):
-D1  a Codex worker (the stand-in `codex`, never yours), opened acting on its own, asks: reopened
-    in Ask first, then answered
-D2  a Claude worker (the stand-in `claude`, never the real one), opened acting on its own: the
-    same
-D3  a Claude worker (the stand-in) asked while mid-turn: its question waits for that turn
+first before they are continued, never mid-turn). Each worker, opened acting on its own, files a
+decision card the owner's page message settles; the stand-ins' own logs show how its next
+process opened:
+D1  a Codex worker (the stand-in `codex`, never yours): decided, then reopened in Ask first (its
+    thread's subagents off) before the answer reaches it, the turn that takes it asking first
+D2  a Claude worker (the stand-in `claude`, never the real one): the same (its hooks off)
+D3  a Claude worker (the stand-in) whose card is decided while it is at work on a long command:
+    the answer waits for that turn to end (never reopened mid-turn: the turn finishes), then
+    reaches a process opened asking first
+D4  a Claude worker (the stand-in) opened acting on its own that asks in its turn (Claude's own
+    question tool): set aside, since an answer would go on in a turn that doesn't ask first
 
 Uses your signed-in Copilot CLI (COPILOT_HOME of its own, its config.json copied from yours,
 read only) and consumes premium requests (SHARD_CREDITS a shard at most: a shard that reaches it
@@ -92,7 +97,7 @@ SCENARIOS = {
     "A": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"],
     "B": ["B1", "B2", "B3", "B4"],
     "C": ["C1", "C2", "C3", "C4", "C5", "C6", "C7"],
-    "D": ["D1", "D2", "D3"],
+    "D": ["D1", "D2", "D3", "D4"],
 }
 FINISHED = {"review", "done"}
 ANSWERED = {"answered", "decided"}
@@ -710,10 +715,38 @@ async def c7_prepare_downgrade_after_an_answer(run: Run) -> bool:
 # Shard D: parity.
 
 
-async def d_reopened_in_ask_first(run: Run, agent: str, code: str):
-    """New workers on `agent` (Settings), acting without asking (the owner's usual setting); the
-    owner's page message settles the question it then asks (the stand-ins ask which color when
-    told "Ask the owner which color", Codex's with Red and Blue to choose from)."""
+COLORS = (
+    'Call the ask_decision tool with arguments {"question": "Which color for the banner?", '
+    '"options": [{"choice": "Red"}, {"choice": "Blue"}]}'
+)
+
+
+def stand_in_log(run: Run, agent: str) -> list[str]:
+    """What the stand-in logged: Claude's runs (each process's arguments), Codex's requests."""
+    found = run.root / ("claude-runs.jsonl" if agent == "Claude" else "codex-log.jsonl")
+    return found.read_text().splitlines() if found.exists() else []
+
+
+def opened_asking(lines: list[str], agent: str) -> bool:
+    """Whether a process (Claude's: its hooks off) or a thread (Codex's: its subagents off) in
+    these lines opened as Ask first does, the worker not sandboxed."""
+    for line in lines:
+        if agent == "Claude":
+            if "disableAllHooks" in line:
+                return True
+            continue
+        entry = json.loads(line)
+        params = entry.get("params") or {}
+        # A worker's thread: never Chief of Staff's own check of Codex (ephemeral).
+        starts = entry.get("method") in {"thread/start", "thread/resume"}
+        asking = (params.get("config") or {}).get("features.multi_agent") is False
+        if starts and asking and not params.get("ephemeral"):
+            return True
+    return False
+
+
+async def stand_in_worker(run: Run, agent: str, title: str) -> dict:
+    """A new worker on `agent` (Settings), acting without asking (the owner's usual setting)."""
     await run.settings(
         worker_yolo=True,
         agents={
@@ -722,56 +755,97 @@ async def d_reopened_in_ask_first(run: Run, agent: str, code: str):
             "new_workers": agent.lower(),
         },
     )
-    worker = await run.worker(f"{agent} worker", "reply with just: ready")
+    worker = await run.worker(title, "Report done: ready")
     await run.finished(worker["task_id"], 900)
-    await run.tell(
-        worker["session_id"],
-        "Blue, please. Ask the owner which color, and use the answer."
-        if agent == "Claude"
-        else "Blue, please. Ask the owner Which color: red or blue?",
+    return worker
+
+
+async def asked_first_after(run: Run, code: str, entry: dict):
+    """The turn the answer led to ran asking first: its `after` entry says the settings it ran
+    under (the record's own words, read from its table)."""
+
+    async def then():
+        found = await run.entry(entry["id"])
+        return [later for later in found["later"] if later["kind"] == "after"] or None
+
+    await wait_for("its then: line", then, 300, run.app)
+    ran = [
+        json.loads(why).get("settings")
+        for (why,) in run.rows(
+            "SELECT why FROM autopilot_log WHERE kind='after' AND (of=? OR payload LIKE ?)",
+            entry["id"],
+            f"%{entry['id']}%",
+        )
+    ]
+    run.check(f"{code} its continued turn asked first", "asked first" in ran, str(ran))
+
+
+async def d_reopened_in_ask_first(run: Run, agent: str, code: str):
+    """Its card is decided from the owner's page message; its next process opens asking first,
+    then the answer reaches it."""
+    worker = await stand_in_worker(run, agent, f"{agent} worker")
+    before = len(stand_in_log(run, agent))
+    run.check(
+        f"{code} opened acting on its own", not opened_asking(stand_in_log(run, agent), agent)
     )
+    await run.tell(worker["session_id"], f"Blue, please. {COLORS}")
     task_id = await current_task(run, worker["session_id"]) or worker["task_id"]
     entry = await run.entry_for(task_id, ANSWERED | {PARKED}, 900)
-    run.check(f"{code} answered", entry["kind"] in ANSWERED, entry["text"])
-    found = await run.entry(entry["id"])
-    later = " ".join(x["text"] for x in found["later"]) + json.dumps(
-        [x.get("evidence") for x in found["later"]]
-    )
+    run.check(f"{code} decided", entry["kind"] in ANSWERED, entry["text"])
+    run.check(f"{code} the answer is Blue", "Blue" in entry["text"], entry["text"])
+    await asked_first_after(run, code, entry)
     run.check(
-        f"{code} its continued turn asked first", "asked first" in json.dumps(found), later[:200]
+        f"{code} reopened in Ask first before the answer reached it",
+        opened_asking(stand_in_log(run, agent)[before:], agent),
+        f"{len(stand_in_log(run, agent)) - before} new lines",
     )
+    state = await run.state()
+    run.check(f"{code} the owner's setting kept", state["settings"]["worker_yolo"] is True)
 
 
 async def d3_mid_turn_waits(run: Run):
     """A Claude worker (the stand-in) opened acting on its own, at work on a long command when
-    its question comes: not reopened mid-turn; the question waits, then is answered."""
-    await run.settings(
-        worker_yolo=True,
-        agents={
-            **((await run.state())["settings"].get("agents") or {}),
-            "claude": {"enabled": True},
-            "new_workers": "claude",
-        },
-    )
-    worker = await run.worker("Claude busy", "reply with just: ready")
-    await run.finished(worker["task_id"], 900)
-    await run.tell(
-        worker["session_id"],
-        "Blue, please. Run the shell command `sleep 90` Ask the owner which color",
-    )
-
-    async def working():
-        row = await run.app.get(f"/api/sessions/{worker['session_id']}")
-        return row if row["status"] == "working" else None
-
-    await wait_for("it is at work", working, 300, run.app)
+    its card is decided: not reopened mid-turn (that turn finishes); the answer waits for it,
+    then reaches a process opened asking first."""
+    worker = await stand_in_worker(run, "Claude", "Claude busy")
+    before = len(stand_in_log(run, "Claude"))
+    told = time.monotonic()
+    await run.tell(worker["session_id"], f"Blue, please. {COLORS} Run the shell command `sleep 90`")
     task_id = await current_task(run, worker["session_id"]) or worker["task_id"]
     entry = await run.entry_for(task_id, ANSWERED | {PARKED}, 900)
-    row = await run.app.get(f"/api/sessions/{worker['session_id']}")
+    decided = time.monotonic() - told
+    run.check("D3 decided", entry["kind"] in ANSWERED, entry["text"])
+    run.check("D3 decided while its turn was at work", decided < 80, f"after {decided:.0f} s")
     run.check(
-        "D3 its question waited for the turn, then was answered",
-        entry["kind"] in ANSWERED,
-        f"{entry['text']} · {row['status']}",
+        "D3 not reopened mid-turn",
+        not opened_asking(stand_in_log(run, "Claude")[before:], "Claude"),
+    )
+
+    async def reopened():
+        return opened_asking(stand_in_log(run, "Claude")[before:], "Claude") or None
+
+    await wait_for("reopened asking first", reopened, 300, run.app)
+    waited = time.monotonic() - told
+    run.check(
+        "D3 reopened in Ask first only once that turn ended", waited >= 88, f"after {waited:.0f} s"
+    )
+    await asked_first_after(run, "D3", entry)
+    task = await run.app.get(f"/api/tasks/{task_id}")
+    run.check("D3 the turn it was at work in finished, not stopped", task["status"] != "stopped",
+              task["status"])  # fmt: skip
+
+
+async def d4_asked_in_a_turn_acting_on_its_own(run: Run):
+    """A Claude worker opened acting on its own asks in its turn (AskUserQuestion: the stand-in
+    asks "Which color?"): Autopilot's answer would go on in that turn, so it waits for you."""
+    worker = await stand_in_worker(run, "Claude", "Claude asks")
+    await run.tell(worker["session_id"], "Blue, please. Ask the owner which color, and use it.")
+    task_id = await current_task(run, worker["session_id"]) or worker["task_id"]
+    entry = await run.entry_for(task_id, ANSWERED | {PARKED}, 900)
+    run.check(
+        "D4 set aside: not answered into a turn acting on its own",
+        entry["kind"] == PARKED and "this turn" in entry["text"],
+        entry["text"],
     )
 
 
@@ -799,6 +873,8 @@ def stand_ins(root: Path) -> dict:
     (root / "codex-home").mkdir()
     return {
         "PATH": f"{stand_in}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_CLAUDE_RUNS": str(root / "claude-runs.jsonl"),
+        "FAKE_CODEX_LOG": str(root / "codex-log.jsonl"),
         "FAKE_CLAUDE_HOME": str(root / "fake-claude"),
         "CLAUDE_CONFIG_DIR": str(claude_config),
         "FAKE_CODEX_HOME": str(root / "fake-codex"),
@@ -850,6 +926,7 @@ async def shard(name: str, root: Path, wanted: set[str]) -> list:
             "C6": c6_killed_between_claim_and_delivery,
             "C7": c7_prepare_downgrade_after_an_answer,
             "D3": d3_mid_turn_waits,
+            "D4": d4_asked_in_a_turn_acting_on_its_own,
         }
         for scenario in chosen:
             log(f"---- {scenario}")
