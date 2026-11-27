@@ -364,7 +364,7 @@ async function turnOffSlack() {
   }
 }
 // Where an update stands, in a few words; Chief of Staff does it, or says the command.
-function updateLine({ version, command, automatic, state: stage, error }) {
+function updateLine({ version, command, automatic, state: stage, error, after }) {
   const ask = (cancel) => async (event) => {
     event.currentTarget.disabled = true;
     try {
@@ -377,6 +377,8 @@ function updateLine({ version, command, automatic, state: stage, error }) {
   };
   const button = (text, cancel = false) => el("button", { type: "button", class: "link", text, onclick: ask(cancel) });
   const line = (...parts) => el("div", { class: "update" }, ...parts);
+  // What it waits for, a short while at most (a long turn goes on after the restart).
+  if (stage === "waiting" && after) return el("div", { class: "update", title: `Chief of Staff ${version} installs then. A long turn is not waited for: it goes on after the restart.` }, `Restarting after ${after}… `, button("Cancel", true));
   if (stage === "waiting") return line(`Chief of Staff ${version} installs once the running work ends `, button("Cancel", true));
   if (stage === "fetching") return line(`Getting Chief of Staff ${version}…`);
   if (stage === "restarting") return line(`Restarting with Chief of Staff ${version}…`);

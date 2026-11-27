@@ -1159,7 +1159,8 @@ function failingChip(key, task) {
 // that. What it said last is in the tooltip.
 function activityLine(worker) {
   const working = worker?.status === "working";
-  const raw = worker?.step || worker?.activity || "";
+  // Reconnecting after a restart: that, not the step it was in.
+  const raw = (worker?.status === "resuming" && worker.activity) || worker?.step || worker?.activity || "";
   const background = !working && worker?.background;
   const line = background ? BACKGROUND : raw ? stepText(raw, worker?.cwd) : working ? "Thinking…" : quiet(worker);
   const long = !background && worker?.step_since && ago(worker.step_since) !== "now";

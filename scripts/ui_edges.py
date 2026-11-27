@@ -6361,7 +6361,8 @@ async def main():
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
-                          round_router_appears, round_agent_words, round_payload):  # fmt: skip
+                          round_router_appears, round_agent_words, round_payload,
+                          round_reconnecting):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -14586,6 +14587,73 @@ async def round_payload(runtime, browser, failures: list[str]):
         "opened before the whole came (its ask failed, then slow): a report, its earlier "
         "reports and a draft's Result of stay open and get the whole, nothing moved"
     )
+
+
+async def round_reconnecting(runtime, browser, failures: list[str]):
+    """0.1.61 (owner report "router stuck?"): at work when Chief of Staff restarted, the Router
+    said Thinking… with Stop while no turn ran. Until it is resumed it says Reconnecting to
+    Codex… (no Thinking…, no Stop), its dot's tip says so; once a try was given up, Retry asks
+    for the next one now. A worker reconnecting says so on its row on Home. Update and restart,
+    waiting, says for what: Restarting after the Router's turn ends…"""
+    store = runtime.store
+    router = store.get("router_id")
+    made = await call_tool(runtime, "spawn_worker", router, title="Port the parser",
+                           instructions="Port the parser", why_new="test")  # fmt: skip
+    worker = json.loads(made.text_result_for_llm)["session_id"]
+    await settle(runtime)
+    asked: list[str] = []
+    retry = runtime.retry_resume
+    runtime.retry_resume = asked.append
+    for session in (router, worker):
+        runtime.reconnecting[session] = "codex"
+        runtime.update_session(session, status="working", activity="")
+    runtime.publish_state()
+    context = await browser.new_context(viewport={"width": 1440, "height": 900})
+    page = await context.new_page()
+    page.on("pageerror", lambda error: failures.append(str(error)))
+    try:
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        line = page.locator("#timeline .working-line")
+        await expect(line).to_have_text(re.compile(r"^\s*Reconnecting to Codex…\s*$"))
+        await expect(line.get_by_role("button", name="Stop")).to_have_count(0)
+        await expect(page.locator("#timeline")).not_to_contain_text("Thinking…")
+        dot = page.locator(".home-item .dot")
+        await expect(dot).to_have_attribute("title", "Reconnecting to Codex…")
+        row = page.locator("#tasks", has_text="Port the parser")
+        await expect(row.first).to_contain_text("Reconnecting to Codex…")
+        # Given up once: Retry, which asks for the next try now.
+        runtime.unresumed[router] = 1
+        runtime.publish_session(store.session(router))
+        retrying = line.get_by_role("button", name="Retry")
+        await expect(retrying).to_be_visible()
+        await retrying.click()
+        for _ in range(100):
+            if asked:
+                break
+            await asyncio.sleep(0.05)
+        assert asked == [router], asked
+        await page.screenshot(path=SHOTS / "reconnecting-home.png")
+        # Resumed: at work again, as usual.
+        for session in (router, worker):
+            runtime.resume_over(session)
+        await expect(line).to_contain_text("Thinking…")
+        await expect(line.get_by_role("button", name="Stop")).to_have_count(1)
+        # Update and restart, waiting for the Router's turn: says so, with Cancel.
+        await patch_state(page, {}, {"update": {
+            "version": "9.9.9", "automatic": True, "command": "uv tool upgrade chiefofstaff",
+            "state": "waiting", "to": "9.9.9", "after": "the Router's turn ends"}})  # fmt: skip
+        await page.reload()
+        update = page.locator(".update")
+        await expect(update).to_contain_text("Restarting after the Router's turn ends…")
+        await expect(update.get_by_role("button", name="Cancel")).to_be_visible()
+    finally:
+        runtime.retry_resume = retry
+        for session in (router, worker):
+            runtime.resume_over(session)
+            runtime.update_session(session, status="idle", activity="")
+        runtime.unresumed.pop(router, None)
+        await context.close()
+    log("Reconnecting after a restart: no Thinking… nor Stop, Retry once given up; an update")
 
 
 if __name__ == "__main__":

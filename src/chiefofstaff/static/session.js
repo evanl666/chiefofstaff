@@ -67,7 +67,7 @@ export function renderHeader() {
   if (session.closed_at) {
     meta = ["Closed", session.branch];
   } else if (session.role === "router") {
-    meta = ["Coordinates your sessions", session.status === "working" ? "routing…" : ""];
+    meta = ["Coordinates your sessions", session.status === "working" ? "routing…" : session.status === "resuming" ? session.activity : ""];
   } else if (session.role === "slack") {
     meta = ["Drafts your Slack replies", STATUS_TEXT[session.status]];
   } else if (session.role === "watchdog") {
@@ -80,7 +80,7 @@ export function renderHeader() {
     const where = (found?.dot || "idle").split(" ")[0];
     // Its turn over while a command it left running goes on: said, not "Running" alone.
     const background = session.background && session.status !== "working" ? "waiting for background process" : "";
-    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" || session.activity === RECONNECTING ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
+    meta = [SHORT_STATE[where] || STATUS_TEXT[session.status], found?.sub || background, session.status === "queued" || session.status === "resuming" || session.activity === RECONNECTING ? session.activity : "", session.branch, repos > 1 ? `${repos} repos` : ""];
     if (session.elsewhere) {
       // What it does in the terminal, read from its log; Chief of Staff does not drive it now.
       const terminal = session.terminal || {};
@@ -194,6 +194,7 @@ export function renderHeader() {
     items.push(
       el("hr"),
       session.status === "working" ? menuButton("Stop what it is doing", () => post(`/api/sessions/${session.id}/stop`, "Stopped.")) : "",
+      session.status === "resuming" ? menuButton("Stop: don't go on", () => post(`/api/sessions/${session.id}/stop`, "Stopped: it waits for your next message.")) : "",
       menuButton(
         "Close worker",
         () => {
@@ -1967,6 +1968,14 @@ export function updateWorkingLine() {
   const background = session?.background && session.status !== "working";
   if (session?.activity === RECONNECTING) {
     timeline.append(el("div", { class: "working-line" }, duck("working"), el("span", { text: RECONNECTING })));
+    scrollToBottom();
+    return;
+  }
+  if (session?.status === "resuming") {
+    // At work when Chief of Staff restarted: it goes on (with what it was on) once its agent has
+    // it open again. Nothing of it runs to stop; once a try was given up, it can be tried now.
+    const retry = session.retry ? el("button", { type: "button", class: "link", text: "Retry", title: "Try to reconnect it now", onclick: (event) => { event.currentTarget.disabled = true; post(`/api/sessions/${session.id}/reconnect`, "Reconnecting…"); } }) : null;
+    timeline.append(el("div", { class: "working-line reconnecting" }, duck("watching"), el("span", { text: session.activity || "Reconnecting…" }), retry));
     scrollToBottom();
     return;
   }

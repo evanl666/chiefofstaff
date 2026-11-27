@@ -230,10 +230,11 @@ async def test_copilot_connects_again_without_the_session_whose_resume_killed_it
         "This worker's Copilot session is too large for Copilot to reopen here; your message "
         "is kept for a fresh start."
     ]
+    # (Its turn was cut short by Chief of Staff's stop, before Copilot's: said so.)
     assert (
         client.sessions[small]
         .sent[-1]
-        .startswith('<message from="system" type="restart">\nCopilot was restarted')
+        .startswith('<message from="system" type="restart">\nChief of Staff restarted')
     )
 
     with pytest.raises(FreshStartError):

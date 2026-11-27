@@ -269,6 +269,9 @@ PROMPTS = {
 # and how often an update waiting for the running work to end looks again.
 UPDATE_DELAY = 60
 UPDATE_POLL = 2.0
+# Update and restart waits this long at most for the turns running to end: one still running
+# then is cut short by the restart, and goes on after it with what it was given (cut_short).
+UPDATE_WAIT = float(os.environ.get("CHIEFOFSTAFF_UPDATE_WAIT", "120"))
 
 ROUTER_TOOLS = [
     "spawn_worker",
@@ -528,6 +531,8 @@ class AgentConnection:
     connections: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     watch: asyncio.Task | None = None
+    # Resuming its sessions that were at work as it started (Runtime.agent_resumes).
+    resuming: asyncio.Task | None = None
     # Whether the owner has it turned on (Settings → Agents & models): off, none of its workers
     # runs.
     enabled: Callable[[], bool] = lambda: True
@@ -817,6 +822,13 @@ class Runtime:
         # each of those still to be resumed: set once it is.
         self.resume_job: asyncio.Task | None = None
         self.resumes: dict[str, asyncio.Event] = {}
+        # Sessions at work when Chief of Staff (or their agent) stopped, not resumed yet: their
+        # agent, by session. Shown as reconnecting, never as working (view); those whose resume
+        # was given up are tried again by the one recovery path (recover): by session, how many
+        # times so far.
+        self.reconnecting: dict[str, str] = {}
+        self.unresumed: dict[str, int] = {}
+        self.resume_tries: dict[str, asyncio.Task] = {}
         # Copilot sessions its connection died after (Runtime.disconnect): how many times.
         self.killed_by: dict[str, int] = {}
         self.stopping = False
@@ -1065,6 +1077,8 @@ class Runtime:
             self.arm_limit(name)  # A limit used up: its reset waited for again.
             self.arm_check(name)  # A check that could not run: tried again by itself.
         self.task_actions.settle_reports()
+        # At work when it stopped: reconnecting until each is resumed, never seen as working.
+        self.mark_resuming()
         await self.connect()
         self.after_update()
         # Before anything else resumes: a worker left in a shepherd step is not continued.
@@ -1131,15 +1145,35 @@ class Runtime:
                 self.publish_state()
             await asyncio.sleep(3600)
 
-    def work_running(self) -> bool:
-        """Whether any session has a turn running or starting (an update waits for none)."""
-        return any(
-            row["status"] in {"working", "starting"} or self.states[row["id"]].busy
-            for row in self.store.open_sessions()
-        )
+    def turns_running(self) -> str:
+        """The turns running or starting now, as what an update waits for: "the Router's turn
+        ends", "2 workers' turns end", "the Router's and a worker's turns end"; "" when none.
+        Not a session reconnecting after a restart: nothing of it runs."""
+        router, workers, others = False, 0, []
+        for row in self.store.open_sessions():
+            if row["id"] in self.reconnecting:
+                continue
+            if not (row["status"] in {"working", "starting"} or self.states[row["id"]].busy):
+                continue
+            if row["role"] == ROUTER:
+                router = True
+            elif row["role"] == WORKER:
+                workers += 1
+            else:
+                label = agents.ROLES.get(row["role"], f"The {row['role']}")
+                others.append(label[0].lower() + label[1:] + "'s")
+        named = (["the Router's"] if router else []) + others
+        if workers:
+            named.append("a worker's" if workers == 1 else f"{workers} workers'")
+        if not named:
+            return ""
+        if len(named) == 1:
+            return f"{named[0]} turn{'s end' if workers > 1 else ' ends'}"
+        return f"{', '.join(named[:-1])} and {named[-1]} turns end"
 
     async def update_now(self, cancel: bool = False) -> dict:
-        """The owner's Update and restart: once no turn runs (never stopping one), Chief of
+        """The owner's Update and restart: once the turns running end (UPDATE_WAIT seconds at
+        most: one still running then is cut short, and goes on after the restart), Chief of
         Staff updates itself and starts again in its own place, as after any restart; or, with
         `cancel`, it doesn't. ValueError when it can't update itself (the command says how)."""
         if cancel:
@@ -1155,7 +1189,12 @@ class Runtime:
         if not launch.restart or not self.restarter:
             raise ValueError(f"Update it with: {launch.command}")
         if not (self.updater and not self.updater.done()):
-            self.updating = {"to": found["version"], "state": "waiting"}
+            after = self.turns_running()
+            self.updating = {
+                "to": found["version"],
+                "state": "waiting",
+                **({"after": after} if after else {}),
+            }
             launch = launch.to(found["version"])
             self.updater = self.background(self.update_when_idle(launch, found["version"]))
         self.publish_state()
@@ -1163,9 +1202,10 @@ class Runtime:
 
     async def update_when_idle(self, launch: updates.Launch, version: str):
         fetched = False
+        until = time.monotonic() + UPDATE_WAIT
         while True:
-            if self.work_running():
-                self.set_updating("waiting")
+            if (after := self.turns_running()) and time.monotonic() < until:
+                self.set_updating("waiting", after=after)
                 await asyncio.sleep(UPDATE_POLL)
                 continue
             if fetched:
@@ -1182,15 +1222,18 @@ class Runtime:
         if self.restarter:
             self.restarter(launch)
 
-    def set_updating(self, state: str, error: str = ""):
-        if self.updating and (self.updating.get("state"), self.updating.get("error")) != (
-            state,
-            error or None,
-        ):
+    def set_updating(self, state: str, error: str = "", after: str = ""):
+        """Where an update stands; `after`: what it waits for ("the Router's turn ends")."""
+        if self.updating and (
+            self.updating.get("state"),
+            self.updating.get("error"),
+            self.updating.get("after"),
+        ) != (state, error or None, after or None):
             self.updating = {
                 "to": self.updating["to"],
                 "state": state,
                 **({"error": error} if error else {}),
+                **({"after": after} if after else {}),
             }
             self.publish_state()
 
@@ -1230,6 +1273,10 @@ class Runtime:
         return [self.slack, self.github, *self.sources]
 
     async def stop(self):
+        # Turns in flight are cut short by the stop: what they were given goes to them again
+        # once they are open again (Delivery.settle_cut).
+        with suppress(Exception):
+            self.cut_short_all()
         self.stopping = True
         self.send.close()
         self.shares.stop()
@@ -1258,8 +1305,12 @@ class Runtime:
         await self.habits.stop()
         await self.connector.stop()
         await self.claude_setup.stop()
-        for agent in self.agents:
-            await self.disconnect_agent(agent)
+        # Every agent's processes end before Chief of Staff does (each in a few seconds; at once,
+        # so the stop stays short): what runs a turn of a session would otherwise still hold it
+        # as the next start opens it again.
+        await asyncio.gather(
+            *(self.disconnect_agent(agent) for agent in self.agents), return_exceptions=True
+        )
         await self.disconnect()
         for task in list(self.jobs):
             task.cancel()
@@ -1420,8 +1471,8 @@ class Runtime:
         """Copilot runs (at start, or again): its sessions that were at work or mid-send are
         resumed in the background, each bounded, so that no session (nor Copilot hanging on
         one) holds the connection; it waits for them RESUME_WAIT seconds at most."""
-        self.resumes = {session_id: asyncio.Event() for session_id in self.to_resume(COPILOT_AGENT)}
-        self.resume_job = self.background(self.resume_sessions(bool(self.connections)))
+        ids = self.gate_resumes(COPILOT_AGENT)
+        self.resume_job = self.background(self.resume_sessions(bool(self.connections), ids))
         await asyncio.wait({self.resume_job}, timeout=RESUME_WAIT)
         resumed = self.resume_job
         if resumed.done() and not resumed.cancelled() and (error := resumed.exception()):
@@ -1927,11 +1978,65 @@ class Runtime:
             entry.watch = asyncio.ensure_future(self.watch_agent(agent, backend, entry.connections))
             try:
                 await self.end_epochs(agent, backend)
-                await self.reconcile_sends(agent)
-                await self.resume_working(agent)
             except Exception:
                 logger.exception("Recovering the sessions of %s failed", agent)
+            # Its sessions at work or mid-send go on in the background, each bounded, as
+            # Copilot's do (copilot_resumes): never inside what started it. Placing the Router
+            # holds its role's lock, which resuming the Router takes again: the Router on Codex
+            # waited out its whole bound after a restart (bug: "Resuming … took over 180 s"),
+            # its message never answered.
+            # Those as it starts: one whose first turn begins meanwhile is not one to resume.
+            ids = self.gate_resumes(agent)
+            what = self.restart_words(agent)
+            entry.resuming = self.background(self.agent_resumes(agent, ids, what))
         return backend
+
+    async def agent_resumes(self, agent: str, ids: list[str], what: str):
+        """connect_agent's: the agent's interrupted sends checked, then its sessions at work
+        continued (resume_working), each in SESSION_RESUME seconds at most: those (`ids`) it
+        had to resume as it started. What is sent to one of them meanwhile waits until it is
+        done with it (session_for)."""
+        RESUMING.set(True)
+        try:
+            await self.reconcile_sends(agent, only=ids)
+            await self.resume_working(agent, what=what, at_work=ids)
+        except Exception:
+            logger.exception("Recovering the sessions of %s failed", agent)
+        finally:
+            for session_id in ids:
+                self.resumed(session_id)
+
+    def gate_resumes(self, agent: str) -> list[str]:
+        """The agent's sessions to resume now (to_resume), each with a gate that what is sent to
+        it waits at (session_for) until resume_working is done with it; those at work shown as
+        reconnecting until they go on (reconnecting). Returns them."""
+        ids = self.to_resume(agent)
+        for session_id in ids:
+            gate = self.resumes.get(session_id)
+            if gate is None or gate.is_set():
+                self.resumes[session_id] = asyncio.Event()
+        self.mark_resuming(agent, ids)
+        return ids
+
+    def restart_words(self, agent: str, own: bool = False) -> str:
+        """What restarted, as a session cut short by it is told: this app, or (connected
+        before) only the agent; `own`: the session's own process of the agent."""
+        backend, connections = self.connection(agent)
+        named = backend.capabilities.name if backend and agent != COPILOT_AGENT else "Copilot"
+        return f"{named} was restarted" if connections or own else "Chief of Staff restarted"
+
+    def mark_resuming(self, agent: str | None = None, ids: list[str] | None = None):
+        """The sessions at work on an agent (`agent`; else on any; `ids`: of these) as Chief of
+        Staff stopped or that agent did: not resumed yet, shown as reconnecting (view) until
+        they are."""
+        for row in self.store.open_sessions():
+            if ids is not None and row["id"] not in ids:
+                continue
+            if row["status"] != "working" and not self.store.get(f"cutshort:{row['id']}"):
+                continue
+            on = self.agent(row["id"])
+            if agent is None or on == agent:
+                self.reconnecting.setdefault(row["id"], on)
 
     async def check_agent(self, agent: str, backend: Any):
         """What Chief of Staff's checks rely on, checked once per version of another agent (its
@@ -2237,6 +2342,7 @@ class Runtime:
             if any(
                 rows[key]["status"] == "working"
                 or self.store.get(f"sending:{key}")
+                or self.store.get(f"cutshort:{key}")
                 or self.delivery.has_unsent(key)
                 for key in self.on_agent(agent, rows)
             ):
@@ -2245,6 +2351,10 @@ class Runtime:
                 except Exception as exc:
                     logger.warning("%s could not start.", agent, exc_info=True)
                     self.fail_working(agent, f"Could not resume after restart: {describe(exc)}")
+        # Resumed in the background (agent_resumes): waited for a little, as Copilot's are.
+        resuming = {entry.resuming for entry in self.agents.values() if entry.resuming}
+        if pending := {task for task in resuming if not task.done()}:
+            await asyncio.wait(pending, timeout=RESUME_WAIT)
 
     def at_work_on(self, agent: str) -> list[str]:
         """This agent's open sessions at work now: in a turn (also one its status does not say
@@ -3718,8 +3828,11 @@ class Runtime:
     def recovering(self) -> bool:
         """Whether there is something to recover: Chief of Staff not running (Copilot stopped
         or stopped answering, a start failed, the Router open in a terminal, no agent ready),
-        or running on another agent while Copilot is on but can't run."""
-        return not self.stopping and (not self.ready() or self.copilot_wanted())
+        or running on another agent while Copilot is on but can't run, or a session whose
+        resume was given up (resume_again)."""
+        return not self.stopping and (
+            not self.ready() or self.copilot_wanted() or bool(self.unresumed)
+        )
 
     def recover_delay(self) -> float:
         """recover's first wait: short while Chief of Staff can't run, longer while it runs."""
@@ -3770,6 +3883,8 @@ class Runtime:
                 await self.reconnect()
             elif self.copilot_wanted():
                 await self.restart_copilot()
+            if self.ready() and self.unresumed:
+                await self.resume_again()
 
     async def recover_now(self):
         """recover's step now (Copilot turned on, Claude set up); it goes on by itself after
@@ -9982,19 +10097,25 @@ class Runtime:
 
     def to_resume(self, agent: str) -> list[str]:
         """The agent's open sessions that resume_sessions resumes: mid-send when it stopped, or
-        at work."""
+        at work (a turn of it cut short: cut_short)."""
         sending = {key.removeprefix("sending:") for key in self.store.keys("sending:")}
+        cut = {key.removeprefix("cutshort:") for key in self.store.keys("cutshort:")}
         rows = self.store.open_sessions()
-        ids = [row["id"] for row in rows if row["status"] == "working" or row["id"] in sending]
+        ids = [
+            row["id"]
+            for row in rows
+            if row["status"] == "working" or row["id"] in sending or row["id"] in cut
+        ]
         return self.on_agent(agent, ids)
 
-    async def resume_sessions(self, reconnected: bool):
+    async def resume_sessions(self, reconnected: bool, ids: list[str] | None = None):
         """As Copilot connects: its sessions' interrupted sends checked, then those at work
-        continued (each in SESSION_RESUME seconds at most). What is sent to one of them waits
-        until it is done with it (session_for)."""
+        continued (each in SESSION_RESUME seconds at most; `ids`: those it had to resume as it
+        connected). What is sent to one of them waits until it is done with it (session_for)."""
         RESUMING.set(True)
+        what = self.restart_words(COPILOT_AGENT)
         try:
-            await self.reconcile_sends()
+            await self.reconcile_sends(only=ids)
             if reconnected:
                 # Copilot stopped (crashed, killed) and started again: what the turns it cut
                 # short used is in their logs, not in events that came by.
@@ -10002,15 +10123,106 @@ class Runtime:
             # Held for their folder's settings by an earlier version (or with the sandbox
             # on then): without it now, they go on (release_unguarded).
             await self.release_unguarded()
-            await self.resume_working()
+            await self.resume_working(what=what, at_work=ids)
         finally:
-            for gate in self.resumes.values():
-                gate.set()
+            for session_id in self.on_agent(COPILOT_AGENT, list(self.resumes)):
+                self.resumed(session_id)
 
     def resumed(self, session_id: str) -> None:
         """resume_sessions is done with this session."""
         if gate := self.resumes.get(session_id):
             gate.set()
+
+    def resume_over(self, session_id: str):
+        """A session to resume (reconnecting) went on, or will not: no longer shown as reconnecting,
+        nor tried again."""
+        self.unresumed.pop(session_id, None)
+        if self.reconnecting.pop(session_id, None) is not None and (
+            row := self.store.find_session(session_id)
+        ):
+            self.publish_session(row)
+
+    def resume_given_up(self, session_id: str):
+        """Its resume was given up (it took SESSION_RESUME seconds): not the end. It stays
+        reconnecting, and the one recovery path (recover) tries it again, waiting longer after
+        each try."""
+        self.unresumed[session_id] = self.unresumed.get(session_id, 0) + 1
+        if row := self.store.find_session(session_id):
+            self.publish_session(row)
+        self.recover_later()
+
+    async def resume_again(self):
+        """recover's step for the sessions whose resume was given up: each tried again (in the
+        background, bounded as at a start) where it runs now, once its agent does (started
+        first); each that goes on is resumed, one that still can't waits for the next step."""
+        for session_id in list(self.unresumed):
+            row = self.store.find_session(session_id)
+            if not row or row["closed_at"] or session_id not in self.reconnecting:
+                self.resume_over(session_id)
+                continue
+            if (trying := self.resume_tries.get(session_id)) and not trying.done():
+                continue
+            agent = self.agent(session_id)
+            try:
+                if self.role_key(row) in PLACED_ROLES:
+                    pass  # Placed where it can run as it opens (role_session).
+                elif agent != COPILOT_AGENT:
+                    await self.agent_ready(agent, row)
+                elif self.backend is None:
+                    continue  # (Copilot's own reconnect resumes it.)
+            except Exception:
+                logger.info("%s can't resume %s yet.", agent, session_id, exc_info=True)
+                continue
+            what = str((self.delivery.cut_record(session_id) or {}).get("why") or "")
+            self.resume_tries[session_id] = self.background(
+                self.resume_one(row, what or "Chief of Staff restarted")
+            )
+
+    def retry_resume(self, session_id: str):
+        """The owner's Retry on a session reconnecting: its next try now (one going on now is
+        not cut short)."""
+        if session_id not in self.reconnecting:
+            raise ValueError("It is not reconnecting.")
+        self.unresumed.setdefault(session_id, 0)
+        self.recover_later(at_once=True)
+
+    def drop_resume(self, session_id: str):
+        """Stopped while reconnecting (Workers.interrupt): it does not go on by itself; what
+        its cut-short turn was given waits for its next message (held), and it rests."""
+        if (record := self.delivery.cut_record(session_id)) is not None:
+            self.store.delete(f"cutshort:{session_id}")
+            mark = int(self.store.get(f"sent:{session_id}") or 0)
+            upto = min(int(record.get("upto") or 0), mark)
+            given = [
+                message["id"]
+                for message in self.store.prompts(session_id, after=int(record.get("after") or 0))
+                if message["id"] <= upto
+            ]
+            if given:
+                self.store.set(f"sent:{session_id}", str(given[0] - 1))
+        self.delivery.defer_pending(session_id)
+        if (trying := self.resume_tries.pop(session_id, None)) and not trying.done():
+            trying.cancel()
+        self.resume_over(session_id)
+        if (row := self.store.find_session(session_id)) and row["status"] == "working":
+            self.update_session(session_id, status="idle", activity="")
+
+    async def resume_one(self, row: dict, what: str):
+        """One session at work resumed (continue_working), in SESSION_RESUME seconds at most;
+        given up, it is tried again later (resume_given_up). What waits for it goes on either way
+        (resumed)."""
+        session_id = row["id"]
+        self.reconnecting.setdefault(session_id, self.agent(session_id))
+        token = RESUMING.set(True)
+        try:
+            done = await self.bounded(session_id, self.continue_working(row, what), "Resuming")
+        finally:
+            RESUMING.reset(token)
+        if done is None and not self.stopping:
+            self.resume_given_up(session_id)
+        else:
+            self.resume_over(session_id)
+        self.resumed(session_id)
 
     async def bounded(self, session_id: str, work: Awaitable, what: str) -> Any:
         """One session's part of resume_sessions, in SESSION_RESUME seconds at most: None when it
@@ -10042,13 +10254,19 @@ class Runtime:
             if row["status"] != "working":
                 self.resumed(session_id)
 
-    async def resume_working(self, agent: str = COPILOT_AGENT, only: list[str] | None = None):
+    async def resume_working(
+        self,
+        agent: str = COPILOT_AGENT,
+        only: list[str] | None = None,
+        what: str = "",
+        at_work: list[str] | None = None,
+    ):
         """After a restart, the agent's sessions that were mid-turn continue, with what they had
-        not handled. What restarted: this app, or (connected before) only the agent; `only`
-        these sessions: their own process of the agent."""
-        backend, connections = self.connection(agent)
-        named = backend.capabilities.name if backend and agent != COPILOT_AGENT else "Copilot"
-        what = f"{named} was restarted" if connections or only else "Chief of Staff restarted"
+        not handled (`at_work`: of those, these, at work as it started: one whose turn began
+        since is not one to resume); `only` these sessions. What restarted (`what`, as they are
+        told): else this app, or (connected before) only the agent; with `only` alone, their own
+        process of the agent."""
+        what = what or self.restart_words(agent, own=only is not None)
         rows = self.store.open_sessions()
         mine = set(self.on_agent(agent, [row["id"] for row in rows]))
         if only is not None:
@@ -10058,76 +10276,102 @@ class Runtime:
                 continue
             if self.shepherd.marked(row["id"]):
                 # Left in a shepherd step: never continued in its normal profile.
+                self.resume_over(row["id"])
+                self.store.delete(f"cutshort:{row['id']}")
                 await self.shepherd.crashed(row["id"])
                 continue
             if row["role"] == SLACK and not self.slack.configured():
+                self.resume_over(row["id"])
+                self.store.delete(f"cutshort:{row['id']}")
                 continue
-            if row["status"] != "working":
+            if row["status"] != "working" and not self.store.get(f"cutshort:{row['id']}"):
                 if self.delivery.has_unsent(row["id"]):
                     # Events held, or a send interrupted, when Chief of Staff stopped.
                     self.background(self.delivery.resume(row["id"]))
                 continue
+            if at_work is not None and row["id"] not in at_work:
+                continue  # Its turn began since: at work, not cut short.
             if agent == COPILOT_AGENT and self.too_large(row["id"]):
+                self.resume_over(row["id"])
+                self.store.delete(f"cutshort:{row['id']}")  # (Its fresh one is told.)
                 self.hold_too_large(row)  # Never resumed: it waits for a fresh one.
                 self.resumed(row["id"])
                 continue
-            await self.bounded(row["id"], self.continue_working(row, what), "Resuming")
-            self.resumed(row["id"])
+            await self.resume_one(row, what)
 
-    async def continue_working(self, row: dict, what: str):
-        """resume_working's for one session at work: it continues, told what it had not
-        handled."""
-        mark = int(self.store.get(f"idle:{row['id']}", "0"))
-        sent = int(self.store.get(f"sent:{row['id']}") or 0)
-        since = [
-            message
-            for message in self.store.messages(row["id"], after=mark)
-            if "prompt" in message["meta"]
-        ]
-        given = [message for message in since if message["id"] <= sent]
-        # Sent, but not in its conversation (Copilot stopped before it wrote them down):
-        # they go out again in full, as messages it never received.
-        received = await self.delivery.received(row["id"], given)
-        if resent := given[len(received) :]:
-            self.store.set(f"sent:{row['id']}", str(resent[0]["id"] - 1))
-        # Messages it never received go out as they are, with the note; only the rest
-        # are quoted.
-        unhandled = [message["meta"]["prompt"] for message in received]
-        # Quoted, their tasks are taken up (their instructions show only as quotes).
+    def cut_short(self, session_id: str, why: str = "Chief of Staff restarted"):
+        """A turn of it in flight cut short (Chief of Staff stopping; or found at work after it
+        or its agent stopped abruptly): what it was given since it was last idle, up to what was
+        sent, is kept to go to it again once it is open again, unless its own record shows it
+        finished (Delivery.settle_cut). The first one is kept until then."""
+        key = f"cutshort:{session_id}"
+        if self.store.get(key):
+            return
+        after = int(self.store.get(f"idle:{session_id}") or 0)
+        upto = int(self.store.get(f"sent:{session_id}") or 0)
+        self.store.set(key, json.dumps({"after": after, "upto": upto, "why": why}))
+
+    def cut_short_all(self):
+        """Chief of Staff stops: each session with a turn in flight (working, or a worker that
+        asked the owner and whose turn goes on: waiting) has what that turn was given marked to
+        go to it again after the restart (cut_short). (A send under way is checked as it was:
+        reconcile_sends.)"""
+        for row in self.store.open_sessions():
+            state = self.states[row["id"]]
+            if row["status"] == "working" or (
+                row["status"] == "waiting" and state.busy and not state.held
+            ):
+                with suppress(Exception):
+                    self.cut_short(row["id"])
+
+    async def continue_working(self, row: dict, what: str) -> bool:
+        """resume_working's for one session cut short at work (cut_short): opened again, it gets
+        what it had not finished, once, with a note (Delivery.settle_cut); its own record showing
+        it finished all of it, its turn's end is taken now. True once done (failed with why when
+        it can't be resumed); cancelled when its bound runs out."""
+        session_id = row["id"]
+        self.cut_short(session_id, what)
+        record = self.delivery.cut_record(session_id) or {}
+        upto = int(record.get("upto") or 0)
+        since = self.store.prompts(session_id, after=int(record.get("after") or 0))
+        given = [message for message in since if message["id"] <= upto]
+        # What it goes on with: the tasks of what it was given are taken up again.
         if row["role"] == WORKER and (
             named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
         ):
-            self.took_up(row["id"], named, switch=False)
+            self.took_up(session_id, named, switch=False)
         if any(message["kind"] == "owner" for message in since):
-            self.states[row["id"]].owner_turn = True
-        note = f"{what} while you were working. Continue where you left off."
-        if unhandled:
-            # The newest whole (a task's instructions, say); older ones cut.
-            quoted = unhandled[-10:]
-            note += (
-                " Messages you received since you were last idle (some may already be "
-                "handled), quoted:\n\n"
-                + "\n\n".join([text[:1500] for text in quoted[:-1]] + quoted[-1:])
-            )
-        if resent:
-            note = (
-                note + "\n\nThe message(s) before this note had not reached you yet: they "
-                "are new to you."
-                if unhandled
-                else f"{what} just after sending you the message(s) above, before they "
-                "reached you: they are new to you."
-            )
-        prompt = wrap("system", "restart", note)
+            self.states[session_id].owner_turn = True
         try:
+            try:
+                session = await self.session_for(session_id)
+            except SettingsChangedError:
+                # Its folder's settings changed meanwhile: it waits for the owner, what it was
+                # cut short on kept for when they say to use them (settings_go_on).
+                self.states[session_id].owner_turn = False
+                await self.settings_stop(session_id)
+                return True
+            async with self.states[session_id].sending:
+                settled = await self.delivery.settle_cut(session_id, session)
+            if settled is None:
+                return True  # Settled meanwhile (sent with a message that came first).
+            if not settled.note:
+                # Its record shows it finished: its turn's end is taken now, as if seen.
+                self.states[session_id].owner_turn = False
+                self.events.idle(self.store.session(session_id), None)
+                return True
             await self.delivery.deliver(
-                row["id"],
-                prompt,
+                session_id,
+                wrap("system", "restart", settled.note),
                 kind="notice",
-                display=f"{what}; asked the session to continue.",
+                display=f"{settled.why}; asked the session to continue.",
+                meta={"restart": True} if settled.first else None,
             )
         except Exception as exc:
-            self.states[row["id"]].owner_turn = False
+            self.states[session_id].owner_turn = False
+            self.store.delete(f"cutshort:{session_id}")
             self.fail(row, f"Could not resume after restart: {describe(exc)}")
+        return True
 
     # Messages
 
@@ -10229,6 +10473,7 @@ class Runtime:
         )
 
     def fail(self, row: dict, message: str):
+        self.resume_over(row["id"])
         if (
             self.agents
             and not self.on_copilot(row["id"])
@@ -11555,6 +11800,18 @@ class Runtime:
         if asking and not row["closed_at"]:
             text = next(iter(asking.values()))
             row = {**row, "status": "waiting", "activity": f"Waiting for you: {text[:80]}"}
+        elif (
+            (agent := self.reconnecting.get(row["id"]))
+            and row["status"] == "working"
+            and not row["closed_at"]
+        ):
+            # Not at work until it is resumed: nothing of it runs (nothing to stop).
+            row = {
+                **row,
+                "status": "resuming",
+                "activity": f"Reconnecting to {agents.display(agent)}…",
+                "retry": row["id"] in self.unresumed,
+            }
         return {
             **row,
             "slack": bool(row["slack"]),

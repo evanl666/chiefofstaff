@@ -21,6 +21,32 @@
   reports*, a draft's *Result of*. A worker's columns the page never reads are left out too.
   Now 340 KB, read as fast as before; nothing on the page changes.
 
+No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
+again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
+
+- **The Router answers what you sent just before a restart.** On 0.1.60, the Router on Codex,
+  restarted 3 seconds after your message (an update's restart), never answered it: resuming it
+  waited for its own placement, which the same start held, until its three minutes ran out
+  ("Resuming … took over 180 s: given up"); nothing tried again, and Home said *Thinking…* with
+  *Stop* though no turn ran. The Router now resumes in seconds on every agent.
+- **A turn cut short by a restart goes on, once.** As Chief of Staff stops, each session at work
+  (also a worker that asked you something mid-turn) has what that turn was given kept; after the
+  restart (or a crash, of Chief of Staff or of its agent), once its agent has it open again, it
+  gets that again, once, with one line in its chat (*Chief of Staff restarted; asked the session
+  to continue.*): your message to the Router, the Router's to a worker, a report to the Router.
+  What its agent's own record shows it finished (Codex's turn completed, Copilot's or Claude's
+  final answer) is not given again. Your message says *Waiting to be sent* until it goes.
+- **Reconnecting, not thinking.** Until it is resumed, a session says *Reconnecting to Codex…*
+  (or its agent's name) on Home and in its chat, with no *Stop*. A resume given up after three
+  minutes is not the end: it is tried again by itself, waiting longer each time, and *Retry*
+  tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
+  for its next message.
+- **Stopping is shorter with several agents on.** Each agent's processes end before Chief of
+  Staff does, all together (one agent after another before).
+- **Update and restart waits a little, and says for what.** *Restarting after the Router's turn
+  ends…* (or a worker's): two minutes at most; a turn still running then goes on after the
+  restart, as above. It waited for every turn to end, however long.
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
