@@ -409,8 +409,11 @@ for 1, 7 or 30 days (7 by default). Nothing is shared until you click *Create li
   frame. Who shared it is GitHub's owner of the gist, never what the card says.
 - **Ending:** *Revoke* (on the card's *Share…*, or Settings → You → *Shared links*) deletes the
   gist, and the link stops working at once; at expiry Chief of Staff deletes it too (at its next
-  start if it was off), and an expired link opens nowhere even while its gist exists. What
-  people already saw, copied or opened in their own Chief of Staff can't be taken back.
+  start if it was off), and an expired link opens nowhere even while its gist exists. A link a
+  stop cut short while it was being made is looked for on GitHub by its share id at the next start,
+  and again every few minutes until GitHub answers, and its gist deleted; a request to GitHub
+  under way ends with Chief of Staff. What people already saw, copied or opened in their own Chief
+  of Staff can't be taken back.
 - **Without `gh`:** *Download HTML file* saves the same card as one file with no script, which
   can't expire or be revoked.
 - **Opening one here:** a share link pasted alone into Home's message box is opened by Chief of
