@@ -41,6 +41,8 @@ import live_e2e
 from agent_paths import without_agents
 from live_e2e import App, log, transcript, wait_for
 
+from chiefofstaff.store import Store
+
 BASE_PORT = int(os.environ.get("LIVE_RESTART_PORT", "21560"))
 MODEL = os.environ.get(
     "LIVE_RESTART_MODEL", os.environ.get("LIVE_COPILOT_MODEL", "claude-haiku-5.5")
@@ -177,6 +179,17 @@ async def restart_mid_turn(app: App, name: str, agent: str) -> str:
     raise AssertionError("not tried")
 
 
+def quiet(data: Path):
+    """No desktop notification from this instance, from its first moment (never on the owner's
+    screen): saved before it starts."""
+    store = Store(data)
+    try:
+        settings = store.settings().model_copy(update={"mac_notifications": False})
+        store.save_settings(settings.model_copy(update={"digest_time": ""}))
+    finally:
+        store.close()
+
+
 def owner_files(action: str, record: Path):
     done = subprocess.run(
         [sys.executable, str(OWNER_FILES), action, str(record)], capture_output=True, text=True
@@ -198,6 +211,7 @@ async def scenario(name: str, root: Path, token: str) -> str:
         hidden = frozenset({"claude"})
         env["PATH"] = without_agents(os.environ.get("PATH", ""), root / name / "path", hidden)
     app = App(data, root / f"{name}.log", env, agents=agent != "copilot")
+    quiet(data)
     try:
         await app.start()
         await ready(app, name)
