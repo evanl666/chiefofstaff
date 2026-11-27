@@ -372,8 +372,15 @@ def create_app(
     async def state():
         """The page's state, as the page reads it (pagestate.py): finished tasks' long words
         cut, and asked for once each (/api/task-texts)."""
-        found = page_state(runtime.snapshot())
-        return {**found, "data_directory": str(directory), "home": str(Path.home())}
+        found = {**page_state(runtime.snapshot()), "data_directory": str(directory)}
+        found["home"] = str(Path.home())
+        # Written out at once, as JSONResponse writes it: it is plain JSON already, and the page
+        # reads it after each burst of events. (FastAPI's own conversion took longer than the
+        # rest; it still writes anything plain JSON cannot hold.)
+        try:
+            return JSONResponse(found)
+        except (TypeError, ValueError):
+            return found
 
     @app.get("/api/task-texts")
     async def task_texts(ids: str = ""):

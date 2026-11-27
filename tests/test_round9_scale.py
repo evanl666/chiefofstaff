@@ -436,3 +436,20 @@ def test_the_pages_state_cuts_finished_works_long_words_and_gives_them_once(http
         del back["texts_key"]
         assert back == shown[task["id"]]
     assert http.get("/api/task-texts", params={"ids": "tmissing"}).json() == {}
+
+
+def test_the_pages_state_is_written_out_as_before_whatever_it_holds(http, monkeypatch):
+    """Written out at once as plain JSON (FastAPI's own conversion took longer than building it);
+    what plain JSON cannot hold (a time, a set) is still written as FastAPI writes it."""
+    from datetime import UTC, datetime
+
+    runtime: Runtime = http.app.state.runtime
+    plain = http.get("/api/state")
+    assert plain.status_code == 200 and plain.headers["content-type"] == "application/json"
+    assert plain.headers["cache-control"] == "no-store"
+    whole = runtime.snapshot()
+    monkeypatch.setattr(
+        runtime, "snapshot", lambda: {**whole, "when": datetime(2026, 11, 27, tzinfo=UTC)}
+    )
+    odd = http.get("/api/state")
+    assert odd.status_code == 200 and odd.json()["when"] == "2026-11-27T00:00:00+00:00"
