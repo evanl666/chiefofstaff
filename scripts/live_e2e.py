@@ -169,7 +169,24 @@ class App:
                     raise
                 await asyncio.sleep(2)
         response.raise_for_status()
-        return response.json()
+        found = response.json()
+        if path.split("?", 1)[0] == "/api/state":
+            found = await self.whole(found)
+        return found
+
+    async def whole(self, state: dict) -> dict:
+        """The state as the page has it once it asked for what the state cut (pagestate.py): a
+        finished task's long result and its earlier reports, each put back whole, as checks read
+        them."""
+        cut = [task for task in state.get("tasks", []) if task.get("texts_key")]
+        if not cut:
+            return state
+        texts = await self.get(f"/api/task-texts?ids={','.join(task['id'] for task in cut)}")
+        for task in cut:
+            if found := texts.get(task["id"]):
+                task.pop("texts_key")
+                task.update(result=found["result"], earlier_results=found["earlier_results"])
+        return state
 
     async def post(self, path: str, body=None):
         response = await self.http.post(path, json=body)
