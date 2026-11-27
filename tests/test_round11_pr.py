@@ -10,7 +10,7 @@ import pytest
 from conftest import Harness, call_tool, settle
 from test_round7_split import shell
 
-from chiefofstaff.models import Settings
+from chiefofstaff.models import DraftDecision, Settings
 from chiefofstaff.store import now
 from chiefofstaff.task_actions import FAILING_READS, NO_TASK
 
@@ -572,3 +572,103 @@ async def test_work_reported_as_a_new_task_takes_the_pr_it_opened_with_it(harnes
     assert "https://store.acme.dev/apps" in shown(runtime, made)["links"]
     told = [m for m in harness.store.messages(harness.router_id) if m["kind"] == "inbound"]
     assert told[-1]["meta"]["task_id"] == made["id"]
+
+
+async def billing_refused_pr(harness, number=17, **changes):
+    """Owner report 0.1.61 (sly-town#17): a PR the task opened whose only checks that did not
+    pass GitHub never started (the account's Actions minutes used up), after its worker's own
+    tests passed. The task, and the merge card it gets."""
+    runtime = await harness.connect()
+    harness.own_pull("acme/app", number)
+    billing_refused(harness, number)
+    view = json.loads(refused(number)) | {"headRefOid": "2540e83"} | changes
+    harness.gh_replies[f"pr view {url(number)}"] = json.dumps(view)
+    worker, task = await spawn(runtime, harness.router_id, "Leave the betting games out")
+    shell(harness, worker, "t1", "npm test", "535 passed, 0 failed")
+    await call_tool(runtime, "report", worker, status="done",
+                    summary=f"Opened {url(number)}; npm test passes.")  # fmt: skip
+    await settle(runtime)
+    await runtime.task_actions.refresh_prs(task["id"])
+    return runtime, task
+
+
+async def test_a_pr_whose_ci_github_never_started_is_offered_to_merge_saying_so(harness):
+    """Owner report 0.1.61: a PR whose CI GitHub refused to start for billing got no Merge
+    card (its checks were not "passing", GitHub said UNSTABLE), and the Router told the owner
+    to merge it on GitHub. It gets its card, which says CI didn't run and why, and what its
+    worker checked itself; the decision is the owner's."""
+    runtime, task = await billing_refused_pr(harness)
+    [card] = cards(harness)
+    target = card["target"]
+    assert (target["task_id"], target["head"], target["checks"]) == (
+        task["id"],
+        "2540e83",
+        "not_run",
+    )
+    assert target["not_run_why"] == "GitHub Actions minutes are used up"
+    assert target["not_run"] == ["rules-and-server", "e2e"]
+    assert target["verified"] == ["npm test passed"]
+    listed = json.loads(
+        (await call_tool(runtime, "list_sessions", harness.router_id)).text_result_for_llm
+    )["needs_owner"]
+    [seen] = [item for item in listed["cards"] if item["id"] == card["id"]]
+    assert seen["to"] == "acme/app#17", "the Router sees its Merge card"
+    assert seen["ci"] == (
+        "CI didn't run (GitHub Actions minutes are used up): the owner decides on its card"
+    )
+    # Away, its notification says so too.
+    assert runtime.connector.describe({"draft": card})[1] == "Phone app (CI didn't run)"
+    # Once per head: read again, the same card.
+    await runtime.task_actions.refresh_prs(task["id"])
+    assert [found["id"] for found in cards(harness)] == [card["id"]]
+
+
+@pytest.mark.parametrize(
+    ("changes", "why"),
+    [
+        ({"mergeStateStatus": "DIRTY"}, "merge conflicts"),
+        ({"reviewDecision": "CHANGES_REQUESTED"}, "changes requested"),
+        ({"isDraft": True}, "a draft"),
+        ({"mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED"}, "a review due"),
+    ],
+)  # fmt: skip
+async def test_a_pr_whose_ci_never_ran_but_that_github_holds_back_gets_no_card(
+    harness, changes, why
+):
+    await billing_refused_pr(harness, **changes)
+    assert not cards(harness), why
+
+
+async def test_a_check_that_ran_and_failed_still_gets_no_merge_card(harness):
+    """Beside checks GitHub never started, one that ran for minutes and failed: no card."""
+    view = json.loads(refused(17))
+    ran = {"__typename": "CheckRun", "name": "lint", "workflowName": "CI", "status": "COMPLETED",
+           "conclusion": "FAILURE", "detailsUrl": "https://github.com/acme/app/actions/runs/45/job/9",
+           "startedAt": "2999-01-01T00:00:17Z", "completedAt": "2999-01-01T00:04:19Z"}  # fmt: skip
+    runtime, task = await billing_refused_pr(
+        harness, statusCheckRollup=[*view["statusCheckRollup"], ran]
+    )
+    assert not cards(harness)
+    [pr] = shown(runtime, task)["receipts"]["prs"]
+    assert (pr["checks"], pr["failing"]) == ("failing", ["lint"])
+
+
+async def test_branch_rules_that_require_the_ci_that_never_ran_say_so_at_merge(harness):
+    """Offered though GitHub blocks it (a check its branch requires never ran): Merge says
+    GitHub's reason, in words, and the card stays for when the checks run."""
+    runtime, _ = await billing_refused_pr(harness, mergeStateStatus="BLOCKED")
+    [card] = cards(harness)
+    harness.gh_replies["api repos/acme/app"] = json.dumps({"allow_squash_merge": True})
+    harness.gh_replies["pr merge"] = RuntimeError(
+        "GitHub request failed: X Pull request acme/app#17 is not mergeable: the base branch "
+        "policy prohibits the merge."
+    )
+    with pytest.raises(RuntimeError, match="require checks that didn't run"):
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="send"))
+    await settle(runtime)
+    kept = harness.store.draft(card["id"])
+    assert kept["status"] == "pending"
+    assert kept["outcome"] == (
+        "Not merged: GitHub's rules for its branch require checks that didn't run (GitHub "
+        "Actions minutes are used up): it can merge once they run and pass."
+    )

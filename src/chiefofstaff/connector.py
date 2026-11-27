@@ -78,6 +78,7 @@ CHECK_WORDS = {
     "failing": "checks fail",
     "pending": "checks still running",
     "none": "no checks",
+    "not_run": "CI didn't run",
 }
 # A folder choice's answer for no project (the card's "No project").
 NO_PROJECT_WORDS = {"none", "no project", "\u65e0"}
@@ -150,6 +151,7 @@ CHINESE = {
         "checks fail": "检查失败",
         "checks still running": "检查还在运行",
         "no checks": "没有检查",
+        "CI didn't run": "CI 没有运行",
         "Which folder for “{title}”": "“{title}”用哪个文件夹",
         "Folders: ": "文件夹:",
         "none: no project, or a folder's path": "none:不用项目,或写文件夹路径",

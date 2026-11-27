@@ -91,6 +91,8 @@ YOUR_OK = frozenset(
 )
 
 
+# GitHub refusing a merge for its branch's rules (a check it requires), as gh says it.
+BRANCH_RULES = re.compile(r"base branch policy|required status check", re.IGNORECASE)
 # A merge card while GitHub merges its PR's stack in the background, and once it has been at it
 # longer than Chief of Staff follows it.
 MERGING = "Merging: GitHub merges its stack in the background; this card says when it's done."
@@ -1595,7 +1597,16 @@ class Drafts:
     def merge_failed(self, draft: dict, exc: BaseException) -> str:
         """A merge GitHub refused, said on its card (gone when new commits came: it is offered
         again once they are ready); the PR read again at once. Why, in words."""
-        reason, moved = merge_refusal(describe(exc)[:600])
+        said = describe(exc)[:600]
+        reason, moved = merge_refusal(said)
+        target = draft["target"]
+        if target.get("checks") == "not_run" and BRANCH_RULES.search(said):
+            # Offered though its CI didn't run, and the branch's rules want it to have run.
+            why = target.get("not_run_why") or "GitHub didn't start it"
+            reason = (
+                f"GitHub's rules for its branch require checks that didn't run ({why}): it can "
+                "merge once they run and pass."
+            )
         if moved:
             # Merge is only ever of the head the card shows: this card is done, and the PR
             # is offered again once its new commits are ready.
@@ -1951,7 +1962,13 @@ class Drafts:
             to = " ".join(x for x in (target.get("to"), target.get("where")) if x)
         elif draft["kind"] == "decision":
             answers = target.get("question") or ""
+        elif draft["kind"] == "merge":
+            to = target.get("label") or ""
         entry: dict = {"id": draft["id"], "kind": kind}
+        if draft["kind"] == "merge" and target.get("checks") == "not_run":
+            # Offered though its CI didn't run: the owner decides on what the card says.
+            why = target.get("not_run_why") or "GitHub didn't start it"
+            entry["ci"] = f"CI didn't run ({why}): the owner decides on its card"
         if target.get("replaces"):
             # A reconsideration: the decision in force its answer replaces.
             entry["reconsiders"] = f"{target['replaces']}: {target.get('previous', '')}"[:300]

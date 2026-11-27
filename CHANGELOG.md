@@ -10,6 +10,12 @@ runs every agent.
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
 
+- **A PR whose CI never ran is offered to merge.** GitHub refused to run a PR's CI (the
+  account's Actions minutes used up), so it got no Merge card, and the Router told you to merge
+  it on GitHub. A PR of yours whose only checks that did not pass never ran is now on *Your OK*
+  as *Merge? · CI didn't run*, with why and what its worker checked itself (*npm test passed*):
+  merging is your call. Once per commit, as before; a check that ran and failed still gets no
+  card, and when its branch's rules require the checks that never ran, *Merge* says so.
 - **The Router answers what you sent just before a restart.** On 0.1.60, the Router on Codex,
   restarted 3 seconds after your message (an update's restart), never answered it: resuming it
   waited for its own placement, which the same start held, until its three minutes ran out

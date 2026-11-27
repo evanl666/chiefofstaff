@@ -593,7 +593,15 @@ function okLines(draft) {
     const what = `${target.label.replace(/^[^/]+\//, "")}${target.title ? ` “${target.title}”` : ""}`;
     // GitHub merging its stack in the background: said in its line, the PR to look at.
     if (merging(draft)) return [{ kind: "Merging", text: `${what} · ${draft.outcome.replace(/^Merging: /, "")}`, main: { text: "Open PR", href: target.url }, more: [{ text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
-    return [{ kind: "Ready to merge", text: `${what} · ${target.checks === "none" ? "no checks" : "checks pass"}${stackBelow(target)}`, main: { text: mergeButton(target), body: { action: "send" }, done: `Merging ${target.label}…` }, more: [{ text: "Open PR", href: target.url }, { text: "Not now", body: { action: "reject" }, done: "Not merged." }] }];
+    const more = [{ text: "Open PR", href: target.url }, { text: "Not now", body: { action: "reject" }, done: "Not merged." }];
+    if (target.checks === "not_run") {
+      // Its CI never ran: why first, then what its worker checked itself (its title in Details),
+      // and GitHub's reason once its branch's rules held a Merge back. Merge is the owner's call.
+      const checked = target.verified?.length ? `its worker checked: ${target.verified.join(", ")}` : "its worker checked nothing itself";
+      const refused = /^Not merged: /.test(draft.outcome || "") ? ` · ${draft.outcome}` : "";
+      return [{ kind: "Merge? · CI didn't run", text: `${target.label.replace(/^[^/]+\//, "")} · ${target.not_run_why || "GitHub didn't start it"} · ${checked}${stackBelow(target)}${refused}`, main: { text: mergeButton(target), body: { action: "send" }, done: `Merging ${target.label}…` }, more }];
+    }
+    return [{ kind: "Ready to merge", text: `${what} · ${target.checks === "none" ? "no checks" : "checks pass"}${stackBelow(target)}`, main: { text: mergeButton(target), body: { action: "send" }, done: `Merging ${target.label}…` }, more }];
   }
   // A Codex or Claude worker's: Sign in runs that agent's own command for the owner (agentsetup.js).
   const runs = target.agent && target.command ? { text: "Sign in", run: () => openMcpSignIn(draft) } : null;
@@ -700,21 +708,28 @@ export function draftCard(draft) {
 // said on its card and its button once it is known.
 const stackBelow = (target) => (target.stack_below?.length ? ` · with ${target.stack_below.map((pr) => `#${pr.number}`).join(", ")} below it` : "");
 const mergeButton = (target) => (target.stack_below?.length ? `Merge all ${target.stack_below.length + 1}` : "Merge");
+// Its checks in a few words; CI GitHub never started (task_actions.offer_merge) says why.
+const checksWords = (target) => (target.checks === "not_run" ? `CI didn't run: ${target.not_run_why || "GitHub didn't start it"}` : target.checks === "none" ? "No checks" : "Checks pass");
 // GitHub merging its stack in the background (drafts.py MERGING, STILL_MERGING).
 const merging = (draft) => /^(Merging:|GitHub is still merging)/.test(draft.outcome || "");
 // A PR of the owner's that GitHub would merge now (checks pass, nothing blocking): merge it
-// from here, as it was when offered (anything pushed since stops the merge).
+// from here, as it was when offered (anything pushed since stops the merge). One whose CI
+// GitHub never started says so and why, and what its worker checked itself: the owner's call.
 function mergeCard(draft) {
   const target = draft.target;
   const error = el("span", { class: "error" });
   const link = el("a", { href: target.url, target: "_blank", rel: "noreferrer", title: "Open on GitHub", text: target.label.replace(/^[^/]+\//, "") });
   const review = { APPROVED: "Approved", REVIEW_REQUIRED: "No review yet" }[target.review] || "";
+  const notRun = target.checks === "not_run";
+  const checked = (target.verified || []).join(", ");
   const node = card(
     draft,
     "merge",
-    ["Ready to merge · ", link],
+    [notRun ? "Merge? · " : "Ready to merge · ", link],
     target.title ? el("div", { class: "note strong", text: `“${target.title}”` }) : null,
-    el("div", { class: "note", text: [target.checks === "none" ? "No checks" : "Checks pass", review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ") }),
+    notRun ? el("div", { class: "note", title: (target.not_run || []).join(", "), text: checksWords(target) }) : null,
+    notRun ? el("div", { class: "note", text: checked ? `Its worker checked: ${checked}` : "Its worker checked nothing itself" }) : null,
+    el("div", { class: "note", text: [notRun ? "" : checksWords(target), review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ") }),
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
   );
   const decide = decider(draft, node, error);
