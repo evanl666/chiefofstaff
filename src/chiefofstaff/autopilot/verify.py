@@ -77,15 +77,16 @@ INSTALLS = (
 )
 EXIT = re.compile(r"COS-EXIT-(-?\d+)\s*$", re.MULTILINE)
 # What a step that failed for want of the network or of what its sandbox holds says: no
-# verdict on its code (a test that downloads, a tool that writes outside its caches, uv before
-# 0.9.29, which crashes in Copilot's macOS sandbox: caches.UV_FIXED).
+# verdict on its code (a test that downloads, a tool that writes outside its caches).
 UNREACHED = re.compile(
     r"Operation not permitted|sandbox is active and blocked|network connectivity is disabled"
-    r"|Attempted to create a NULL object"
     r"|nodename nor servname|Name or service not known|Temporary failure in name resolution"
     r"|Could not resolve host|getaddrinfo|ENOTFOUND|EAI_AGAIN|Network is unreachable",
     re.IGNORECASE,
 )
+# uv before 0.9.29 crashing in Copilot's macOS sandbox (caches.UV_FIXED): said with its fix.
+UV_CRASHED = re.compile(r"Attempted to create a NULL object")
+UV_FIX = "Couldn't verify: {uv} crashes in the sandbox; uv {fixed} or newer fixes it"
 # How long a verification waits for workers' caches to be filled from the owner's, the first
 # time (Runtime.seed_caches: clones, seconds).
 SEED_SECONDS = 120
@@ -367,6 +368,11 @@ async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> 
         return failed("its checks changed its committed files")
     if len(results) < len(installs) + len(steps) or any(r["exit"] != 0 for r in results):
         bad = next((r for r in results if r["exit"] != 0), None)
+        if bad and UV_CRASHED.search(bad["output"] or ""):
+            found = runtime.cache_facts.get("old_uv") or ""
+            uv = f"uv {found}" if found else "this computer's uv"
+            fixed = ".".join(str(part) for part in caches.UV_FIXED)
+            return failed(UV_FIX.format(uv=uv, fixed=fixed))
         if bad is None or bad["exit"] is None or bad["command"] in installs:
             return failed(OFFLINE)
         if UNREACHED.search(bad["output"] or ""):

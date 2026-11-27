@@ -324,6 +324,41 @@ async def test_a_result_that_does_not_verify_waits_for_the_owner(
     assert why in runtime.snapshot()["autopilot"]["set_aside"][info["task_id"]]
 
 
+UV_CRASH = (
+    "thread 'main2' panicked at …/system-configuration-0.6.1/src/dynamic_store.rs:154:1:\n"
+    "Attempted to create a NULL object.\n"
+)
+
+
+@pytest.mark.parametrize(("known", "said"), [("0.9.21", "uv 0.9.21"), ("", "this computer's uv")])
+@pytest.mark.parametrize("install", [False, True])
+async def test_uv_crashing_in_the_sandbox_is_said_with_its_fix(
+    tmp_path, git_repo, offline, known, said, install
+):
+    """Live (B1, uv 0.9.21): uv before 0.9.29 crashes in Copilot's macOS sandbox, and the result
+    waited for the owner as merely not verifiable offline. Its card says what to do: the uv it
+    found, and that 0.9.29 or newer fixes it (its install step's crash too)."""
+    harness, runtime = await project(tmp_path, git_repo)
+    runtime.cache_facts["old_uv"] = known
+    if install:
+        (git_repo / "uv.lock").write_text("version = 1\n")
+        git(git_repo, "add", ".")
+        git(git_repo, "commit", "-qm", "lock")
+
+    async def crashed(copy, lines):
+        return [{"command": lines[0], "exit": 101, "output": UV_CRASH, "seconds": 0.1,
+                 "sandboxed": True}]  # fmt: skip
+
+    runtime.autopilot.runner = crashed
+    info, _ = await finished(harness, runtime, git_repo)
+    await verified(runtime)
+    assert runtime.tasks.get(info["task_id"])["status"] == "review"
+    [left] = entries(runtime, "not-done")
+    why = f"Couldn't verify: {said} crashes in the sandbox; uv 0.9.29 or newer fixes it"
+    assert left["why"]["reason"] == why, left["why"]
+    assert why in runtime.snapshot()["autopilot"]["set_aside"][info["task_id"]]
+
+
 async def test_without_an_offline_sandbox_nothing_is_verified(tmp_path, git_repo):
     harness, runtime = await project(tmp_path, git_repo)
     runtime.sandbox_host = False
