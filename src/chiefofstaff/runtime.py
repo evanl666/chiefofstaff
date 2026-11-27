@@ -1260,6 +1260,7 @@ class Runtime:
         await self.habits.stop()
         await self.connector.stop()
         await self.claude_setup.stop()
+        await self.setups.stop()  # (A sign-in, install or update left running: ended.)
         for agent in self.agents:
             await self.disconnect_agent(agent)
         await self.disconnect()

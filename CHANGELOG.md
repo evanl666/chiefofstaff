@@ -35,6 +35,9 @@ Staff.
   environment of its own, Chief of Staff updates itself (`pipx upgrade chiefofstaff`, or that
   environment's `uv pip` or `pip`) and starts the new version in its place, as `uv tool` and `uvx`
   installs did. A system's Python, and Windows, still show the command.
+- **Nothing left running when Chief of Staff stops.** A sign-in, install or update still under way
+  as you stop Chief of Staff ends with it, as *Cancel* does: a sign-in no longer keeps waiting on
+  its local port.
 
 ## 0.1.60 (2026-11-26)
 

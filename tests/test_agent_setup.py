@@ -365,6 +365,22 @@ async def test_an_agent_turned_off_or_stopped_while_it_starts_is_not_left_runnin
         await runtime.stop()
 
 
+async def test_a_sign_in_still_running_ends_as_chief_of_staff_stops(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Chief of Staff stopped while a sign-in waits for the owner: its process ends with it (as
+    Cancel ends it), never left waiting on its local port."""
+    monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+    _, runtime = await started(tmp_path)
+    await runtime.setups.sign_in("codex")
+    await until(lambda: runtime.setups.view()["codex"].get("url"))
+    process = runtime.setups.runs["codex"].process
+    assert process is not None
+    await runtime.stop()
+    await until(lambda: not alive(process.pid), 10)
+    assert runtime.setups.runs["codex"].state == "cancelled"
+
+
 async def test_a_failed_install_says_its_last_words(tmp_path, monkeypatch, quick):
     script = "echo 'curl: (6) Could not resolve host: chatgpt.com' >&2; exit 6"
     monkeypatch.setattr(agentsetup, "INSTALLERS", {"codex": (("script", script, ""),),

@@ -715,6 +715,15 @@ class Setups:
             self.runtime.publish_state()
         return run.view()
 
+    async def stop(self):
+        """Chief of Staff stops: each run still going ends with it (its process group), as
+        Cancel does; none is left waiting (a sign-in on its local port, say)."""
+        for run in list(self.runs.values()):
+            if run.state == "running":
+                run.finish("cancelled")
+                with contextlib.suppress(Exception):
+                    await run.end()
+
     async def ready_now(self, name: str) -> bool:
         if name == agents.COPILOT:
             return await self.copilot_up()
