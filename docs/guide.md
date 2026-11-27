@@ -1070,10 +1070,10 @@ replaced or withdrawn since), tasks finished, and how many things need you, coun
 
 ## Autopilot
 
-Off by default. Tick *Autopilot: Chief of Staff acts for you while it's on, instead of waiting*
-in Settings → General; a small group comes under it: *Credits a day* (100 by default), *Acts in*
-(*All your projects*, or *Only these…*: one `owner/name` per line), *While Autopilot is on,
-workers ask first* (on), and *Autopilot record* once it has run.
+Off by default. Tick *Autopilot* in Settings → General, under *On its own*; its *Options* hold
+*Credits a day* (100 by default), *Acts in* (*All your projects*, or *Only these…*: one
+`owner/name` per line), *While Autopilot is on, workers ask first* (on), and *Autopilot record*
+once it has run.
 
 **Turning it on.** Home's *Autopilot* menu: *For 2 hours*, *Until 9:00 AM* (your daily summary's
 time) or *Until I turn it off*. Or write one of its commands to the Router, exactly:
@@ -1094,9 +1094,14 @@ for you* with **Stop**, and the sidebar says *Autopilot until 6:00 PM*.
   answered: Postgres, because you said “Postgres for v1”*): one that names the option it chose
   (and no other) or holds its whole answer, from words of yours where nothing says no, in
   English or Chinese (*Redis? No.* never means Redis; *Use Postgres, not Redis* waits for you).
-  It decides with the Router's model and effort (Settings → Models), on Copilot. What workers
-  note, what the Router writes or decides, files in a repository, away answers, Send to Chief
-  notes and Slack messages are never your word.
+  It decides where the Router runs, with the Router's model and effort there (Settings →
+  *Agents & models*, *Who does the work*). What workers note, what the Router writes or decides,
+  files in a repository, away answers, Send to Chief notes and Slack messages are never your
+  word.
+- It answers a question as you would, in the one place it was asked: Chief of Staff files every
+  ask under the choice it is about, and Autopilot's answer settles it there, never kept as your
+  decision. A choice more than one worker asked (or the Router noted too) waits for you, so that
+  your one answer reaches them all (*Set aside: others asked the same choice…*).
 - What nothing you said settles waits for you under *Needs you*, saying why (*Set aside: nothing
   you said settles it*), as does a recommendation alone, any permission (pushing, publishing,
   deleting, merging, commenting…), and anything irreversible or outside this computer (a
@@ -1123,8 +1128,8 @@ usual settings. Writing to a worker yourself in the page hands it back to you.
 when one carries its work) are stopped, their tasks waiting with *Go on*, and what it was still
 deciding or checking is yours (a card it was judging is drawn for you, a result stays to
 review; a question or decision it answered whose answer had not gone out yet is yours again,
-under *Needs you*, saying so). What its judge and the turns it starts use counts against *Credits a day*; at the cap
-it pauses until the next day and says so.
+under *Needs you*, saying so). What its judge and the turns it starts use counts against
+*Credits a day*; at the cap it pauses until the next day and says so.
 
 **When it ends**, one card at the end of the Router's chat, *While you were away*, says what it
 did and left for you: each row opens its entry in the record, with *Undo* on an acceptance and
