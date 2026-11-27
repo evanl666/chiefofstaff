@@ -185,7 +185,7 @@ export function taskItem(task, phase = phaseOf(task)) {
     key: `task:${task.id}:${task.status}:${phase.section}:${phase.marker}:${task.stopped ? 1 : 0}:${task.blocked ? 1 : 0}:${createsPr(task) ? 1 : 0}:${task.news?.at || ""}:${task.splittable ? 1 : 0}:${undoUntil(task) ? 1 : 0}${unknownRuns(task).map((url) => `:${url}`).join("")}${choosing(task, phase)}${keptKey(task)}${task.nudge_failed ? `:nudge-failed:${task.nudge_failed.at}` : ""}`,
     id: task.id,
     // For live rows the minute too: "6m" and "3m ago" move on by themselves.
-    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}${task.shepherd ? `:${task.shepherd.line}|${task.shepherd.accept_note}` : ""}`,
+    version: `${task.updated_at}:${task.title}:${phase.why}:${meta.join("|")}:${help}:${task.read ? 1 : 0}:${worker?.status || ""}:${worker?.activity || ""}:${worker?.step || ""}:${worker?.step_since || ""}:${worker?.turn_task || ""}:${worker?.background ? 1 : 0}:${worker?.display_title || ""}:${task.credits}${task.agent ? `/${task.tokens}` : ""}:${task.runs}:${JSON.stringify(task.receipts?.prs || null)}:${task.status === "review" ? JSON.stringify(task.receipts || null) : ""}:${live ? `${Math.floor(Date.now() / 60000)}:${queuedKey()}` : ""}:${waitsOnOwner(task, worker)}:${(task.watching || []).join(",")}:${(task.watch_failing || []).join(",")}:${(task.watch_unreadable || []).join(",")}:${JSON.stringify(task.watch_failing_why || null)}:${JSON.stringify(task.check_back || null)}:${task.nudged_at || ""}:${JSON.stringify(task.receipts?.changed || null)}:${JSON.stringify(made)}:${JSON.stringify(asked)}:${deliveryKey(task)}:${earlierResults(task).length}${task.progress_updates?.length ? `:${keptWords(task.progress_updates).map((item) => item.at).join(",")}` : ""}${task.shepherd ? `:${task.shepherd.line}|${task.shepherd.accept_note}` : ""}${task.texts_key ? ":cut" : ""}`,
     build: () => taskCard(task, phase),
     refresh: (node) => refreshTaskCard(node, task, phase),
   };
@@ -1506,8 +1506,9 @@ function report(task) {
 }
 // Words of its worker's kept with a task (`progress_updates`, `earlier_results`): newest first,
 // each with when it was said.
-function keptWords(list) {
-  return (Array.isArray(list) ? list : []).filter((item) => typeof item?.text === "string" && item.text.trim()).map((item) => ({ at: typeof item.at === "string" && !Number.isNaN(Date.parse(item.at)) ? item.at : "", text: item.text }));
+// (Of a task whose whole words are still to come, `texts_key`: the state's, by when only.)
+function keptWords(list, cut = false) {
+  return (Array.isArray(list) ? list : []).filter((item) => (cut ? item && typeof item === "object" : typeof item?.text === "string" && item.text.trim())).map((item) => ({ at: typeof item.at === "string" && !Number.isNaN(Date.parse(item.at)) ? item.at : "", text: cut ? "" : item.text }));
 }
 // Its latest progress, as its card says it is at now (`progress`: none once it went on from a
 // question, say) and when it reported it, and the progress reports before that the server keeps
@@ -1522,7 +1523,7 @@ export function progressNow(task) {
 }
 // What it reported before its result (a newer report on the same task took their place), as
 // the server keeps them (`earlier_results`).
-export const earlierResults = (task) => keptWords(task?.earlier_results);
+export const earlierResults = (task) => keptWords(task?.earlier_results, Boolean(task?.texts_key));
 // Earlier words on a task folded under one quiet line, read as they were said; open, they stay
 // open while the card is redrawn.
 const openFolds = { reports: new Set(), updates: new Set() };
@@ -1534,7 +1535,7 @@ function earlierFold(task, list, kind) {
     "details",
     { class: `earlier-reports${kind === "updates" ? " earlier-updates" : ""}`, open: opened.has(task.id) },
     el("summary", { text: `${label} (${list.length})`, "data-tip": tip }),
-    ...list.map((item) => {
+    ...list.filter((item) => item.text).map((item) => {
       const entry = el("div", { class: "earlier-report" }, item.at ? el("div", { class: "when", text: `Reported ${since(item.at)}`, "data-tip": new Date(item.at).toLocaleString() }) : "");
       foldable(entry, el("div", { class: "body markdown", html: markdown(item.text) }), item.text, { chars: 360, lines: 5, label: kind === "updates" ? "Earlier update" : "Earlier report" });
       return entry;
