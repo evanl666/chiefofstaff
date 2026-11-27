@@ -92,7 +92,7 @@ from live_e2e import App, cleanup, data_dir, log, transcript, wait_for  # noqa: 
 from live_parity import setup, write  # noqa: E402
 
 MODEL = os.environ.get("AUTOPILOT_MODEL", "claude-sonnet-5.5")
-SHARD_CREDITS = {"A": 60.0, "B": 80.0, "C": 80.0, "D": 40.0}
+SHARD_CREDITS = {"A": 80.0, "B": 80.0, "C": 80.0, "D": 40.0}
 SCENARIOS = {
     "A": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"],
     "B": ["B1", "B2", "B3", "B4"],
@@ -365,11 +365,19 @@ async def a7_the_router_answers_from_the_record(run: Run):
 
     reply = await wait_for("the Router's answer", answered, 300, run.app)
     # Its answer comes from autopilot_log: each entry it names is linked (#autopilot/<id>),
-    # and every link is an entry of the record (none made up).
-    known = {a["id"] for a in actions}
+    # and every link is an entry of the record (none made up), the run's start or a turn's
+    # then: line too (not among the actions the record view lists).
     links = set(re.findall(r"#autopilot/([\w-]+)", reply["text"]))
     run.check("A7 its answer links the record's entries", bool(links), reply["text"][:300])
-    run.check("A7 every link is a record entry", links <= known, str(links - known))
+    made_up = set()
+    for link in links:
+        try:
+            await run.entry(link)
+        except Exception:
+            made_up.add(link)
+    run.check("A7 every link is a record entry", not made_up, str(made_up))
+    shown = {a["id"] for a in actions}
+    run.check("A7 it links an action the record lists", bool(links & shown), str(links))
 
 
 async def current_task(run: Run, session_id: str) -> str:
