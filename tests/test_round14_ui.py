@@ -70,7 +70,7 @@ def test_what_needs_a_look_of_any_task_is_above_another_tasks_merged_prs():
         "const cache = { ...task('b', 'Tune the cache', pr(8, 'CI failing', 5)),"
         " updated_at: at(5) };\n"
         "const onlyMerged = task('c', 'Tidy the docs',"
-        " ...[11, 12].map((n) => pr(n, 'merged', 1)));\n"
+        " ...[11, 12].map((n) => pr(n, 'merged', 1 + (n - 11) / 10)));\n"
         "const { rows } = a.artifactItems([shipping, cache, onlyMerged], () => {});\n"
         "return rows.map((row) => { const node = row.build();"
         " return walk(node).find((p) => String(p.className).split(' ').includes('a-name'))"
