@@ -2295,7 +2295,8 @@ class Runtime:
         with suppress(Exception):
             self.end_epoch(worker, process)
         self.turn_gone(worker)
-        if why == agents.FROZEN_AT_STOP and not self.stopping:
+        row = self.store.find_session(worker)
+        if why == agents.FROZEN_AT_STOP and not self.stopping and row and not row["closed_at"]:
             # Found not answering as the owner's Stop waited for it: said, and let go of, before
             # that Stop returns, so that the next message opens a new process.
             name = agents.display(agent)
