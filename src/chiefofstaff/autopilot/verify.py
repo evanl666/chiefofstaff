@@ -38,7 +38,7 @@ import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from .. import caches, integrity, receipts
@@ -220,8 +220,10 @@ async def run_offline(
     others = [settings.code_folder, *settings.projects, str(runtime.store.directory)]
     cached = await asyncio.to_thread(runtime.cache_plan, row) if row else None
     tier = cached.tier if cached else runtime.cache_tier
-    denied = list(dict.fromkeys([*step_denied(), *(p for p in others if p),
-                                 *(cached.denied if cached else [])]))  # fmt: skip
+    denied: list[str] = []
+    for path in (*step_denied(), *others, *(cached.denied if cached else [])):
+        if path and path not in denied:
+            denied.append(path)
     # Of what its worker reads, none under a folder denied here (its init script, in Chief's
     # data folder).
     readonly = [p for p in (cached.readonly if cached else []) if not within(p, denied)]
@@ -253,7 +255,7 @@ async def run_offline(
         session = await backend.resume_session(session_id, **options)
         with contextlib.suppress(Exception):
             # Its tools are built first, as the step check's session's (none until then).
-            await session.rpc.tools.initialize_and_validate(timeout=60)
+            await cast(Any, session).rpc.tools.initialize_and_validate(timeout=60)
         (copy / ".cos-tmp").mkdir(exist_ok=True)
         for step in steps:
             started = time.monotonic()
