@@ -21,6 +21,9 @@
 - **A long note from the Router, or a long question, reads whole**: its start, then *Show more*
   (it was cut at 240 px in a box that didn't look scrollable). The Profile row in *Your OK* has
   its ⋯ (*Discard*), as every row does.
+- **A restart no longer moves the Router onto an agent whose limit is used up.** It stays where
+  it runs until that limit resets (it used to switch there and back, two fresh Router sessions,
+  at each restart).
 
 ## 0.1.60 (2026-11-26)
 

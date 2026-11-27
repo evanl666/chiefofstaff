@@ -390,6 +390,41 @@ async def test_a_plan_limit_with_ask_me_says_why_without_a_doubled_full_stop(tmp
 # The Router on Claude
 
 
+async def test_a_restart_keeps_the_router_off_an_agent_whose_limit_is_used_up(tmp_path, codex_log):
+    """QA 0.1.61 R2: the Router chosen for Codex runs on Copilot for now, Codex's 5-hour limit
+    used up, held until it resets (roleheld:router:codex, kind "limit"). Codex seen able to run
+    at the next start (agent_up, the first time in a process) leaves that hold and the Router
+    where it runs: no switch to Codex and back, two fresh Router sessions, at each restart until
+    the reset. Once the reset has passed, it goes back to Codex."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    router = harness.router_id
+    await saved(runtime, {"codex": {"enabled": True}, "roles": {"router": "codex"}})
+    assert runtime.agent(router) == "codex"
+    resets = time.time() + 3600
+    line = "Codex's 5-hour limit is used up · resets 1:08 PM"
+    runtime.hold_role("router", "codex", line, resets, "limit")
+    runtime.store.set("rolefallback:router", line)
+    await runtime.place_role("router")
+    await settle(runtime)
+    assert runtime.agent(router) == agents.COPILOT, "on Copilot for now"
+    try:
+        runtime.ready_seen.discard("codex")  # As in a process that just started.
+        runtime.agent_up("codex")
+        await settle(runtime)
+        await asyncio.sleep(0.5)
+        await settle(runtime)
+        assert runtime.role_held("router", "codex").get("kind") == "limit", "hold kept"
+        assert runtime.agent(router) == agents.COPILOT, "not moved back before the reset"
+        # Its reset passed: Codex seen able to run again puts the Router back there.
+        runtime.hold_role("router", "codex", line, time.time() - 1, "limit")
+        runtime.ready_seen.discard("codex")
+        runtime.agent_up("codex")
+        await until(lambda: runtime.agent(router) == "codex")
+    finally:
+        await runtime.stop()
+
+
 async def test_the_router_runs_on_claude_with_nothing_but_its_tools(
     tmp_path, claude_on_path, monkeypatch
 ):
