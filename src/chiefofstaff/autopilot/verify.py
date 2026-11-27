@@ -185,6 +185,10 @@ def wrapped(step: str, env: dict[str, str] | None = None) -> str:
 Runner = Callable[[Path, list[str]], Awaitable[list[dict]]]
 
 
+def within(path: str, folders: list[str]) -> bool:
+    return any(Path(path) == Path(f) or Path(path).is_relative_to(f) for f in folders)
+
+
 async def seeded(runtime: Runtime):
     """Workers' caches filled from the owner's once, before a first verification uses them."""
     if not runtime.store.settings().shared_caches:
@@ -197,11 +201,14 @@ async def seeded(runtime: Runtime):
         await asyncio.sleep(0.5)
 
 
-async def run_offline(runtime: Runtime, copy: Path, steps: list[str]) -> list[dict]:
+async def run_offline(
+    runtime: Runtime, copy: Path, steps: list[str], row: dict | None = None
+) -> list[dict]:
     """Each step in a session of Chief's own, sandboxed with no network: {command, exit, output,
-    seconds, sandboxed}. Through the session's own tool pipeline: no model, no credits. Its
-    caches are those workers share (writable, as a sandboxed worker's), nothing of the
-    owner's."""
+    seconds, sandboxed}. Through the session's own tool pipeline: no model, no credits. It
+    reads and writes as `row`'s worker would sandboxed (Runtime.cache_plan): its toolchains and
+    the owner's caches read-only, the caches workers share writable; nothing of the owner's
+    writable."""
     from copilot.generated.rpc import PermissionDecisionApproveOnce
 
     from ..policy import GITHUB_MCP
@@ -211,11 +218,18 @@ async def run_offline(runtime: Runtime, copy: Path, steps: list[str]) -> list[di
     backend = runtime.connected()
     settings = runtime.store.settings()
     others = [settings.code_folder, *settings.projects, str(runtime.store.directory)]
-    tier = runtime.cache_tier
+    cached = await asyncio.to_thread(runtime.cache_plan, row) if row else None
+    tier = cached.tier if cached else runtime.cache_tier
+    denied = list(dict.fromkeys([*step_denied(), *(p for p in others if p),
+                                 *(cached.denied if cached else [])]))  # fmt: skip
+    # Of what its worker reads, none under a folder denied here (its init script, in Chief's
+    # data folder).
+    readonly = [p for p in (cached.readonly if cached else []) if not within(p, denied)]
     await seeded(runtime)
     policy = StepSandboxPolicy(
         readwrite=(str(copy), str(tier)),
-        denied=tuple(dict.fromkeys([*step_denied(), *(p for p in others if p)])),
+        readonly=tuple(readonly),
+        denied=tuple(denied),
         credentials=False, outbound=False, allowed_hosts=(), blocked_hosts=BLOCKED_HOSTS,
         keychain=False,
     )  # fmt: skip
@@ -339,7 +353,7 @@ async def verify(runtime: Runtime, task: dict, runner: Runner | None = None) -> 
         installs = [line for name, line in INSTALLS if (folder / name).is_file()][:1]
         if not await asyncio.to_thread(tree_holds, folder, tree):
             return failed("its copy didn't hold the commit's tree")
-        run = runner or (lambda copy, lines: run_offline(runtime, copy, lines))
+        run = runner or (lambda copy, lines: run_offline(runtime, copy, lines, row))
         results = await asyncio.wait_for(run(folder, [*installs, *steps]), RUN_SECONDS)
         record["steps"] = results
         record["tree_after"] = await asyncio.to_thread(tree_holds, folder, tree)
