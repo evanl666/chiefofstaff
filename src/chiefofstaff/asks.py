@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from . import agents
 from .envelope import sender, short, wrap
 from .models import DraftDecision
 from .peers import clip
@@ -955,7 +956,8 @@ class Asks:
 
     async def on_mcp_auth(self, request: dict, context: dict) -> dict:
         """An MCP server needs sign-in: one card per server; later sessions reuse the sign-in.
-        Another agent's sign-in is the owner's to run (its `command`): its card says it."""
+        Another agent's sign-in is its own command (`command`): its card's Sign in runs it
+        (agentsetup.Setups.mcp_sign_in), or the owner in a terminal."""
         cancelled = {"kind": "cancelled"}
         command = str(request.get("command") or "")
         session_id = self.runtime.row_id(context.get("sessionId", ""))
@@ -1002,7 +1004,9 @@ class Asks:
             try:
                 target = {"server": server, "url": url}
                 if command:
-                    target["command"] = command  # Its card says to run it.
+                    target["command"] = command  # Its card's Sign in runs it.
+                    if (agent := request.get("agent")) in agents.NAMES:
+                        target["agent"] = agent
                 result = await self.ask_owner(
                     session_id, "signin", target, f"{server} needs you to sign in", done=connected
                 )

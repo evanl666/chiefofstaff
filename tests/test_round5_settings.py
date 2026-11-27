@@ -432,6 +432,32 @@ def test_claudes_setup_by_chief_of_staff_is_said_calmly_with_retry_never_a_comma
     )  # fmt: skip
 
 
+def test_an_agent_older_than_tested_offers_update_and_copilot_its_sign_in_and_install():
+    """What the page offers where it used to say a command: Update for an agent older than the
+    versions tested (Copilot runs all the same: Update beside Ready); Sign in and Install for
+    Copilot, as for Codex and Claude Code."""
+    setup = json.dumps((STATIC / "agentsetup.js").as_uri())
+    said = run_ui(
+        f"""
+        const g = await import({setup});
+        document.createElement = (tag) => ({{ tag, attributes: {{}}, setAttribute(key, value) {{ this.attributes[key] = value; }}, addEventListener() {{}}, append() {{}} }});
+        const old = {{ name: "codex", status: "problem", said: "Codex 0.160.0 is older than the versions tested (0.167.2).", update: {{ command: "codex update", then: "" }} }};
+        const copilotOld = {{ name: "copilot", status: "ready", update: {{ command: "copilot update", then: "" }} }};
+        const signin = {{ name: "copilot", status: "signin", ways: [{{ method: "device", label: "Sign in with a code" }}], fix: {{ command: "copilot login" }} }};
+        const missing = {{ name: "copilot", status: "missing", install: [{{ method: "script", command: "curl -fsSL https://gh.io/copilot-install | bash" }}] }};
+        const statuses = [old, copilotOld, signin, missing, {{ name: "copilot", status: "ready" }}];
+        return {{
+          row: a.agentStatus("codex", {{ status: old, on: true }}),
+          kinds: statuses.map(g.setupKind),
+          buttons: statuses.map((status) => g.setupAction(status)?.textContent || ""),
+        }};
+        """
+    )
+    assert (said["row"]["text"], said["row"]["action"]) == ("Can't run here", "update")
+    assert said["kinds"] == ["update", "update", "signin", "install", ""]
+    assert said["buttons"] == ["Update", "Update", "Sign in", "Install", ""]
+
+
 def test_a_limit_or_a_sign_in_ending_is_said_under_an_agent_whatever_its_status_and_meter():
     """§3.3 (review finding 4): what costs money or stops work is never folded away: extra
     usage, a limit used up with no reset known, a rate limit, a close limit; a sign-in about to

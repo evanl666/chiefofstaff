@@ -3142,11 +3142,43 @@ async def test_a_codex_worker_whose_mcp_server_needs_sign_in_has_the_owner_asked
             "server": "notes",
             "url": "",
             "command": "codex mcp login notes",
+            "agent": "codex",
         }
         assert card["text"] == "notes needs you to sign in", "as Copilot's says it"
         assert "the owner now has a sign-in card" in str(harness.kinds(worker))
         await runtime.drafts.resolve(card["id"], DraftDecision(action="answer"))
         await until(lambda: "its tools work from your next turn" in str(harness.kinds(worker)))
+    finally:
+        await runtime.stop()
+
+
+async def test_sign_in_on_a_codex_mcp_card_runs_codexs_own_command_and_answers_the_card(
+    tmp_path, monkeypatch
+):
+    """The card's Sign in: `codex mcp login notes` run for the owner, in the worker's folder;
+    its page to open shown; once the owner signed in there, the card answers itself and the
+    worker is told. No terminal."""
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'fake'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_CODEX_RUNS", str(runs := tmp_path / "codex-runs"))
+    try:
+        worker = await spawn(
+            runtime, harness, "The MCP server notes is not signed in. Wait 3 s. Report done: x."
+        )
+        await until(lambda: harness.store.drafts(), 30)
+        (card,) = harness.store.drafts()
+        view = await runtime.setups.mcp_sign_in(card["id"])
+        assert (view["key"], view["kind"], view["server"]) == (f"mcp:{card['id']}", "mcp", "notes")
+        assert view["command"] == "codex mcp login notes"
+        await until(lambda: runtime.setups.view()[view["key"]].get("url"), 20)
+        assert runtime.setups.view()[view["key"]]["url"].startswith("https://mcp.acme.test/")
+        (Path(os.environ["FAKE_CODEX_HOME"]) / "approve").write_text("ok")
+        await until(lambda: harness.store.draft(card["id"])["status"] != "pending", 20)
+        assert runtime.setups.view()[view["key"]]["state"] == "done"
+        await until(lambda: "its tools work from your next turn" in str(harness.kinds(worker)))
+        assert "mcp login notes" in runs.read_text().splitlines()
+        with pytest.raises(ValueError, match="That sign-in is over"):
+            await runtime.setups.mcp_sign_in(card["id"])
     finally:
         await runtime.stop()
 

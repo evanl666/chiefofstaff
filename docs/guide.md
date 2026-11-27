@@ -564,19 +564,24 @@ git in the worker's repository for this). Their other settings there, and all of
 sandbox, their commands can change: the same lines then ask you. In your home folder, agent
 homes (`~/.codex`, `~/.claude`, `~/.copilot`) are yours and are never read as its settings.
 
-With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot, Codex
-or Claude): they can change or delete any file you can, outside its folders too (Chief of Staff
-refuses only a few commands outright, such as `rm -r` of your home or the root, a push to the
-default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on (Settings;
-always for workers that read Slack, except on Codex), workers' shell commands can write only to
-their workspace, checkouts and the repositories' `.git` (not their hooks, config, or your checkout's
-`HEAD` and index, nor files git would read in their place, such as `.git/commondir`), never see your
-GitHub token, and cannot read `~/.ssh`. On macOS, run `copilot sandbox ca create && copilot sandbox
-ca trust` once so `gh` works inside Copilot's sandbox; Settings tells you when it is needed. Codex
-can't run workers while the sandbox is on (its sandbox hasn't passed Chief of Staff's checks yet).
-The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux
-the sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files
-that change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
+With the **sandbox** off (the default), a worker's commands run as you, on any agent (Copilot,
+Codex or Claude): they can change or delete any file you can, outside its folders too (Chief of
+Staff refuses only a few commands outright, such as `rm -r` of your home or the root, a push to
+the default branch or `sudo`). Turn the sandbox on to prevent that. With the **sandbox** on
+(Settings; always for workers that read Slack, except on Codex), workers' shell commands can write
+only to their workspace, checkouts and the repositories' `.git` (not their hooks, config, or your
+checkout's `HEAD` and index, nor files git would read in their place, such as `.git/commondir`),
+never see your GitHub token, and cannot read `~/.ssh`. On macOS, `gh` works inside Copilot's
+sandbox once Copilot's certificate is trusted: where it isn't, Settings → Workers says so with
+*Trust the sandbox's certificate*, which shows what it runs (`copilot sandbox ca create`, then
+`copilot sandbox ca trust`; one that must change first, `rotate`), asks first, and runs them for
+you: macOS asks for your password to add it to your login keychain. If it fails it says why, with
+*Try again*, and the commands to run yourself under *Details*. Claude Code's sandbox needs no
+certificate for `gh`. Codex can't run workers while the sandbox is on (its sandbox hasn't passed
+Chief of Staff's checks yet).
+The sandbox needs macOS or Linux (`bwrap`): on Windows workers' commands run unsandboxed. On Linux the
+sandbox can't hold a file that doesn't exist yet, so Chief of Staff looks for the git files that
+change what git runs (a `.git/commondir`, a `hooks/` folder where there was none, a
 `config.worktree` where the repository reads one) after each of a worker's turns and before it
 runs git itself. If one appeared, the worker waits, Chief of Staff runs no git in that repository,
 and the timeline says "A git file appeared in .git (commondir). If you made it, use it." **Use
@@ -649,8 +654,8 @@ that start together.
 
 Some tools behave differently inside the sandbox on macOS: Playwright's Chromium runs in a single
 process (the sandbox refuses the others it would start; Firefox, WebKit and full Chrome can't
-start there), Java reaches github.com only if you have run `copilot sandbox ca create` (Copilot's
-proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
+start there), Java reaches github.com only once Copilot's certificate is trusted (*Trust the
+sandbox's certificate*, Settings → Workers; Copilot's proxy answers for it), and uv before 0.9.29 crashes there (it reads macOS's proxy settings from a
 service the sandbox closes; `brew upgrade uv` or `uv self update`): workers are told so, and
 report it rather than retry.
 
@@ -1693,6 +1698,22 @@ bash`; Homebrew or npm under *Other ways* where you have them), runs it with its
 the agent where installers put it (also outside the folders your terminal had on its path when Chief
 of Staff started; that folder goes after yours, so your own programs stay first), and goes on to
 *Sign in*. On Windows it shows the PowerShell command to copy.
+
+Copilot has the same *Sign in* and *Install* (Home's card when no agent can run yet, and Copilot's
+row in Settings): *Sign in* runs `copilot login --device-code` and shows its page and one-time code
+(*Sign in in the browser instead* under *Other ways*); once you've entered it, Chief of Staff starts
+on Copilot by itself, with no *Retry* and no restart. *Install* runs Copilot's official installer
+(`curl -fsSL https://gh.io/copilot-install | bash`; npm or Homebrew under *Other ways*; on Windows,
+`winget install GitHub.Copilot` to copy), then goes on to *Sign in*. Home's card lists each agent
+with what it needs and its button; the commands, to run in a terminal yourself, stay under *Or in a
+terminal*.
+
+**Updating an agent.** An agent older than the versions Chief of Staff was tested with says so
+(Codex and Claude Code can't run then; Copilot runs, with a line in the sidebar) with *Update*. It
+shows the agent's own updater, word for word (`copilot update`, `codex update`, `claude update`), and
+that it updates the agent for everything on your computer that uses it, then runs it only once you
+say *Update*, with its output and a result: the agent turns *Ready* by itself (Copilot's new version
+runs from its next start), or it says why not, with *Try again* and the command under *Details*.
 Where Claude Code says when your sign-in ends, the `@` list says so from a week before ("Claude
 sign-in ends Dec 11"); with `ANTHROPIC_API_KEY` set where Chief of Staff runs, Claude's workers use
 that key, and its status says so ("Uses your Anthropic API key (ANTHROPIC_API_KEY)"); with
@@ -1928,8 +1949,11 @@ hover tips and a part of its own in *Usage*; the daily summary adds them on a da
   next turn (after the one under way, if it is at work). Workers don't edit `.codex/` folders or
   Codex's settings folder.
 - **Questions:** a worker asks you with the same card as a Copilot worker's, and an MCP server's
-  form reaches you too. An MCP server that needs a sign-in is signed in from a terminal:
-  `codex mcp login <name>` or `claude mcp login <name>`.
+  form reaches you too. An MCP server that needs a sign-in has a card under *Needs you* (Your OK),
+  as for Copilot's: its *Sign in* runs the agent's own `codex mcp login <name>` or `claude mcp login
+  <name>` for you, in the worker's folder, shows the server's page to open, and answers the card
+  once you've signed in there (the agent keeps the sign-in). The command, to run in a terminal
+  yourself (then *I signed in*), is under the card's *Details*.
 - **Claude's own tools** are tied into Chief of Staff: a worktree it makes is one of the
   worker's checkouts (receipts, *Storage*, removed with the others). Claude makes one
   (`EnterWorktree`, a subagent isolated in a worktree) in its repository's main checkout, which
@@ -2018,13 +2042,15 @@ commands run in.
 ## Updating
 
 When a newer release is out, one quiet line at the bottom of the sidebar says so. Started with
-`uvx` or installed with `uv tool`, **Update and restart** does the rest: once the turns running
-end (the line says which: *Restarting after the Router's turn ends…*; two minutes at most, a turn
-still running then goes on after the restart; *Cancel* stops waiting), Chief of Staff gets the new
-version (`uvx chiefofstaff@<version>`, or `uv tool upgrade chiefofstaff`), stops as on Ctrl+C and
-starts again in its own place: the same terminal, port and private link. The page reloads by
-itself, every session goes on as after any restart, and Home says it updated (or why it couldn't:
-it then runs the version it had).
+`uvx`, installed with `uv tool` or pipx, or with pip into a virtual environment of its own,
+**Update and restart** does the rest: once the turns running end (the line says which:
+*Restarting after the Router's turn ends…*; two minutes at most, a turn still running then goes on
+after the restart; *Cancel* stops waiting), Chief of Staff gets the new version (`uvx
+chiefofstaff@<version>`, `uv tool upgrade chiefofstaff`, `pipx upgrade chiefofstaff`, or that
+environment's `uv pip` or `pip install --upgrade chiefofstaff`), stops as on Ctrl+C and starts
+again in its own place: the same terminal, port and private link. The page reloads by itself,
+every session goes on as after any restart, and Home says it updated (or why it couldn't: it then
+runs the version it had).
 
 **A restart loses no message.** A session at work as Chief of Staff stops (or as it crashes, or as
 its agent does) is given again, once, what that turn was given and did not finish, as soon as its
@@ -2034,8 +2060,8 @@ what its agent's own record shows it finished is not given again. Until then it 
 *Reconnecting to Codex…* (or its agent's name), never *Thinking…*, and what it was given waits to
 be sent; a reconnect that takes long is tried again by itself, waiting longer each time, and
 *Retry* tries at once. A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
-given waits for its next message. Installed another way (pip, pipx), or on Windows, the line says the
-command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
+given waits for its next message. Installed into a system's Python, or on Windows, the line says
+the command to run. Plain `uvx chiefofstaff` runs the version uv cached the first time, however old:
 start it with `uvx chiefofstaff@latest`. Chief of Staff reads its own page on PyPI for this, at
 most once a day, and sends nothing about you or your machine; *Say when a newer Chief of Staff is
 out* (Settings → General → More) turns it off. When Copilot can't start at all, the error says the

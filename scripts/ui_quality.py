@@ -1491,6 +1491,103 @@ async def agents_views(runtime, browser, quality: Quality):
     log("Agents & models: its rows' states, a Codex worker, the picker; browser-shots/agents-m2/")
 
 
+async def self_handle_views(runtime, browser, quality: Quality):
+    """What the page runs for the owner instead of telling them a command (0.1.61), each asked
+    first: Copilot's Update (its row and dialog), Trust the sandbox's certificate (Settings →
+    Workers, its dialog), Home's setup card with Sign in, an MCP card's Sign in; 800 to 1440 px,
+    light and dark (browser-shots/self-handle/). Nothing is run: each is shown, then Not now."""
+    from uuid import uuid4
+
+    folder = SHOTS / "self-handle"
+    folder.mkdir(exist_ok=True)
+    store = runtime.store
+    kept, kept_problem = dict(runtime.status), runtime.copilot_problem
+    kept_sandbox = (runtime.sandbox_host, runtime.sandbox_gh)
+    worker = "w" + uuid4().hex[:31]
+    store.create_session(worker, "worker", "Read the notes", "idle")
+    target = {"server": "notes", "url": "", "command": "codex mcp login notes", "agent": "codex"}
+    draft = store.create_draft(worker, "signin", target, "notes needs you to sign in")
+
+    async def views(page, name: str, scope: str, widths=WIDTHS):
+        for width in widths:
+            await page.set_viewport_size({"width": width, "height": 900})
+            await page.wait_for_timeout(100)
+            shot = f"quality-{name}-{width}-{scheme}"
+            await page.screenshot(path=folder / f"{shot}.png")
+            await quality.check(page, f"self-handle {shot}", scope)
+        await quality.contrast(page, f"self-handle {name} {scheme}", scope)
+        await page.set_viewport_size({"width": 1280, "height": 900})
+
+    try:
+        for scheme in ("light", "dark"):
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 900}, color_scheme=scheme, bypass_csp=True
+            )
+            page = await context.new_page()
+            # Copilot older than tested: Update on its row, its command asked first. (Before the
+            # page loads: it reads it then.)
+            runtime.copilot_older = "1.0.50"
+            warning = "Copilot CLI 1.0.50 is older than the versions tested (1.0.100)."
+            runtime.status = {**kept, "warning": warning}
+            runtime.publish_state()
+            await page.goto(f"{BASE}/#token={TOKEN}")
+            await expect(page.locator("#application")).to_be_visible()
+            await expect(page.locator("#status-line")).to_contain_text(warning)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=agents]").click()
+            row = page.locator("#agent-copilot")
+            await expect(row.locator(".action-slot .setup-action")).to_have_text("Update")
+            await row.locator(".action-slot .setup-action").click()
+            dialog = page.locator("dialog.agent-setup")
+            await expect(dialog.locator(".setup-command")).to_have_text("copilot update")
+            await views(page, "update-consent", "dialog.agent-setup")
+            await dialog.get_by_role("button", name="Not now").click()
+            await page.locator("#settings-cancel").click()
+            runtime.copilot_older = ""
+            runtime.status = dict(kept)
+            # The sandbox's certificate not trusted: one click, asked first.
+            runtime.sandbox_host, runtime.sandbox_gh = True, False
+            runtime.publish_state()
+            await expect(page.locator("#status-line")).not_to_contain_text(warning)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=general]").click()
+            trust = page.locator("#sandbox-trust")
+            await expect(trust).to_be_visible()
+            await trust.scroll_into_view_if_needed()
+            await views(page, "sandbox-trust", "#settings-dialog")
+            await trust.click()
+            await expect(dialog.locator("h2")).to_have_text("Trust the sandbox's certificate")
+            await views(page, "sandbox-consent", "dialog.agent-setup")
+            await dialog.get_by_role("button", name="Not now").click()
+            await page.locator("#settings-cancel").click()
+            runtime.sandbox_host, runtime.sandbox_gh = kept_sandbox
+            # No agent can run: Home's card, each agent's step with its button.
+            runtime.copilot_problem = "Copilot is not signed in."
+            runtime.status = {
+                "state": "error", "error": "Copilot is not signed in.", "waits": True,
+                "setup": True,
+            }  # fmt: skip
+            runtime.publish_state()
+            card = page.locator("#home-setup")
+            await expect(card.get_by_role("button", name="Sign in to Copilot")).to_be_visible()
+            await views(page, "home-setup", "#home-setup")
+            runtime.copilot_problem, runtime.status = kept_problem, dict(kept)
+            runtime.publish_state()
+            # An MCP card of a Codex worker: Sign in runs Codex's own command.
+            row = f'#needs .your-ok .ok-row[data-id="{draft["id"]}"]'
+            ok = page.locator(row)
+            await expect(ok.get_by_role("button", name="Sign in", exact=True)).to_be_visible()
+            await views(page, "mcp-row", row, widths=(1024, 1280, 1440))
+            await context.close()
+    finally:
+        runtime.copilot_older = ""
+        runtime.status, runtime.copilot_problem = kept, kept_problem
+        runtime.sandbox_host, runtime.sandbox_gh = kept_sandbox
+        store.execute("UPDATE drafts SET status='rejected' WHERE id=?", (draft["id"],))
+        runtime.publish_state()
+    log("what the page runs for the owner, asked first (self-handle/)")
+
+
 # The owner's "Go on" to a task (task's-life round, 0.1.48), in the Router's chat: its task
 # link's box touches its text's (it looks right). Not the fork's line; told to the coordinator.
 OWNERS_TASK_MESSAGE = re.compile(r'^button\.to "→ [^"]*" overlaps div\.text "Go on where you')
@@ -2290,7 +2387,8 @@ async def main():
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch()
             # `UI_QUALITY_ONLY=shepherd`: only Prepared for you's views; `=teams`: only Teams';
-            # `=share`: only share links'; `=long-report`: only a long report's card.
+            # `=share`: only share links'; `=long-report`: only a long report's card;
+            # `=self-handle`: only what the page runs for the owner.
             only = os.environ.get("UI_QUALITY_ONLY", "")
             if only == "teams":
                 await teams_views(runtime, browser, quality)
@@ -2302,6 +2400,8 @@ async def main():
                 await secret_views(runtime, browser, quality)
                 await report_share_views(runtime, browser, quality)
                 await import_views(runtime, browser, quality)
+            elif only == "self-handle":
+                await self_handle_views(runtime, browser, quality)
             elif only != "shepherd":
                 await report_views(runtime, browser, quality)
                 await run(runtime, seeded, browser, quality, phase)
@@ -2332,7 +2432,8 @@ async def main():
                 log("a busy worker's second worker (fork/)")
                 await long_report_views(runtime, browser, quality)
                 log("a 16k-character report open on its card (long-report/)")
-            if only not in {"teams", "share", "long-report"}:
+                await self_handle_views(runtime, browser, quality)
+            if only not in {"teams", "share", "long-report", "self-handle"}:
                 await shepherd_views(runtime, browser, quality)
             if not only:
                 await share_views(runtime, browser, quality)

@@ -713,6 +713,21 @@ FIXES: list[Allow] = [
         "the page's state: a finished task's long words cut, asked for once",
         data=r"/api/state\.tasks\[\d+\]\.(result|earlier_results|texts_key)$",
     ),
+    # 0.1.61 (owner: "不要让用户做这做那"): an agent older than the versions tested (or whose
+    # version can't be told) has Update, which runs its own updater for the owner: its status
+    # says what it needs, not the command, and offers it (`update`). The stand-in Codex here
+    # says no version.
+    Allow(
+        "an agent too old to run: what it needs, and Update (said)",
+        data=r"\./api/state\.agents_status\[\d+\]\.said$",
+        value="Chief of Staff could not tell which version of Codex this is (none said): it "
+        "needs 0.167.2 or later.",
+    ),
+    Allow(
+        "an agent too old to run: what it needs, and Update (update)",
+        data=r"\./api/state\.agents_status\[\d+\]\.update$",
+        value={"command": "codex update", "then": ""},
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on

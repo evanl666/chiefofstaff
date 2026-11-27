@@ -1,8 +1,9 @@
 """Whether a newer Chief of Staff is out: PyPI's JSON for it read at most once a day, off the
 hot path (a plain GET that sends nothing about this machine or its owner), unless Settings turns
-it off; how it was launched, and so how it updates: started with uvx or installed with `uv tool`,
-Chief of Staff updates itself and starts again in its own place (the same process, terminal and
-private link: __main__.restart_into); otherwise the command is said."""
+it off; how it was launched, and so how it updates: started with uvx, installed with `uv tool` or
+pipx, or with pip into a virtual environment of its own, Chief of Staff updates itself and starts
+again in its own place (the same process, terminal and private link: __main__.restart_into);
+otherwise (a system's Python, Windows) the command is said."""
 
 from __future__ import annotations
 
@@ -111,9 +112,25 @@ def launched(prefix: str = sys.prefix, argv: tuple[str, ...] | None = None) -> L
         entry = here / "bin" / "chiefofstaff"
         restart = (str(entry), *args) if shutil.which("uv") and not windows else ()
         return Launch("tool", "uv tool upgrade chiefofstaff", restart)
+    entry = here / "bin" / "chiefofstaff"
     if "/pipx/venvs/" in posix:
-        return Launch("pipx", "pipx upgrade chiefofstaff")
-    return Launch("pip", "pip install --upgrade chiefofstaff")
+        restart = (str(entry), *args) if shutil.which("pipx") and not windows else ()
+        return Launch("pipx", "pipx upgrade chiefofstaff", restart)
+    restart = (str(entry), *args) if not windows and own_venv(here) else ()
+    return Launch("pip", "pip install --upgrade chiefofstaff", restart)
+
+
+def own_venv(prefix: Path) -> bool:
+    """Whether a pip install is one Chief of Staff updates itself: in a virtual environment
+    (its pyvenv.cfg) that can be written, with its entry point, and uv or that environment's
+    own pip to update it with; never a system's Python."""
+    from .claude_setup import find_uv
+
+    if not (prefix / "pyvenv.cfg").is_file() or not os.access(prefix, os.W_OK):
+        return False
+    if not (prefix / "bin" / "chiefofstaff").is_file():
+        return False
+    return bool(find_uv()) or (prefix / "bin" / "pip").is_file()
 
 
 @functools.cache

@@ -10,6 +10,7 @@ import { openSettings, watchGaps } from "./settings.js";
 import { ownTasks } from "./tasks.js";
 import { duck, setMood } from "./mascot.js";
 import { agentName, copilotAlone, markOf } from "./agentpick.js";
+import { openSetup, setupKind, setupWords, statusFor } from "./agentsetup.js";
 import { labelOf } from "./team.js";
 import { glyph } from "./relations.js";
 // The captain beside the name says how Home stands, as the dots do: it salutes when something
@@ -273,7 +274,11 @@ export function renderStatusLine() {
   if (snap.demo) nodes.push(el("div", { class: "demo", text: "Demo mode: scripted sessions, nothing leaves this machine" }));
   const until = snap.focus?.until && new Date(snap.focus.until) > new Date() ? new Date(snap.focus.until) : null;
   if (until) nodes.push(el("div", { class: "demo", text: `Focusing until ${until.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: notifications wait` }));
-  if (snap.runtime.warning) nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
+  if (snap.runtime.warning) {
+    nodes.push(el("div", { class: "bad", text: snap.runtime.warning }));
+    // Copilot older than the versions tested: Update runs its updater, asked first.
+    if (setupKind(statusFor("copilot")) === "update") nodes.push(el("button", { type: "button", class: "link", text: setupWords("copilot") || "Update", "aria-label": "Update the Copilot CLI", onclick: () => openSetup("copilot") }));
+  }
   // A newer release: one quiet line (Settings → General turns it off).
   if (snap.update) nodes.push(updateLine(snap.update));
   if (snap.settings.slack_enabled && snap.slack.error) {

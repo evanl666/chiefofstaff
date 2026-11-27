@@ -5,8 +5,9 @@ import { lines, plural, since } from "./text.js";
 import { closedWorkers, followOthers, HOME, loadState, sessions, state } from "./state.js";
 import { renderSidebar } from "./sidebar.js";
 import { renderHeader, select } from "./session.js";
-import { agentsBody, agentsSaved, agentsShown, agentsStateChanged, modelsArrived, renderAgentsPage, setupChanged } from "./agentspage.js";
+import { agentsBody, agentsSaved, agentsShown, agentsStateChanged, modelsArrived, renderAgentsPage, setupChanged as agentSetupChanged } from "./agentspage.js";
 import { agentsOn, agentsSaid } from "./agentpick.js";
+import { openTrust, setupWords } from "./agentsetup.js";
 import { renderSharedLinks } from "./share.js";
 
 // Settings' pages (docs/design/settings-v2.md): what each name opens, old names included, so a
@@ -240,6 +241,7 @@ export function bindSettings() {
     select(run.id);
   });
   $("#skill-upload").addEventListener("click", () => $("#skill-file").click());
+  $("#sandbox-trust").addEventListener("click", openTrust);
   $("#skill-file").addEventListener("change", async () => {
     const file = $("#skill-file").files[0];
     $("#skill-file").value = "";
@@ -336,8 +338,24 @@ export function bindSettings() {
 export function settingsStateChanged() {
   agentsStateChanged();
   generalWords();  // (Which agents are on: their names on General's lines.)
+  drawSandboxTrust();
 }
-export { setupChanged };
+export function setupChanged() {
+  agentSetupChanged();
+  drawSandboxTrust();
+}
+// Copilot's sandbox certificate not trusted (gh can't reach GitHub inside the sandbox): one
+// click trusts it (agentsetup.js: what it runs, asked first); "Trusting…" while it runs.
+function drawSandboxTrust() {
+  const sandbox = state.snapshot?.sandbox || {};
+  const button = $("#sandbox-trust");
+  if (!button) return;
+  button.hidden = !(sandbox.supported && sandbox.gh_trusted === false);
+  button.textContent = setupWords("sandbox") || "Trust the sandbox's certificate";
+  // Trusted since (from here, or in a terminal): its line goes too.
+  const hint = $("#sandbox-hint");
+  if (button.hidden && hint?.hasAttribute("data-trust")) hint.hidden = true;
+}
 function startOfDay(date) {
   const day = new Date(date);
   day.setHours(0, 0, 0, 0);
@@ -574,6 +592,8 @@ export function fillSettings() {
       : "";
   $("#sandbox-hint").textContent = hint;
   $("#sandbox-hint").hidden = !hint;
+  $("#sandbox-hint").toggleAttribute("data-trust", Boolean(sandbox.supported && sandbox.gh_trusted === false));
+  drawSandboxTrust();
   form.worker_idle_hours.value = settings.worker_idle_hours;
   form.stall_hours.value = settings.stall_hours ?? 4;
   form.mac_notifications.checked = settings.mac_notifications;

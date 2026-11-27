@@ -81,7 +81,7 @@ function agentOption(option) {
       { class: "status" },
       el("span", { text: status ? statusText(status) : `Run it on ${option.label}` }),
       setup && !setupWords(option.agent)
-        ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: setup === "install" ? "Pick to install" : "Pick to sign in" }))
+        ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: { install: "Pick to install", update: "Pick to update" }[setup] || "Pick to sign in" }))
         : limited(status) && status.on
           ? el("span", { class: "fix agent-fix" }, el("span", { class: "hint", text: "Pick: it starts there once its limit resets" }))
           : fix?.command

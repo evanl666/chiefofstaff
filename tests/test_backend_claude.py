@@ -679,7 +679,7 @@ async def test_a_turn_no_gate_admitted_stops_its_worker_and_its_version(
 @pytest.mark.parametrize(
     ("env", "problem"),
     [
-        ({"FAKE_CLAUDE_VERSION": "2.1.300"}, "Older than the versions tested (2.1.322)"),
+        ({"FAKE_CLAUDE_VERSION": "2.1.300"}, "2.1.300 is older than the versions tested (2.1.322)"),
         ({"FAKE_CLAUDE_VERSION": "nonsense"}, "could not tell which version"),
         ({"FAKE_CLAUDE_SIGNED_OUT": "1"}, "Not signed in to Claude Code: sign in from Settings"),
     ],

@@ -542,7 +542,7 @@ async def test_when_the_default_agent_cannot_run_a_new_worker_starts_on_copilot_
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
         assert notices == [
             "Started on Copilot: Codex could not start: Codex 0.160.0 is older than the versions "
-            "tested (0.167.2): update it."
+            "tested (0.167.2)."
         ]
     finally:
         await runtime.stop()

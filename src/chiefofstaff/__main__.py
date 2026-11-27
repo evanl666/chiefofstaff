@@ -110,32 +110,46 @@ def launch_token() -> tuple[str, bool]:
     return secrets.token_urlsafe(32), False
 
 
+def upgrader(launch: Launch) -> list[str]:
+    """What updates Chief of Staff where it was installed (none for uvx: the new version runs in
+    its place): `uv tool upgrade`, `pipx upgrade`, or, in its own virtual environment, uv's pip
+    or that environment's own."""
+    if launch.how == "tool":
+        return [shutil.which("uv") or "uv", "tool", "upgrade", "chiefofstaff"]
+    if launch.how == "pipx":
+        return [shutil.which("pipx") or "pipx", "upgrade", "chiefofstaff"]
+    if launch.how == "pip":
+        if uv := claude_setup.find_uv():
+            return [uv, "pip", "install", "--python", sys.executable, "--upgrade", "chiefofstaff"]
+        return [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                "--no-input", "--upgrade", "chiefofstaff"]  # fmt: skip
+    return []
+
+
 def restart_into(launch: Launch, token: str, directory: Path):
-    """Chief of Staff, stopped to update, updated (`uv tool upgrade`) and started again in this
+    """Chief of Staff, stopped to update, updated (upgrader) and started again in this
     process's place (its terminal, its arguments, its private link); when that fails, this
     version again, and its start says why (Runtime.after_update)."""
     print("Updating Chief of Staff and starting it again…", flush=True)
     environment = {**os.environ, RESTART_TOKEN: token}
     note = directory / UPDATE_NOTE
     note.unlink(missing_ok=True)
-    if launch.how == "tool":
-        uv = shutil.which("uv") or "uv"
+    if upgrade := upgrader(launch):
         # Claude's Agent SDK, which `uv tool upgrade` removes (its tool's record does not name
         # it: Chief of Staff installed it), put back at once; else the new version's start sets
-        # it up (claude_setup.py).
-        keep = claude_setup.kept_through_upgrade()
+        # it up (claude_setup.py). (pipx and pip leave it.)
+        keep = claude_setup.kept_through_upgrade() if launch.how == "tool" else ""
         try:
-            done = subprocess.run(  # noqa: S603  (uv, which installed it, and its package)
-                [uv, "tool", "upgrade", "chiefofstaff"],
-                capture_output=True, text=True, timeout=900, check=False,
+            done = subprocess.run(  # noqa: S603  (its installer, and its package)
+                upgrade, capture_output=True, text=True, timeout=900, check=False,
                 stdin=subprocess.DEVNULL,
             )  # fmt: skip
             if done.returncode:
                 said = (done.stderr or done.stdout).strip()[-500:]
-                note.write_text(said or "uv tool upgrade failed")
+                note.write_text(said or f"{' '.join(upgrade[:3])} failed")
             elif keep:
                 subprocess.run(  # noqa: S603  (uv, and the Claude extra's own requirement)
-                    [uv, "pip", "install", "--python", sys.executable, keep],
+                    [upgrade[0], "pip", "install", "--python", sys.executable, keep],
                     capture_output=True, text=True, timeout=claude_setup.SETUP_SECONDS,
                     check=False, stdin=subprocess.DEVNULL,
                 )  # fmt: skip

@@ -88,12 +88,13 @@ the [Codex CLI](https://developers.openai.com/codex/cli) or [Claude Code](https:
 (Codex and Claude Code on macOS and Linux; on Windows, Copilot for now):
 
 ```bash
-npm install -g @github/copilot && copilot login   # or: codex login, claude auth login
 uv tool install chiefofstaff && chiefofstaff       # or: pipx install chiefofstaff
 ```
 
 Chief of Staff runs on whichever is ready (Copilot first, then Codex, then Claude Code), and
-every session can run on any of them: Settings → Agents & models.
+every session can run on any of them: Settings → Agents & models. None installed or signed in
+yet? Home's card has *Install* and *Sign in* for each, run for you (or, in a terminal:
+`npm install -g @github/copilot && copilot login`, `codex login`, `claude auth login`).
 
 Your browser opens Chief of Staff through a private link printed in the terminal (keep it to
 yourself). Tell it where your code lives, like `~/workspace`, and type what you need.
@@ -103,9 +104,9 @@ Everything runs on your machine; data stays in `~/Library/Application Support/ch
 (Windows; with a Python installed from the Store app, Windows keeps it under that Python's
 `%LOCALAPPDATA%\Packages\...\LocalCache` instead: the `Data:` line at startup says where).
 Ctrl+C stops it, and sessions pick up where they left off next time. Options: `--port`,
-`--data-dir`, `--no-browser`, `--demo`. Update with
-`uv tool upgrade chiefofstaff` (or `pipx upgrade chiefofstaff`), or click **Update and restart**
-where the sidebar says a newer version is out (Settings → General turns that off). Without
+`--data-dir`, `--no-browser`, `--demo`. Click **Update and restart** where the sidebar says a
+newer version is out (Settings → General turns that off), or update with
+`uv tool upgrade chiefofstaff` (or `pipx upgrade chiefofstaff`). Without
 installing, start it with
 `uvx chiefofstaff@latest`: plain `uvx chiefofstaff` runs the version uv cached the first time,
 however old. Each new version leaves a cached environment behind in uv's cache: `uv cache prune`

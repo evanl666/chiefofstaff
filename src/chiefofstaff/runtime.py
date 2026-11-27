@@ -912,6 +912,8 @@ class Runtime:
         # Whether this machine can run Copilot's command sandbox, and whether gh works inside it.
         self.sandbox_host = sandbox_supported()
         self.sandbox_gh: bool | None = None
+        # The Copilot CLI's version where it is older than the versions tested ("" otherwise).
+        self.copilot_older = ""
         self.connect_lock = asyncio.Lock()
         # Done once the connection under way (a start, or connecting again) is over.
         self.connecting: asyncio.Future | None = None
@@ -1305,6 +1307,7 @@ class Runtime:
         await self.habits.stop()
         await self.connector.stop()
         await self.claude_setup.stop()
+        await self.setups.stop()  # (A sign-in, install or update left running: ended.)
         # Every agent's processes end before Chief of Staff does (each in a few seconds; at once,
         # so the stop stays short): what runs a turn of a session would otherwise still hold it
         # as the next start opens it again.
@@ -1459,7 +1462,7 @@ class Runtime:
         records = await asyncio.to_thread(copilot_records, pids, directory)
         self.store.set("copilot_pids", json.dumps(records))
         if not auth.isAuthenticated:
-            raise RuntimeError("Copilot is not signed in. Run `copilot login`.")
+            raise RuntimeError("Copilot is not signed in.")
         warning = await self.version_warning()
         with suppress(Exception):
             version = await self.backend.version()
@@ -1678,7 +1681,7 @@ class Runtime:
     def copilot_found(self) -> bool:
         """Whether Copilot's CLI is on this computer (Settings' command), as far as `which`
         tells; another backend (a test's, the demo's) unless its last start said not found."""
-        if self.backend_factory is copilot_backend:
+        if self.backend_factory in (copilot_backend, default_backend):
             return bool(shutil.which(self.store.settings().copilot_command or "copilot"))
         problem = self.copilot_problem
         return not problem or agents.status_of(COPILOT_AGENT, problem)["status"] != agents.MISSING
@@ -1711,6 +1714,23 @@ class Runtime:
         self.status = {"state": "starting", "error": "", "warning": text}
         self.publish_state()
 
+    def copilot_installed(self):
+        """Copilot's CLI installed from the page (agentsetup.Setups.install): found now, so it
+        starts (recover) as after turning it on, no longer said to be not installed."""
+        if agents.status_of(COPILOT_AGENT, self.copilot_problem)["status"] == agents.MISSING:
+            self.copilot_problem = COPILOT_STARTING
+            self.publish_state()
+
+    def copilot_updated(self, version: str):
+        """Copilot's CLI updated from the page (agentsetup.Setups.update): no longer older than
+        the versions tested; Chief of Staff runs the new one from Copilot's next start."""
+        warning = str(self.status.get("warning") or "")
+        if self.copilot_older and f" CLI {self.copilot_older} is older than" in warning:
+            self.status = {key: value for key, value in self.status.items() if key != "warning"}
+        self.copilot_older = ""
+        logger.info("Copilot CLI updated to %s.", version or "a newer version")
+        self.publish_state()
+
     async def version_warning(self) -> str:
         """A note for the owner when the agent CLI is older than the versions we tested, or
         newer than this release supports (another Copilot runs instead: backend.fallback)."""
@@ -1725,9 +1745,11 @@ class Runtime:
             version = await backend.version()
         except Exception:
             return ""
-        if older(version, OLDEST_CLI):
+        # Older than tested: its row and this line offer Update (agentsetup.py), asked first.
+        self.copilot_older = version if older(version, OLDEST_CLI) else ""
+        if self.copilot_older:
             name = backend.capabilities.name
-            return f"{name} CLI {version} is older than {OLDEST_CLI}. Update it: copilot update"
+            return f"{name} CLI {version} is older than the versions tested ({OLDEST_CLI})."
         return ""
 
     async def disconnect(self):
@@ -6232,7 +6254,10 @@ class Runtime:
         """One agent's row (look_for_agents), with its status as the @ picker says it."""
         entry = await self.looked_at_agent(name)
         status = self.agent_status(name)
-        kept = ("status", "said", "pays", "fix", "ways", "install", "expires", "key_env", "setup")
+        kept = (
+            "status", "said", "pays", "fix", "ways", "install", "update", "expires", "key_env",
+            "setup",
+        )  # fmt: skip
         if "setup" in status:
             entry["problem"] = ""  # Its Agent SDK: its status says where its setup stands.
         return entry | {key: status[key] for key in kept if key in status}
@@ -6464,13 +6489,19 @@ class Runtime:
         """Copilot as the @ picker and Settings say it: ready, starting, or why it can't run
         (its sign-in, not installed, its start), with the command that makes it ready; off,
         as found or not."""
-        ready = {"status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS}
+        ready: dict[str, Any] = {
+            "status": agents.READY, "said": "Ready", "pays": agents.COPILOT_PAYS,
+        }  # fmt: skip
+        if self.copilot_older:
+            # Older than tested (it runs all the same): Update, asked first.
+            ready["update"] = agents.UPDATE_FIX[COPILOT_AGENT]
         if not on:
-            return ready if self.copilot_found() else agents.status_of(COPILOT_AGENT, "not found")
+            return ready if self.copilot_found() else self.unready(COPILOT_AGENT, "not found")
         if (why := self.copilot_problem) == COPILOT_STARTING:
             return {"status": agents.CHECKING, "said": "Starting…"}
         if why:
-            found = agents.status_of(COPILOT_AGENT, why)
+            # Its sign-in, or its install: Sign in or Install from the page (agentsetup.py).
+            found = self.unready(COPILOT_AGENT, why)
             return found | ({"said": "Can't start"} if found["status"] == agents.PROBLEM else {})
         if self.backend is None:
             return {"status": agents.CHECKING, "said": "Starting…"}
@@ -6487,6 +6518,16 @@ class Runtime:
         elif found["status"] == agents.MISSING:
             found["install"] = agentsetup.install_methods(name)
         return found
+
+    def setup_agents(self) -> list[dict]:
+        """Where agents_status says nothing (Copilot alone): while no agent can run Chief of
+        Staff, each agent's status (Home's card offers Install and Sign in); Copilot's, while it
+        is older than the versions tested (Update)."""
+        if getattr(self, "demo", False):
+            return []
+        if self.status.get("state") == "error":
+            return [self.agent_status(name) for name in (COPILOT_AGENT, *agents.NAMES)]
+        return [self.agent_status(COPILOT_AGENT)] if self.copilot_older else []
 
     def agents_status(self) -> list[dict]:
         """Every agent's status (agent_status), Copilot first: only where another agent is
@@ -6601,7 +6642,10 @@ class Runtime:
             {"version": facts.get("version", ""), "account": facts.get("account", ""), **kept},
         )
         failed = self.agent_failed.get(name)
-        if failed and agents.status_of(name, failed)["status"] in {agents.SIGN_IN, agents.MISSING}:
+        if failed and (
+            agents.status_of(name, failed)["status"] in {agents.SIGN_IN, agents.MISSING}
+            or agents.TOO_OLD.search(failed)  # (Updated since: this look found it runs.)
+        ):
             self.agent_failed.pop(name, None)
         self.lost_sign_in.pop(name, None)
         self.agent_up(name)
@@ -12430,6 +12474,9 @@ class Runtime:
             **({"agents_found": found} if (found := self.agents_found()) else {}),
             # Each agent's status for the @ picker (ready, its sign-in needed, not installed).
             **({"agents_status": status} if (status := self.agents_status()) else {}),
+            # With Copilot alone: what the page can do for an agent while none can run (Install,
+            # Sign in on Home's card), or for Copilot older than tested (Update).
+            **({"setup_agents": found} if not status and (found := self.setup_agents()) else {}),
             **({"agent_offers": offers} if (offers := self.agent_offers()) else {}),
             # Sign-ins and installs started from the page, while they run (and their last words).
             **({"agent_setups": setups} if (setups := self.setups.view()) else {}),

@@ -693,7 +693,8 @@ class RefusalAnswer(StrictModel):
 
 
 class AgentSignIn(StrictModel):
-    method: Literal["browser", "device", "key", "console"] = "browser"
+    # "": the agent's own first way (Copilot's: its one-time code; the others': the browser).
+    method: Literal["", "browser", "device", "key", "console"] = ""
     # Signed in already: the owner confirmed signing in again (`codex login` signs out first).
     confirm: bool = False
     # An API key for `codex login --with-api-key`: sent to its stdin, kept nowhere.

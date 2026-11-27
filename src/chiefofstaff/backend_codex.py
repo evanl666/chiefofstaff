@@ -840,10 +840,10 @@ def codex_refused(version: str) -> str:
     if (found := release(version)) is None:
         return (
             f"Chief of Staff could not tell which version of Codex this is ({version or 'none'} "
-            f"said): update it to {OLDEST_CODEX} or later."
+            f"said): it needs {OLDEST_CODEX} or later."
         )
     if found < (release(OLDEST_CODEX) or ()):
-        return f"Codex {version} is older than the versions tested ({OLDEST_CODEX}): update it."
+        return f"Codex {version} is older than the versions tested ({OLDEST_CODEX})."
     return ""
 
 
@@ -2873,7 +2873,11 @@ class CodexSession:
             return
         self.signing_in.add(name)
         if ask := self.options.get("on_mcp_auth_request"):
-            request = {"serverName": name, "command": f"codex mcp login {shlex.quote(name)}"}
+            request = {
+                "serverName": name,
+                "command": f"codex mcp login {shlex.quote(name)}",
+                "agent": "codex",  # Its card's Sign in runs it (agentsetup.py).
+            }
             task = asyncio.ensure_future(ask(request, {"sessionId": self.session_id}))
             self.backend.tasks.add(task)
             task.add_done_callback(self.backend.tasks.discard)

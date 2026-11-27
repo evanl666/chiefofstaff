@@ -14,7 +14,7 @@
 import { $, api, el, toast } from "./dom.js";
 import { state } from "./state.js";
 import { copyFix, endsLine, modelText, statusOf } from "./agentpick.js";
-import { openSetup, retrySetup, setupOf, setupWords } from "./agentsetup.js";
+import { openSetup, retrySetup, setupKind, setupOf, setupWords, statusFor } from "./agentsetup.js";
 import { resetTime } from "./board.js";
 import { codeHtml } from "./text.js";
 
@@ -142,7 +142,8 @@ export function agentStatus(name, { look = null, status = null, sandboxed = fals
   if (now.status === "signin") return { text: "Sign in needed", tone: "warn", action: now.ways?.length ? "signin" : "" };
   // (Listed only while on, to be turned off: Settings offers no install; the @ list does.)
   if (now.status === "missing" || look?.found === false) return { text: "Not installed", tone: "off", action: "" };
-  if (cannotRun(look, status, sandboxed)) return { text: "Can't run here", tone: "bad", action: "" };
+  // Older than the versions tested: Update (its own updater, asked first).
+  if (cannotRun(look, status, sandboxed)) return { text: "Can't run here", tone: "bad", action: now.update?.command ? "update" : "" };
   if (now.status === "limited") return { text: `At its limit${now.resets_at ? ` · resets ${resetTime(now.resets_at * 1000)}` : ""}`, tone: "warn", action: "", works: true };
   if (now.status === "checking") return { text: "Checking…", tone: "off", action: "" };
   if (now.status === "ready") return on ? { text: "Ready", tone: "ready", action: "", works: true } : { text: "Ready · off", tone: "off", action: "", works: true };
@@ -487,7 +488,7 @@ function copilotRow() {
 function drawCopilot() {
   const runtime = state.snapshot.runtime || {};
   const status = $("#agent-copilot-status");
-  const known = statusOf("copilot");
+  const known = statusFor("copilot");
   const box = field("agent_copilot_enabled");
   let words = runtime.state === "error" ? ["Can't start", "bad"] : runtime.state === "starting" ? ["Starting…", "off"] : ["Ready", "ready"];
   let problem = runtime.state === "error" ? runtime.error : "";
@@ -498,9 +499,13 @@ function drawCopilot() {
   }
   status.textContent = words[0];
   status.className = `status ${words[1]}`;
-  const fix = known && (known.status === "signin" || known.status === "missing") ? known.fix : null;
+  // Sign in, Install or Update, run for the owner (agentsetup.js); "Signing in…" while it runs.
+  const kind = setupKind(known);
+  const busy = setupOf("copilot")?.state === "running" ? setupWords("copilot") : "";
+  const said = busy || { signin: "Sign in", install: "Install", update: "Update" }[kind];
+  const named = busy ? "Show what is being set up for Copilot" : { signin: "Sign in to Copilot", install: "Install the Copilot CLI", update: "Update the Copilot CLI" }[kind];
   const action = $("#agent-copilot .action-slot");
-  action.replaceChildren(...(fix?.command ? [el("button", { type: "button", class: "setup-action compact", text: "Copy command", title: fix.command, "aria-label": `Copy the command that ${known.status === "signin" ? "signs in to" : "installs"} Copilot`, "data-copy": "copilot" })] : []));
+  action.replaceChildren(...(said ? [el("button", { type: "button", class: "setup-action compact", text: said, "aria-label": named, "data-setup": "copilot" })] : []));
   $("#copilot-reconnect").hidden = !problem;
   alertsInto("copilot", problem ? [{ tone: "bad", text: problem }] : []);
   const warning = $("#copilot-warning");
@@ -637,8 +642,9 @@ function drawRow(name) {
   }
   // Its one action.
   const action = row.querySelector(".action-slot");
-  const said = { signin: "Sign in", install: "Install", show: "Show", retry: status.words }[status.action];
-  const named = { signin: `Sign in to ${label(name)}`, install: `Install ${label(name)}`, show: `Show the ${setupOf(name)?.kind === "install" ? "install" : "sign-in"} of ${label(name)}`, retry: `Set up ${label(name)}${status.words === "Retry" ? " again" : ""}` }[status.action];
+  const said = { signin: "Sign in", install: "Install", update: "Update", show: "Show", retry: status.words }[status.action];
+  const shown = { install: "install", update: "update" }[setupOf(name)?.kind] || "sign-in";
+  const named = { signin: `Sign in to ${label(name)}`, install: `Install ${label(name)}`, update: `Update ${label(name)}`, show: `Show the ${shown} of ${label(name)}`, retry: `Set up ${label(name)}${status.words === "Retry" ? " again" : ""}` }[status.action];
   const target = status.action === "retry" ? { "data-retry": name } : { "data-setup": name };
   action.replaceChildren(...(said ? [el("button", { type: "button", class: "setup-action compact", text: said, "aria-label": named, ...target })] : []));
   alertsInto(name, agentAlerts(name, { look: now.look, status: now.status, sandboxed: now.sandboxed, failure: failed }));
@@ -719,14 +725,23 @@ function setupDetailsFold(name, setup, open) {
 // A setup run's news (agentsetup.js): its row says it at once.
 export function setupChanged() {
   if (!$("#settings-dialog")?.open || !$("#agents-page .work-grid")) return;
+  if ($("#agent-copilot-status")) drawCopilot();
   for (const name of others) drawRow(name);
   syncWork();
 }
 // The snapshot changed (an agent's status, Copilot's): the rows say so, fields untouched.
+function staleLook(name) {
+  const look = lookOf(name);
+  const status = statusOf(name);
+  if (!look || !status) return false;
+  if (look.setup && !status.setup) return true;
+  return status.status === "ready" && (Boolean(look.update) || ["signin", "missing", "problem"].includes(look.status));
+}
 export function agentsStateChanged() {
   if (!$("#settings-dialog")?.open || !$("#agent-rows")) return;
-  // Set up meanwhile (its Agent SDK): looked at again, for its version, sign-in and models.
-  if (looked && !looking && others.some((name) => lookOf(name)?.setup && !statusOf(name)?.setup)) lookAtAgents();
+  // Set up meanwhile (its Agent SDK; signed in, installed or updated from here): looked at
+  // again, for its version, sign-in and models.
+  if (looked && !looking && others.some(staleLook)) lookAtAgents();
   for (const name of others) drawRow(name);
   drawCopilot();
   syncWork();

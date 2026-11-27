@@ -531,7 +531,10 @@ def test_how_it_updates_is_how_it_was_launched(monkeypatch):
         ("/Users/acme/.local/share/uv/tools/chiefofstaff/bin/chiefofstaff", "--no-browser"),
     )
     pipx = updates.launched("/Users/acme/.local/pipx/venvs/chiefofstaff", args)
-    assert (pipx.command, pipx.restart) == ("pipx upgrade chiefofstaff", ())
+    assert (pipx.command, pipx.restart) == (
+        "pipx upgrade chiefofstaff",
+        ("/Users/acme/.local/pipx/venvs/chiefofstaff/bin/chiefofstaff", *args, "--no-browser"),
+    )
     venv = updates.launched("/Users/acme/tools/.venv", args)
     assert (venv.command, venv.restart) == ("pip install --upgrade chiefofstaff", ())
     monkeypatch.setattr(updates.sys, "platform", "win32")
@@ -540,6 +543,52 @@ def test_how_it_updates_is_how_it_was_launched(monkeypatch):
     assert updates.launched("/Users/acme/tools/.venv", args).how == "source"
     assert updates.newer("0.1.10", "0.1.9") and not updates.newer("0.1.47", "0.1.47")
     assert not updates.newer("0.2.0rc1", "0.1.47"), "never a pre-release"
+
+
+def test_pipx_and_a_pip_install_of_its_own_update_themselves_too(monkeypatch, tmp_path):
+    """Update and restart for pipx (`pipx upgrade`), and for pip into a virtual environment of
+    its own (uv's pip, else that environment's): never a system's Python, nor without an
+    installer to update it with; its new version started in its place, as for `uv tool`."""
+    import sys
+
+    from chiefofstaff import __main__ as main_module
+    from chiefofstaff import claude_setup, updates
+
+    monkeypatch.setattr(updates, "editable", lambda: False)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(updates.sys, "platform", "darwin")
+    monkeypatch.setattr(claude_setup, "find_uv", lambda: "")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    for name in ("chiefofstaff", "pip"):
+        (venv / "bin" / name).write_text("#!/bin/sh\n")
+    pip = updates.launched(str(venv), ("--port", "8800"))
+    assert (pip.how, pip.command) == ("pip", "pip install --upgrade chiefofstaff")
+    assert pip.restart == (str(venv / "bin" / "chiefofstaff"), "--port", "8800", "--no-browser")
+    (venv / "bin" / "pip").unlink()
+    assert updates.launched(str(venv), ()).restart == (), "nothing to update it with"
+    monkeypatch.setattr(claude_setup, "find_uv", lambda: "/u/uv")
+    assert updates.launched(str(venv), ()).restart, "uv's pip"
+    (tmp_path / "system" / "bin").mkdir(parents=True)
+    assert updates.launched(str(tmp_path / "system"), ()).restart == (), "a system's Python"
+    ran = []
+    monkeypatch.setattr(main_module.subprocess, "run", lambda command, **options: (
+        ran.append(command) or SimpleNamespace(returncode=0, stderr="", stdout="")))  # fmt: skip
+    monkeypatch.setattr(main_module.os, "execve", lambda *arguments: None)
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: f"/owner/bin/{name}")
+    pipx = Launch("pipx", "pipx upgrade chiefofstaff", ("/p/bin/chiefofstaff", "--no-browser"))
+    in_venv = Launch("pip", pip.command, ("/v/bin/chiefofstaff", "--no-browser"))
+    main_module.restart_into(pipx, "k" * 43, tmp_path)
+    main_module.restart_into(in_venv, "k" * 43, tmp_path)
+    monkeypatch.setattr(claude_setup, "find_uv", lambda: "")
+    main_module.restart_into(in_venv, "k" * 43, tmp_path)
+    assert ran == [
+        ["/owner/bin/pipx", "upgrade", "chiefofstaff"],
+        ["/u/uv", "pip", "install", "--python", sys.executable, "--upgrade", "chiefofstaff"],
+        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+         "--upgrade", "chiefofstaff"],
+    ]  # fmt: skip
 
 
 def test_a_uv_tool_install_is_known_through_a_link(monkeypatch, tmp_path):

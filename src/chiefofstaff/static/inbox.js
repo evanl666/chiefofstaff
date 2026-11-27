@@ -12,6 +12,7 @@ import { artifactItems } from "./artifacts.js";
 import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
 import { agentName } from "./agentpick.js";
+import { setupAction, setupWords, statusFor } from "./agentsetup.js";
 import { heldItem, heldQuestions, peerWaiting, teamsSection } from "./team.js";
 import { folding, subjectVersion } from "./subjects.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
@@ -755,12 +756,47 @@ function renderNotices() {
 // First run: what is missing before work can start.
 const NO_PROJECTS = "cos.noProjectsCard";  // The owner chose to work without projects for now.
 
+// Each agent's step on the setup card: Install or Sign in, run for the owner (agentsetup.js), its
+// status said beside it; the commands to run in a terminal instead stay under a fold.
+const SETUP_AGENTS = ["copilot", "codex", "claude"];
+const setupState = () => SETUP_AGENTS.map((name) => `${statusFor(name)?.status || ""}${setupWords(name)}`).join(",");
+const TERMINAL = {
+  copilot: ["npm install -g @github/copilot", "copilot login"],
+  codex: ["curl -fsSL https://chatgpt.com/codex/install.sh | sh", "codex login"],
+  claude: ["curl -fsSL https://claude.ai/install.sh | bash", "claude auth login"],
+};
+function inTerminalFold(names) {
+  const lines = names.map((name) => el("li", {}, `${agentName(name)}: `, el("code", { text: TERMINAL[name][0] }), ", then ", el("code", { text: TERMINAL[name][1] })));
+  return el("details", { class: "setup-manual" }, el("summary", { text: "Or in a terminal" }), el("ul", {}, ...lines));
+}
+// (On Windows, Chief of Staff runs on Copilot only.)
+const offered = () => (state.snapshot.runtime.windows ? ["copilot"] : SETUP_AGENTS);
+// An agent not looked at yet ("Checking…": installed, not on): looked at now, at most every 5
+// seconds, so that its step says what it needs.
+let looked = 0;
+async function lookAtSetup() {
+  if (Date.now() - looked < 5000) return;
+  looked = Date.now();
+  try {
+    const { agents_status: found } = await api("/api/agents/status", { method: "POST" });
+    if (found?.length) state.snapshot = { ...state.snapshot, agents_status: found };
+    renderNotices();
+  } catch {
+    // (Shown as last known.)
+  }
+}
+function agentStep(name) {
+  const status = statusFor(name);
+  const words = setupWords(name) || (status?.update ? "Older than the versions tested" : "") || { missing: "Not installed", signin: "Sign-in needed", ready: "Ready" }[status?.status] || status?.said || "";
+  return el("li", { class: "setup-agent" }, el("span", { class: "name", text: agentName(name) }), words ? el("span", { class: "muted", text: ` · ${words}`, title: status?.said || undefined }) : "", " ", setupAction(status, { compact: true }) || "");
+}
 function setupCard() {
   const snap = state.snapshot;
-  const key = `${snap.runtime.state}:${snap.runtime.error}:${Boolean(snap.runtime.settingup)}:${snap.settings.projects.length}:${snap.settings.code_folder}`;
+  const key = `${snap.runtime.state}:${snap.runtime.error}:${Boolean(snap.runtime.settingup)}:${snap.settings.projects.length}:${snap.settings.code_folder}:${snap.runtime.state === "error" ? setupState() : ""}`;
   let node = document.getElementById("home-setup");
   if (node?.dataset.key === key) return node;
   if (snap.runtime.state === "error") {
+    if (offered().some((name) => statusFor(name)?.status === "checking")) lookAtSetup();
     const retry = el("button", { type: "button", text: "Retry", onclick: async () => {
       retry.disabled = true;
       try {
@@ -786,12 +822,9 @@ function setupCard() {
           el("div", { class: "head" }, el("span", { class: "label", text: "Set up a coding agent" })),
           el("p", { text: "Chief of Staff runs your work in GitHub Copilot, Codex or Claude Code sessions, and none of them is ready yet:" }),
           el("p", { class: "muted", text: snap.runtime.error }),
-          el(
-            "ol",
-            {},
-            el("li", {}, "Install one and sign in. Copilot: ", el("code", { text: "npm install -g @github/copilot" }), ", then ", el("code", { text: "copilot login" }), ". Codex: ", el("code", { text: "curl -fsSL https://chatgpt.com/codex/install.sh | sh" }), ", then ", el("code", { text: "codex login" }), ". Claude Code: ", el("code", { text: "curl -fsSL https://claude.ai/install.sh | bash" }), ", then ", el("code", { text: "claude auth login" }), "."),
-            el("li", { text: then }),
-          ),
+          el("p", { text: `Install one and sign in: Chief of Staff runs each step for you. ${then}` }),
+          el("ul", { class: "setup-agents" }, ...offered().map(agentStep)),
+          inTerminalFold(offered()),
           el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
         )
       : el(
@@ -803,13 +836,9 @@ function setupCard() {
           snap.runtime.windows
             ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." })
             : el("p", { class: "muted", text: "Codex or Claude Code can run it too: turn one on in Settings → Agents & models." }),
-          el(
-            "ol",
-            {},
-            el("li", {}, "Install the Copilot CLI: ", el("code", { text: "npm install -g @github/copilot" })),
-            el("li", {}, "Sign in: ", el("code", { text: "copilot login" })),
-            el("li", { text: then }),
-          ),
+          el("p", { text: `Install it and sign in: Chief of Staff runs each step for you. ${then}` }),
+          el("ul", { class: "setup-agents" }, agentStep("copilot")),
+          inTerminalFold(["copilot"]),
           el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
         );
   } else if (snap.runtime.state === "ready" && !snap.demo && !snap.settings.projects.length && !snap.settings.code_folder && localStorage.getItem(NO_PROJECTS) !== "1") {

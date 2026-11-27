@@ -307,10 +307,10 @@ def claude_refused(version: str) -> str:
     if (found := release(version)) is None:
         return (
             "Chief of Staff could not tell which version of Claude Code this is "
-            f"({version or 'none'} said): update it to {OLDEST_CLAUDE} or later."
+            f"({version or 'none'} said): it needs {OLDEST_CLAUDE} or later."
         )
     if found < (release(OLDEST_CLAUDE) or ()):
-        return f"Older than the versions tested ({OLDEST_CLAUDE}): update it (claude update)."
+        return f"Claude Code {version} is older than the versions tested ({OLDEST_CLAUDE})."
     return ""
 
 
@@ -1325,6 +1325,7 @@ class ClaudeWorker:
         # schedules (id -> what fires and when), the plan it wrote last, its permission mode,
         # the agents Claude offers it, and what it was asked at a card (call -> what).
         self.agent_tasks: dict[str, str] = {}
+        self.signing_in: set[str] = set()  # Its MCP servers the owner was asked to sign in to.
         self.subagents: dict[str, dict] = {}
         self.schedules: dict[str, dict] = {
             str(entry.get("id")): dict(entry)
@@ -2242,6 +2243,9 @@ class ClaudeWorker:
         }
         if servers.get("chief") != "connected":
             problems.append("Chief of Staff's tools not connected")
+        for name, status in servers.items():
+            if status == "needs-auth" and name and name != "chief":
+                self.needs_sign_in(str(name))
         if self.role_only and (
             more := [
                 str(tool)
@@ -2262,6 +2266,20 @@ class ClaudeWorker:
             )
         if model := message.get("model"):
             self.current_model = str(model)
+
+    def needs_sign_in(self, name: str):
+        """One of its MCP servers needs the owner's sign-in: they are asked as for Copilot's,
+        with Claude's own command, which their card's Sign in runs (Claude keeps the sign-in;
+        Chief of Staff never sees it). Once per server."""
+        if name in self.signing_in or not (ask := self.options.get("on_mcp_auth_request")):
+            return
+        self.signing_in.add(name)
+        request = {
+            "serverName": name,
+            "command": f"claude mcp login {shlex.quote(name)}",
+            "agent": "claude",
+        }
+        self.background_task(ask(request, {"sessionId": self.session_id}))
 
     def stream_event(self, message: dict):
         streamed = mapping(message.get("event"))

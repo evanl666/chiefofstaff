@@ -153,7 +153,7 @@ async def test_copilot_signed_out_at_a_start_runs_on_codex_and_back_without_a_re
         assert runtime.ready() and not runtime.copilot_ready(), runtime.status
         await until(lambda: runtime.agent(router) == "codex")
         assert notices(again, router)[-1] == (
-            "The Router runs on Codex for now: Copilot is not signed in. Run `copilot login`."
+            "The Router runs on Codex for now: Copilot is not signed in."
         )
         status = copilot_status(runtime)
         assert (status["on"], status["status"], status["fix"]["command"]) == (
@@ -299,7 +299,7 @@ async def test_copilot_alone_signed_out_starts_by_itself_once_signed_in(tmp_path
     harness = Harness(tmp_path / "data", client=client)
     runtime = await harness.connect()
     try:
-        assert runtime.status["error"] == "Copilot is not signed in. Run `copilot login`."
+        assert runtime.status["error"] == "Copilot is not signed in."
         assert runtime.status.get("waits") and not runtime.status.get("setup")
         await runtime.recover_now()
         assert not runtime.ready()

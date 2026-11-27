@@ -42,7 +42,14 @@ HOME = Path(os.environ.get("FAKE_CLAUDE_HOME") or ".")
 REMOTE = os.environ.get("ANTHROPIC_BASE_URL", "")
 # How Claude gives the model a note sent while a tool ran (2.1.322: a message of its own).
 STEERED = "The user sent a new message while you were working:"
-VERSION = os.environ.get("FAKE_CLAUDE_VERSION", "2.1.322")
+# Its version, or the one `claude update` updated it to (kept in its home).
+VERSION = (
+    (HOME / "updated").read_text().strip()
+    if (HOME / "updated").is_file()
+    else os.environ.get("FAKE_CLAUDE_VERSION", "2.1.322")
+)
+# MCP servers of the owner's that need their sign-in (each turn's init says "needs-auth").
+NEEDS_AUTH = list(filter(None, os.environ.get("FAKE_CLAUDE_NEEDS_AUTH", "").split(",")))
 UNASKED = set(filter(None, os.environ.get("FAKE_CLAUDE_UNASKED", "").split(",")))
 MODELS = [
     {
@@ -548,7 +555,8 @@ class Fake:
             "model": self.model,
             "permissionMode": self.mode,
             "claude_code_version": VERSION,
-            "mcp_servers": [{"name": name, "status": "connected"} for name in names],
+            "mcp_servers": [{"name": name, "status": "connected"} for name in names]
+            + [{"name": name, "status": "needs-auth"} for name in NEEDS_AUTH],
             "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"],
             "plugins": [],
             "tools": [*self.builtins, *(f"mcp__chief__{name}" for name in self.chief_tools)],
@@ -1674,6 +1682,26 @@ def main():
         return
     if argv[:1] == ["auth"]:
         auth(argv[1:])
+        return
+    if argv[:1] == ["update"]:
+        if failed := os.environ.get("FAKE_CLAUDE_UPDATE_FAILS"):
+            sys.stderr.write(f"Error: {failed}\n")
+            sys.exit(1)
+        HOME.mkdir(parents=True, exist_ok=True)
+        (HOME / "updated").write_text(newest := os.environ.get("FAKE_CLAUDE_UPDATE_TO", "2.1.332"))
+        sys.stdout.write(f"Successfully updated from {VERSION} to version {newest}\n")
+        return
+    if argv[:2] == ["mcp", "login"]:
+        sys.stdout.write(
+            f"Opening browser to sign in to {argv[2]}…\nIf it didn't open, visit: "
+            f"https://mcp.acme.test/authorize?client_id=fake&state={os.getpid()}\n"
+        )
+        sys.stdout.flush()
+        approve = HOME / "approve-mcp"
+        while not approve.exists():
+            time.sleep(0.05)
+        approve.unlink()
+        sys.stdout.write(f"Signed in to {argv[2]}.\n")
         return
     asyncio.run(serve(arguments(argv)))
 

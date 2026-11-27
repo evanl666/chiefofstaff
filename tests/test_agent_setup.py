@@ -365,6 +365,22 @@ async def test_an_agent_turned_off_or_stopped_while_it_starts_is_not_left_runnin
         await runtime.stop()
 
 
+async def test_a_sign_in_still_running_ends_as_chief_of_staff_stops(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Chief of Staff stopped while a sign-in waits for the owner: its process ends with it (as
+    Cancel ends it), never left waiting on its local port."""
+    monkeypatch.setenv("FAKE_CODEX_SIGNED_OUT", "1")
+    _, runtime = await started(tmp_path)
+    await runtime.setups.sign_in("codex")
+    await until(lambda: runtime.setups.view()["codex"].get("url"))
+    process = runtime.setups.runs["codex"].process
+    assert process is not None
+    await runtime.stop()
+    await until(lambda: not alive(process.pid), 10)
+    assert runtime.setups.runs["codex"].state == "cancelled"
+
+
 async def test_a_failed_install_says_its_last_words(tmp_path, monkeypatch, quick):
     script = "echo 'curl: (6) Could not resolve host: chatgpt.com' >&2; exit 6"
     monkeypatch.setattr(agentsetup, "INSTALLERS", {"codex": (("script", script, ""),),
@@ -1371,3 +1387,238 @@ def test_uv_is_found_where_its_installers_put_it(tmp_path):
 async def test_no_real_install_runs_while_the_tests_run():
     with pytest.raises(RuntimeError, match=r"^not while Chief of Staff's own tests run$"):
         await claude_setup.run_command(["/bin/echo", "never"], 5)
+
+
+# Copilot from the page, Update, the sandbox's certificate (the owner's commands, run for them) ---
+
+
+def copilot_stand_in(directory: Path, monkeypatch) -> Path:
+    """The stand-in Copilot CLI (tests/fake_copilot.py) as `copilot` on the PATH; its state, and
+    each run of it, in `directory`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    command = directory / "copilot"
+    command.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).parent / "fake_copilot.py"}" "$@"\n'
+    )
+    command.chmod(0o755)
+    (directory / "home").mkdir(exist_ok=True)
+    monkeypatch.setenv("FAKE_COPILOT_HOME", str(directory / "home"))
+    monkeypatch.setenv("FAKE_COPILOT_RUNS", str(directory / "runs"))
+    monkeypatch.setenv("PATH", f"{directory}{os.pathsep}{os.environ['PATH']}")
+    return directory
+
+
+def copilot_ran(directory: Path) -> list[str]:
+    runs = directory / "runs"
+    return runs.read_text().splitlines() if runs.exists() else []
+
+
+async def test_copilot_signs_in_from_the_page_and_chief_of_staff_starts_by_itself(
+    tmp_path, monkeypatch, quick
+):
+    """Copilot alone, signed out: Home's card and its row offer Sign in, which runs `copilot
+    login` with its one-time code (said by Copilot whatever runs it); once the owner enters it,
+    Chief of Staff starts by itself (no Retry, no terminal, no restart)."""
+    from test_without_copilot import SignedOut
+
+    bin_dir = copilot_stand_in(tmp_path / "bin", monkeypatch)
+    await (await Harness(tmp_path / "data").connect()).stop()
+    client = SignedOut()
+    harness = Harness(tmp_path / "data", client=client)
+    runtime = await harness.connect()
+    try:
+        assert runtime.status["error"] == "Copilot is not signed in."
+        shown = {found["name"]: found for found in runtime.snapshot()["setup_agents"]}
+        assert shown["copilot"]["status"] == agents.SIGN_IN, "for Home's card, Copilot alone"
+        assert [way["method"] for way in shown["copilot"]["ways"]] == ["device", "browser"]
+        view = await runtime.setups.sign_in("copilot")
+        assert (view["kind"], view["method"]) == ("signin", "device")
+        await until(lambda: runtime.setups.view()["copilot"].get("code"))
+        run = runtime.setups.view()["copilot"]
+        assert (run["url"], run["code"]) == ("https://github.com/login/device", "ACME-1234")
+        assert not runtime.ready()
+        client.signed_in = True  # (What Copilot says once the owner entered the code.)
+        (bin_dir / "home" / "approve").write_text("ok")
+        await until(lambda: runtime.setups.view()["copilot"]["state"] == "done", 30)
+        assert runtime.copilot_ready() and harness.router_id
+        assert copilot_ran(bin_dir) == ["login --device-code"]
+        assert "setup_agents" not in runtime.snapshot()
+    finally:
+        await runtime.stop()
+
+
+async def test_copilot_installs_from_the_page_and_its_sign_in_follows(tmp_path, monkeypatch, quick):
+    """Not installed: Install runs Copilot's official installer, word for word; found where it
+    put it (not on the PATH Chief of Staff started with), Copilot starts, says it is signed
+    out, and Sign in follows at once."""
+    from test_without_copilot import NOT_FOUND, SignedOut
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    from agent_paths import without_agents
+
+    stand_in = copilot_stand_in(tmp_path / "stand-in", monkeypatch)
+    hidden = frozenset({"claude", "codex", "copilot"})  # (Nor the owner's own Copilot CLI.)
+    monkeypatch.setenv("PATH", without_agents(os.environ["PATH"], tmp_path / "path", hidden))
+    bin_dir = home / ".local" / "bin"
+    script = f'mkdir -p "{bin_dir}" && cp "{stand_in / "copilot"}" "{bin_dir}/copilot"'
+    monkeypatch.setitem(agentsetup.INSTALLERS, "copilot", (("script", script, ""),))
+    monkeypatch.setattr(agentsetup, "known_dirs", lambda: [bin_dir])
+    monkeypatch.setattr(agentsetup, "npm_bin", lambda: asyncio.sleep(0, None))
+    client = SignedOut()
+    harness = Harness(tmp_path / "data", client=client)
+
+    def factory(settings):
+        if not (bin_dir / "copilot").exists():
+            raise RuntimeError(NOT_FOUND)
+        return client
+
+    harness.runtime.backend_factory = factory
+    runtime = await harness.connect()
+    try:
+        shown = {found["name"]: found for found in runtime.snapshot()["setup_agents"]}
+        assert shown["copilot"]["status"] == agents.MISSING
+        assert shown["copilot"]["install"][0] == {"method": "script", "command": script}
+        await runtime.setups.install("copilot")
+        await until(lambda: runtime.setups.runs["copilot"].kind == "signin", 30)
+        assert harness.store.get("agentpath:copilot") == str(bin_dir)
+        assert runtime.agent_status("copilot")["status"] == agents.SIGN_IN
+        await until(lambda: runtime.setups.view()["copilot"].get("code"))
+        client.signed_in = True
+        (stand_in / "home" / "approve").write_text("ok")
+        await until(lambda: runtime.copilot_ready(), 30)
+    finally:
+        await runtime.stop()
+
+
+def test_copilot_off_and_not_installed_says_so_with_install(tmp_path, monkeypatch):
+    """Copilot turned off is never started, so whether it is installed is looked for on the
+    PATH (as Chief of Staff starts it): not there, its row offers Install, not Ready · off."""
+    from agent_paths import without_agents
+
+    hidden = frozenset({"claude", "codex", "copilot"})
+    monkeypatch.setenv("PATH", without_agents(os.environ["PATH"], tmp_path / "path", hidden))
+    harness = Harness(tmp_path / "data")
+    harness.store.set(agents.CONFIG, json.dumps({"copilot": {"enabled": False}}))
+    harness.runtime.backend_factory = runtime_module.default_backend
+    status = harness.runtime.agent_status("copilot")
+    assert (status["status"], status["on"]) == (agents.MISSING, False)
+    assert status["install"][0] == {"method": "script", "command": agentsetup.INSTALLERS[
+        "copilot"][0][1]}  # fmt: skip
+    copilot_stand_in(tmp_path / "bin", monkeypatch)
+    assert harness.runtime.agent_status("copilot")["status"] == agents.READY
+
+
+async def test_copilot_older_than_tested_is_updated_from_the_page_once_asked(
+    tmp_path, monkeypatch, quick
+):
+    """Older than the versions tested: its warning names no command, and Update runs its own
+    updater (`copilot update`); once it is no longer older, nothing more is offered."""
+    bin_dir = copilot_stand_in(tmp_path / "bin", monkeypatch)
+    monkeypatch.setenv("FAKE_COPILOT_VERSION", "1.0.50")
+    harness = Harness(tmp_path / "data")
+    harness.client.cli_version = "1.0.50"
+    runtime = await harness.connect()
+    try:
+        assert runtime.status["warning"] == (
+            "Fake CLI 1.0.50 is older than the versions tested (1.0.100)."
+        )
+        (shown,) = runtime.snapshot()["setup_agents"]
+        assert shown["update"] == {"command": "copilot update", "then": ""}
+        view = await runtime.setups.update("copilot")
+        assert (view["kind"], view["command"]) == ("update", "copilot update")
+        await until(lambda: runtime.setups.view()["copilot"]["state"] != "running", 30)
+        assert runtime.setups.view()["copilot"]["state"] == "done"
+        assert copilot_ran(bin_dir) == ["update"]
+        assert "warning" not in runtime.status and "setup_agents" not in runtime.snapshot()
+    finally:
+        await runtime.stop()
+
+
+async def test_codex_older_than_tested_is_updated_and_a_failed_update_says_why_once(
+    tmp_path, codex_installed, monkeypatch, quick
+):
+    """Codex refused as older than tested: its row offers Update (`codex update`, asked first:
+    the page shows it), and turns Ready once updated, without a restart. A failed update says
+    its own words, its command kept for Details, and is not run again by itself."""
+    _, runs = codex_installed
+    monkeypatch.setenv("FAKE_CODEX_VERSION", "0.160.0")
+    monkeypatch.setenv("FAKE_CODEX_UPDATE_FAILS", "network unreachable")
+    _, runtime = await started(tmp_path)
+    try:
+        await runtime.refresh_agent_status()
+        status = runtime.agent_status("codex")
+        assert status["status"] == agents.PROBLEM
+        assert status["said"] == "Codex 0.160.0 is older than the versions tested (0.167.2)."
+        assert status["update"] == {"command": "codex update", "then": ""}
+        await runtime.setups.update("codex")
+        await until(lambda: runtime.setups.view()["codex"]["state"] == "failed", 20)
+        failed = runtime.setups.view()["codex"]
+        assert failed["error"] == "Error: network unreachable"
+        assert failed["command"] == "codex update", "to run yourself, under Details"
+        await asyncio.sleep(0.5)
+        assert ran(runs).count("update") == 1, "never again by itself"
+        monkeypatch.delenv("FAKE_CODEX_UPDATE_FAILS")
+        await runtime.setups.update("codex")  # Try again.
+        await until(lambda: runtime.setups.view()["codex"]["state"] == "done", 20)
+        assert runtime.agent_status("codex")["status"] == agents.READY
+        assert "update" not in runtime.agent_status("codex")
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize(
+    ("ca", "steps"),
+    [
+        ("3", ["status", "create", "trust", "status"]),
+        ("5", ["status", "rotate", "trust", "status"]),
+        ("0", ["status"]),
+    ],
+)
+async def test_the_sandboxs_certificate_is_trusted_in_one_click(
+    tmp_path, monkeypatch, quick, ca, steps
+):
+    """Settings' Trust the sandbox's certificate: `copilot sandbox ca create`, then `trust`
+    (one to rotate first, `rotate`; trusted already, nothing), its status again; gh works in
+    the sandbox from then on."""
+    bin_dir = copilot_stand_in(tmp_path / "bin", monkeypatch)
+    monkeypatch.setenv("FAKE_COPILOT_CA", ca)
+    monkeypatch.setattr(agentsetup, "keychain", lambda: True)
+    _, runtime = await started(tmp_path)
+    try:
+        runtime.sandbox_gh = False
+        view = await runtime.setups.trust_sandbox()
+        assert (view["key"], view["kind"], view["command"]) == (
+            "sandbox", "trust", "copilot sandbox ca create && copilot sandbox ca trust",
+        )  # fmt: skip
+        await until(lambda: runtime.setups.view()["sandbox"]["state"] != "running", 20)
+        assert runtime.setups.view()["sandbox"]["state"] == "done"
+        assert copilot_ran(bin_dir) == [f"sandbox ca {step}" for step in steps]
+        assert runtime.snapshot()["sandbox"]["gh_trusted"] is True
+    finally:
+        await runtime.stop()
+
+
+async def test_a_trust_the_owner_declines_says_why_and_is_not_tried_again(
+    tmp_path, monkeypatch, quick
+):
+    bin_dir = copilot_stand_in(tmp_path / "bin", monkeypatch)
+    monkeypatch.setenv("FAKE_COPILOT_TRUST_FAILS", "The authorization was canceled by the user.")
+    monkeypatch.setattr(agentsetup, "keychain", lambda: True)
+    _, runtime = await started(tmp_path)
+    try:
+        runtime.sandbox_gh = False
+        await runtime.setups.trust_sandbox()
+        await until(lambda: runtime.setups.view()["sandbox"]["state"] == "failed", 20)
+        failed = runtime.setups.view()["sandbox"]
+        assert failed["error"] == "Error: The authorization was canceled by the user."
+        await asyncio.sleep(0.5)
+        steps = ["status", "create", "trust"]
+        assert copilot_ran(bin_dir) == [f"sandbox ca {step}" for step in steps], "not again"
+        assert runtime.snapshot()["sandbox"]["gh_trusted"] is False
+        monkeypatch.setattr(agentsetup, "keychain", lambda: False)
+        with pytest.raises(ValueError, match="in a terminal on this system"):
+            await runtime.setups.trust_sandbox()
+    finally:
+        await runtime.stop()

@@ -1,23 +1,33 @@
-// Sign in and Install for another coding agent (agentsetup.py): where an agent says "Sign-in
-// needed" or "Not installed", one click runs that agent's own CLI for the owner (Chief of Staff
-// never signs in for them: they finish on the agent's own page). One dialog shows the run: the
-// page to open (Open sign-in page, Copy link), a one-time code, a field for a code it asks to be
-// pasted, its output; it turns Ready by itself. Install shows its command, word for word, first.
+// Sign in, Install and Update for a coding agent, Copilot included (agentsetup.py): where an
+// agent says "Sign-in needed", "Not installed" or that it is older than the versions tested, one
+// click runs that agent's own CLI for the owner (Chief of Staff never signs in for them: they
+// finish on the agent's own page). One dialog shows the run: the page to open (Open sign-in page,
+// Copy link), a one-time code, a field for a code it asks to be pasted, its output; it turns
+// Ready by itself. Install and Update show their command, word for word, first, as the owner's
+// consent. The same dialog trusts Copilot's sandbox certificate, and signs in to an MCP server a
+// Codex or Claude worker needs (from its card); each failure says why, with Try again, and the
+// command to run yourself under Details.
 import { api, el, toast } from "./dom.js";
 import { state } from "./state.js";
 import { agentMark, agentName, closeAgentPopover, copyFix, statusOf, statuses } from "./agentpick.js";
 
-const TITLES = { codex: "Codex", claude: "Claude Code" };
+const TITLES = { copilot: "Copilot", codex: "Codex", claude: "Claude Code" };
 const title = (name) => TITLES[name] || agentName(name);
-// What a run is doing now, from its events (agent_setup) or the page's last snapshot.
-export const setupOf = (name) => state.agentSetups?.[name] || state.snapshot?.agent_setups?.[name] || null;
+// What a run is doing now, from its events (agent_setup) or the page's last snapshot: an
+// agent's, the sandbox's ("sandbox"), an MCP card's ("mcp:<card>").
+export const setupOf = (key) => state.agentSetups?.[key] || state.snapshot?.agent_setups?.[key] || null;
 const running = (name) => setupOf(name)?.state === "running";
-// The status words while a run of it is on: "Signing in…", "Installing…".
+// An agent's status: as agents_status says it, else (Copilot alone) as the server gives it for
+// what the page can do for it (setup_agents: while none can run, or Copilot to update).
+export const statusFor = (name) => statusOf(name) || (state.snapshot?.setup_agents || []).find((found) => found.name === name);
+const BUSY = { install: "Installing…", update: "Updating…", trust: "Trusting…" };
+// The status words while a run of it is on: "Signing in…", "Installing…", "Updating…".
 export function setupWords(name) {
   const run = setupOf(name);
   if (run?.state !== "running") return "";
-  return run.kind === "install" ? "Installing…" : "Signing in…";
+  return BUSY[run.kind] || "Signing in…";
 }
+const ACTIONS = { install: ["Install", "Install"], update: ["Update", "Update"], signin: ["Sign in", "Sign in to"] };
 
 // The button that makes an agent ready, where a control can be: Sign in (its sign-in needed),
 // Install (not installed), Retry (what Chief of Staff sets up itself failed: Claude's Agent SDK;
@@ -40,8 +50,8 @@ export function setupAction(status, { compact = false, after } = {}) {
     });
   }
   const busy = running(status.name);
-  const words = busy ? setupWords(status.name) : kind === "install" ? "Install" : "Sign in";
-  const label = busy ? `Show the ${kind === "install" ? "install" : "sign-in"} of ${title(status.name)}` : kind === "install" ? `Install ${title(status.name)}` : `Sign in to ${title(status.name)}`;
+  const words = busy ? setupWords(status.name) : ACTIONS[kind][0];
+  const label = busy ? `Show the ${{ install: "install", update: "update" }[kind] || "sign-in"} of ${title(status.name)}` : `${ACTIONS[kind][1]} ${title(status.name)}`;
   return el("button", {
     type: "button",
     class: `setup-action${compact ? " compact" : ""}`,
@@ -55,7 +65,10 @@ export function setupAction(status, { compact = false, after } = {}) {
   });
 }
 export function setupKind(status) {
-  if (!status || status.status === "ready") return "";
+  if (!status) return "";
+  // Older than the versions tested (Copilot runs all the same): Update, asked first.
+  if (status.update?.command && ["ready", "problem"].includes(status.status)) return "update";
+  if (status.status === "ready") return "";
   if (["failed", "needed"].includes(status.setup?.state)) return "retry";
   if (status.status === "signin" && status.ways?.length) return "signin";
   if (status.status === "missing" && status.install?.length) return "install";
@@ -77,16 +90,17 @@ export async function retrySetup(name, after) {
 export function setupLine(status, after) {
   const action = setupAction(status, { compact: true, after });
   if (!action) return null;
-  const copy = status.fix?.command
+  const fix = setupKind(status) === "update" ? status.update : status.fix;
+  const copy = fix?.command
     ? el("button", {
         type: "button",
         class: "link copy-fix",
         text: "Copy command",
-        title: `Copy ${status.fix.command}, to run it in a terminal yourself`,
+        title: `Copy ${fix.command}, to run it in a terminal yourself`,
         onmousedown: (event) => event.preventDefault(),
         onclick: (event) => {
           event.stopPropagation();
-          copyFix(status.fix);
+          copyFix(fix);
         },
       })
     : "";
@@ -97,13 +111,11 @@ export function setupLine(status, after) {
 let dialog = null;
 let ticker = 0;
 const kept = { code: "", key: "" };
-export function openSetup(name, { again = false } = {}) {
+function opened(key, extra = {}) {
   closeSetup();
   closeAgentPopover();
-  const status = statusOf(name) || { name };
   dialog = el("dialog", { class: "agent-setup", "aria-labelledby": "agent-setup-title" });
-  dialog.agent = name;
-  dialog.mode = "";
+  Object.assign(dialog, { agent: key, mode: "", kind: "" }, extra);
   dialog.addEventListener("close", () => {
     clearInterval(ticker);
     dialog?.remove();
@@ -112,14 +124,34 @@ export function openSetup(name, { again = false } = {}) {
   document.body.append(dialog);
   dialog.showModal();
   ticker = setInterval(tick, 1000);
-  const run = setupOf(name);
+  return setupOf(key);
+}
+const firstWay = (status) => status.ways?.[0]?.method || "browser";
+export function openSetup(name, { again = false } = {}) {
+  const status = statusFor(name) || { name };
+  const run = opened(name);
   if (run?.state === "running") return draw();
-  if (setupKind(status) === "install") {
+  const kind = setupKind(status);
+  if (kind === "install" || kind === "update") {
     dialog.mode = "consent";
+    dialog.kind = kind;
     return draw();
   }
   if (status.status === "ready" && !again) return draw();
-  signIn(name, "browser", { confirm: false });
+  signIn(name, firstWay(status), { confirm: false });
+}
+// Trust the sandbox's certificate (Settings → Workers → Sandbox): what it runs, asked first.
+export function openTrust() {
+  const run = opened("sandbox", { kind: "trust" });
+  if (run?.state !== "running") dialog.mode = "consent";
+  draw();
+}
+// Sign in to an MCP server a Codex or Claude worker needs (its card): its agent's own command.
+export function openMcpSignIn(draft) {
+  const key = `mcp:${draft.id}`;
+  const run = opened(key, { kind: "mcp", mcp: { id: draft.id, server: draft.target.server, agent: draft.target.agent, command: draft.target.command } });
+  if (run?.state === "running") return draw();
+  startMcp();
 }
 export function closeSetup() {
   if (dialog?.open) dialog.close();
@@ -128,15 +160,17 @@ export function closeSetup() {
 export function heardSetup(view) {
   // Only what is newer than what it shows: one it replaced (ending), a request's answer
   // after the events of the run it started.
-  const known = setupOf(view.agent);
+  const key = view.key || view.agent;
+  const known = setupOf(key);
   const older = known && (view.started < known.started || (view.started === known.started && view.seq < known.seq));
-  if (!older) state.agentSetups = { ...(state.agentSetups || {}), [view.agent]: view };
-  if (dialog?.agent === view.agent) draw();
+  if (!older) state.agentSetups = { ...(state.agentSetups || {}), [key]: view };
+  if (dialog?.agent === key) draw();
   // Done: its row says Ready once the page's state is read again (a "state" event follows).
 }
 
 async function signIn(name, method, { confirm = false, key = "" } = {}) {
   dialog.mode = "starting";
+  dialog.kind = "signin";
   dialog.method = method;
   draw();
   try {
@@ -157,11 +191,13 @@ async function signIn(name, method, { confirm = false, key = "" } = {}) {
     draw();
   }
 }
-async function install(name, method) {
+// A run started (Install, Update, Trust, an MCP sign-in): the dialog shows it from its answer on.
+async function started(path, body, kind) {
   dialog.mode = "starting";
+  dialog.kind = kind;
   draw();
   try {
-    const view = await api(`/api/agents/${name}/install`, { method: "POST", body: { method } });
+    const view = await api(path, { method: "POST", body });
     if (dialog) dialog.mode = "";
     heardSetup(view);
   } catch (error) {
@@ -171,9 +207,13 @@ async function install(name, method) {
     draw();
   }
 }
+const install = (name, method) => started(`/api/agents/${name}/install`, { method }, "install");
+const update = (name) => started(`/api/agents/${name}/update`, {}, "update");
+const trust = () => started("/api/sandbox/trust", {}, "trust");
+const startMcp = () => started(`/api/drafts/${dialog.mcp.id}/signin`, {}, "mcp");
 async function cancel(name) {
   try {
-    heardSetup(await api(`/api/agents/${name}/setup/cancel`, { method: "POST" }));
+    heardSetup(await api(`/api/agents/${encodeURIComponent(name)}/setup/cancel`, { method: "POST" }));
   } catch (error) {
     toast(error.message, "error");
   }
@@ -209,22 +249,35 @@ function tick() {
   if (run?.state === "running" && clock) clock.textContent = elapsed(run.started);
 }
 
+// What the dialog is about: a run's kind while it shows one, else what was asked for.
+function headingOf(kind, agent) {
+  if (kind === "trust") return [agentMark("copilot"), " Trust the sandbox's certificate"];
+  if (kind === "mcp") return [agentMark(agent), ` Sign in to ${dialog.mcp?.server || "it"}`];
+  return [agentMark(agent), ` ${{ install: "Install", update: "Update" }[kind] || "Sign in to"} ${title(agent)}`];
+}
+function startingText(kind, agent) {
+  if (kind === "install") return "Starting the installer…";
+  if (kind === "update") return `Starting ${title(agent)}’s update…`;
+  if (kind === "trust") return "Starting…";
+  return `Starting ${title(agent)}’s sign-in…`;
+}
 function draw() {
   if (!dialog) return;
-  const name = dialog.agent;
-  const status = statusOf(name) || { name };
-  const run = setupOf(name);
+  const key = dialog.agent;
+  const run = setupOf(key);
+  const name = run?.agent || dialog.mcp?.agent || (dialog.kind === "trust" ? "copilot" : key);
+  const status = statusFor(name) || { name };
   const active = document.activeElement;
   const focusKey = dialog.contains(active) ? active.dataset.key : "";
   // A fold the owner opened (Other ways, Show output) stays open as what it shows is drawn again.
   const opened = new Set([...dialog.querySelectorAll("details[open]")].map((fold) => fold.className));
-  const isInstall = dialog.mode === "consent" || (run?.kind === "install" && !["starting", "confirm"].includes(dialog.mode));
-  const heading = el("h2", { id: "agent-setup-title" }, agentMark(name), ` ${isInstall ? "Install" : "Sign in to"} ${title(name)}`);
+  const kind = !dialog.mode && run ? run.kind : dialog.kind || run?.kind || "signin";
+  const heading = el("h2", { id: "agent-setup-title" }, ...headingOf(kind, name));
   const body = el("div", { class: "agent-setup-body" });
   const footer = el("footer", {}, el("span", { class: "spacer" }));
   const close = el("button", { type: "button", class: "text", text: "Close", "data-key": "close", onclick: () => dialog.close() });
-  if (dialog.mode === "consent") consent(body, footer, status);
-  else if (dialog.mode === "starting") body.append(waiting(isInstall ? "Starting the installer…" : `Starting ${title(name)}’s sign-in…`));
+  if (dialog.mode === "consent") consent(body, footer, status, kind);
+  else if (dialog.mode === "starting") body.append(waiting(startingText(kind, name)));
   else if (dialog.mode === "confirm") {
     body.append(el("p", { text: dialog.confirm.text }));
     footer.append(
@@ -235,9 +288,9 @@ function draw() {
     body.append(el("p", { class: "setup-error", role: "alert", text: dialog.error }));
     footer.append(close);
   } else if (dialog.mode === "key") keyForm(body, footer, name);
-  else if (!run && status.status === "ready") {
+  else if (!run && status.status === "ready" && kind === "signin") {
     body.append(el("p", { text: `${title(name)} is ready.${status.pays ? ` ${status.pays}.` : ""}` }));
-    footer.append(close, el("button", { type: "button", class: "secondary", text: "Sign in again", "data-key": "again", onclick: () => signIn(name, "browser") }));
+    footer.append(close, el("button", { type: "button", class: "secondary", text: "Sign in again", "data-key": "again", onclick: () => signIn(name, firstWay(status)) }));
   } else if (run) runView(body, footer, run, status, close);
   for (const fold of body.querySelectorAll("details")) if (opened.has(fold.className)) fold.open = true;
   dialog.replaceChildren(heading, body, footer);
@@ -251,9 +304,35 @@ function output(run, open = false) {
   if (!run.tail?.length) return "";
   return el("details", { class: "setup-output", open: open || undefined }, el("summary", { text: "Show output" }), el("pre", { text: run.tail.join("\n") }));
 }
-// Install, before it runs: the exact command as the owner's consent, Copy command, and the
-// other installers here (Homebrew, npm) under Other ways. On Windows: shown, to run yourself.
-function consent(body, footer, status) {
+// Before it runs, what Chief of Staff runs for the owner, word for word, as their consent: an
+// update (it changes that agent for everything here that uses it), trusting the sandbox's
+// certificate (macOS asks for their password itself), or an install (below).
+function consent(body, footer, status, kind) {
+  const notNow = el("button", { type: "button", class: "text", text: "Not now", "data-key": "not-now", onclick: () => dialog.close() });
+  if (kind === "trust") {
+    body.append(
+      el("p", { text: "Workers can't use gh inside the sandbox until Copilot's certificate is trusted. Chief of Staff runs these for you, in your account:" }),
+      el("pre", { class: "setup-command" }, el("code", { text: "copilot sandbox ca create\ncopilot sandbox ca trust" })),
+      el("small", { class: "setup-note", text: "This adds Copilot's certificate to your login keychain: macOS asks for your password." }),
+    );
+    footer.append(notNow, el("button", { type: "button", "data-primary": "1", "data-key": "trust", text: "Trust it", onclick: trust }));
+    return;
+  }
+  if (kind === "update") {
+    const command = status.update?.command;
+    if (!command) return body.append(el("p", { text: `${title(status.name)} is up to date.` }));
+    body.append(
+      el("p", { text: `${title(status.name)} is older than the versions Chief of Staff was tested with. Chief of Staff runs its own updater for you, in your account:` }),
+      el("pre", { class: "setup-command" }, el("code", { text: command })),
+      el("small", { class: "setup-note", text: `It updates ${title(status.name)} for everything on this computer that uses it.` }),
+    );
+    footer.append(
+      notNow,
+      el("button", { type: "button", class: "text", text: "Copy command", "data-key": "copy", onclick: () => copy(command, `Copied: run ${command} in a terminal.`) }),
+      el("button", { type: "button", "data-primary": "1", "data-key": "update", text: "Update", onclick: () => update(status.name) }),
+    );
+    return;
+  }
   const [first, ...others] = status.install || [];
   if (!first) return;
   const name = status.name;
@@ -310,8 +389,58 @@ function otherWays(name, status, run) {
     ),
   );
 }
+// What it runs, to run yourself instead: under Details, where it failed.
+function manual(command) {
+  if (!command) return "";
+  return el(
+    "details",
+    { class: "setup-manual" },
+    el("summary", { text: "Details" }),
+    el("p", { text: "Or run it in a terminal yourself:" }),
+    el("pre", { class: "setup-command" }, el("code", { text: command })),
+    el("button", { type: "button", class: "secondary", text: "Copy command", "data-key": "copy-manual", onclick: () => copy(command, "Copied the command.") }),
+  );
+}
+const RUNNING = {
+  update: (run) => `Updating ${title(run.agent)}…`,
+  trust: () => "Trusting Copilot's certificate… macOS may ask for your password.",
+};
+const DONE = {
+  update: (run) => (run.agent === "copilot" ? "Copilot is updated: Chief of Staff uses the new version from Copilot’s next start" : `${title(run.agent)} is up to date`),
+  trust: () => "Trusted: workers can use gh inside the sandbox",
+  mcp: (run) => `Signed in to ${run.server}`,
+};
 function runView(body, footer, run, status, close) {
   const name = run.agent;
+  const cancelButton = () => el("button", { type: "button", class: "secondary", text: "Cancel", "data-key": "cancel", onclick: () => cancel(run.key || name) });
+  if (RUNNING[run.kind] && run.state === "running") {
+    body.append(waiting(RUNNING[run.kind](run), run.started), el("pre", { class: "setup-command" }, el("code", { text: run.command })));
+    if (run.tail?.length) body.append(el("pre", { class: "setup-tail", "aria-live": "polite", text: run.tail.slice(-3).join("\n") }));
+    body.append(output(run));
+    footer.append(cancelButton());
+    return;
+  }
+  if (run.kind === "mcp" && run.state === "running") {
+    body.append(el("p", { text: run.url ? `Finish signing in to ${run.server} on its page in your browser.` : `${title(name)} opens ${run.server}’s sign-in page in your browser.` }));
+    if (run.url) {
+      body.append(
+        el(
+          "div",
+          { class: "setup-links" },
+          el("a", { class: "button", href: run.url, target: "_blank", rel: "noreferrer noopener", "data-key": "open", "data-primary": "1", text: "Open sign-in page" }),
+          el("button", { type: "button", class: "secondary", text: "Copy link", "data-key": "copy-link", onclick: () => copy(run.url, "Copied the sign-in link.") }),
+        ),
+      );
+    }
+    body.append(waiting("Waiting for you to sign in…", run.started), output(run));
+    footer.append(cancelButton());
+    return;
+  }
+  if (DONE[run.kind] && run.state === "done") {
+    body.append(el("p", { class: "setup-done", role: "status" }, el("span", { class: "setup-check", "aria-hidden": "true", text: "✓" }), ` ${DONE[run.kind](run)}`));
+    footer.append(el("button", { type: "button", "data-primary": "1", "data-key": "done", text: "Done", onclick: () => dialog.close() }));
+    return;
+  }
   if (run.kind === "install") {
     if (run.state === "running") {
       body.append(waiting(`Installing ${title(name)}…`, run.started), el("pre", { class: "setup-command" }, el("code", { text: run.command })));
@@ -365,7 +494,14 @@ function runView(body, footer, run, status, close) {
   const failed = run.state === "failed";
   body.append(el("p", { class: failed ? "setup-error" : "", role: failed ? "alert" : "status", text: failed ? run.error || "It did not finish." : "Cancelled." }), output(run, failed && !run.error));
   if (run.kind === "signin") body.append(otherWays(name, status, null));
-  const retry = () => (run.kind === "install" ? ((dialog.mode = "consent"), draw()) : signIn(name, run.method === "key" ? "browser" : run.method, { confirm: true }));
+  if (["update", "trust", "mcp"].includes(run.kind)) body.append(manual(run.command));
+  const retries = {
+    install: () => ((dialog.mode = "consent"), (dialog.kind = "install"), draw()),
+    update: () => update(name),
+    trust,
+    mcp: startMcp,
+  };
+  const retry = retries[run.kind] || (() => signIn(name, run.method === "key" ? "browser" : run.method, { confirm: true }));
   footer.append(close, el("button", { type: "button", "data-primary": "1", "data-key": "retry", text: "Try again", onclick: retry }));
 }
 

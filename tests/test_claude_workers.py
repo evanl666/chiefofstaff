@@ -150,6 +150,31 @@ async def test_a_task_runs_on_claude_when_the_owner_names_it(tmp_path, claude_on
         await runtime.stop()
 
 
+async def test_a_claude_workers_mcp_server_that_needs_sign_in_has_a_card_with_sign_in(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """Claude says one of the owner's MCP servers needs their sign-in ("needs-auth"): a card
+    under Needs you, as for Codex's and Copilot's, whose Sign in runs `claude mcp login notes`
+    for the owner (Claude keeps the sign-in); once signed in, the card answers itself."""
+    monkeypatch.setenv("FAKE_CLAUDE_NEEDS_AUTH", "notes")
+    harness, runtime, worker, _ = await claude_worker(tmp_path)
+    try:
+        await until(lambda: harness.store.drafts(), 30)
+        (card,) = harness.store.drafts()
+        assert (card["kind"], card["text"]) == ("signin", "notes needs you to sign in")
+        assert card["target"] == {
+            "server": "notes", "url": "", "command": "claude mcp login notes", "agent": "claude",
+        }  # fmt: skip
+        key = (await runtime.setups.mcp_sign_in(card["id"]))["key"]
+        await until(lambda: runtime.setups.view()[key].get("url"), 20)
+        (Path(os.environ["FAKE_CLAUDE_HOME"]) / "approve-mcp").write_text("ok")
+        await until(lambda: harness.store.draft(card["id"])["status"] != "pending", 20)
+        assert runtime.setups.view()[key]["state"] == "done"
+        await until(lambda: "its tools work from your next turn" in str(harness.kinds(worker)))
+    finally:
+        await runtime.stop()
+
+
 async def test_a_claude_workers_words_are_claudes_and_a_copilot_workers_its_own():
     for copilot in prompts.AGENT_WORDS["claude"]:
         assert prompts.WORKER.count(copilot) == 1, copilot

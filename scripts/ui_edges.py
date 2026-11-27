@@ -6362,7 +6362,7 @@ async def main():
                           round_ci_not_run, round_team_v4,
                           round_share_from_report, round_long_report,
                           round_router_appears, round_agent_words, round_payload,
-                          round_reconnecting):  # fmt: skip
+                          round_reconnecting, round_self_handle):  # fmt: skip
                 if not only or check.__name__ in only:
                     await check(runtime, browser, failures)
             await browser.close()
@@ -10022,7 +10022,7 @@ AGENT_SHOTS = Path(os.environ.get("UI_AGENT_SHOTS") or SHOTS / "agents-m2")
 # (UI_AGENT_WIDTHS, UI_PICKER_WIDTHS, comma-separated: other widths, for a review's shots.)
 AGENT_WIDTHS = tuple(int(w) for w in os.environ.get("UI_AGENT_WIDTHS", "800,1024,1440").split(","))
 SIGNED_OUT_CODEX = "Codex is not signed in: sign in from Settings → Agents & models."
-OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2): update it."
+OLD_CODEX = "Codex 0.160.0 is older than the versions tested (0.167.2)."
 SANDBOXED_CODEX = (
     "Can't run while workers are sandboxed: its sandbox has not passed Chief of Staff's checks yet."
 )
@@ -14654,6 +14654,258 @@ async def round_reconnecting(runtime, browser, failures: list[str]):
         runtime.unresumed.pop(router, None)
         await context.close()
     log("Reconnecting after a restart: no Thinking… nor Stop, Retry once given up; an update")
+
+
+def copilot_on_path() -> Path:
+    """The stand-in Copilot CLI (tests/fake_copilot.py) as `copilot`, first on this process's
+    PATH (never the owner's own: it could be changed), its state and runs in its own folder.
+    Taken away with copilot_off_path."""
+    folder = Path(tempfile.mkdtemp(prefix="cos-copilot-"))
+    stand_in = ROOT / "tests" / "fake_copilot.py"
+    (folder / "copilot").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{stand_in}" "$@"\n')
+    (folder / "copilot").chmod(0o755)
+    (folder / "home").mkdir()
+    os.environ["PATH"] = f"{folder}{os.pathsep}{os.environ['PATH']}"
+    os.environ["FAKE_COPILOT_HOME"] = str(folder / "home")
+    os.environ["FAKE_COPILOT_RUNS"] = str(folder / "runs")
+    assert shutil.which("copilot") == str(folder / "copilot"), "never the owner's own Copilot"
+    return folder
+
+
+def copilot_off_path(folder: Path):
+    path = os.environ["PATH"].split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(entry for entry in path if entry != str(folder))
+    for name in ("FAKE_COPILOT_HOME", "FAKE_COPILOT_RUNS", "FAKE_COPILOT_VERSION"):
+        os.environ.pop(name, None)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+async def round_self_handle(runtime, browser, failures: list[str]):
+    """What the page used to tell the owner to run in a terminal, run for them (0.1.61), each
+    asked first where it changes more than Chief of Staff, its command shown word for word:
+    Copilot's Sign in and Install (Home's card, its row), Update for an agent older than the
+    versions tested (Copilot's row and the status line; Codex's row), Trust the sandbox's
+    certificate (Settings → Workers), and Sign in on an MCP card of a Codex worker. The
+    stand-ins run each command; never the owner's own CLIs."""
+    from chiefofstaff import agents
+
+    folder, _ = codex_on_path()
+    copilot = copilot_on_path()
+    codex_home = Path(os.environ["FAKE_CODEX_HOME"])
+    store = runtime.store
+    kept = dict(runtime.status)
+    kept_sandbox = (runtime.sandbox_host, runtime.sandbox_gh)
+    kept_problem = runtime.copilot_problem
+    ran = lambda: (copilot / "runs").read_text().splitlines() if (copilot / "runs").exists() else []  # noqa: E731
+    try:
+        # Copilot older than tested: Update beside the status line's warning, and on its row,
+        # asked first (its command); run, it is no longer offered.
+        os.environ["FAKE_COPILOT_VERSION"] = "1.0.50"
+        runtime.copilot_older = "1.0.50"
+        warning = "Copilot CLI 1.0.50 is older than the versions tested (1.0.100)."
+        runtime.status = {**kept, "warning": warning}
+        runtime.publish_state()
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            line = page.locator("#status-line")
+            await expect(line).to_contain_text(warning)
+            await expect(line.get_by_role("button", name="Update the Copilot CLI")).to_be_visible()
+            tab = await open_agents(page)
+            row = tab.locator("#agent-copilot")
+            await expect(row.locator(".action-slot .setup-action")).to_have_text("Update")
+            await role_shoot(page, "self-copilot-update-row", scheme, focus=row)
+            await row.locator(".action-slot .setup-action").click()
+            dialog = page.locator("dialog.agent-setup")
+            await expect(dialog.locator("h2")).to_have_text("Update Copilot")
+            await expect(dialog.locator(".setup-command")).to_have_text("copilot update")
+            await expect(dialog.locator(".setup-note")).to_have_text(
+                "It updates Copilot for everything on this computer that uses it."
+            )
+            await ux_shoot(page, "self-copilot-update-consent", scheme, "dialog.agent-setup")
+            if scheme == "light":
+                await dialog.get_by_role("button", name="Not now").click()
+                await expect(dialog).to_have_count(0)
+                assert ran() == [], "nothing runs until the owner says Update"
+            else:
+                await dialog.get_by_role("button", name="Update", exact=True).click()
+                await expect(dialog.locator(".setup-done")).to_contain_text(
+                    "Copilot is updated", timeout=15000
+                )
+                await ux_shoot(page, "self-copilot-update-done", scheme, "dialog.agent-setup")
+                await dialog.get_by_role("button", name="Done").click()
+                await expect(row.locator(".action-slot .setup-action")).to_have_count(0)
+                await expect(line).not_to_contain_text("older than the versions tested")
+            assert not errors, errors
+            await context.close()
+        assert ran() == ["update"] and not runtime.copilot_older
+        assert "warning" not in runtime.status
+        runtime.status = dict(kept)
+        # Codex older than tested: its row says it can't run, with Update; updated, Ready.
+        await agents_saved(runtime, {"codex": {"enabled": False}})
+        os.environ["FAKE_CODEX_VERSION"] = "0.160.0"
+        runtime.glanced.clear()
+        runtime.agent_failed.clear()
+        runtime.found_cache = (float("-inf"), [])
+        await runtime.refresh_agent_status()
+        assert runtime.agent_status("codex").get("update"), runtime.agent_status("codex")
+        context, page, errors, _ = await agents_page(browser, "light")
+        tab = await open_agents(page)
+        row = tab.locator("#agent-codex")
+        await expect(row.locator(".status")).to_have_text("Can't run here")
+        await expect(row.locator(".action-slot .setup-action")).to_have_text("Update")
+        await role_shoot(page, "self-codex-update-row", "light", focus=row)
+        await row.locator(".action-slot .setup-action").click()
+        dialog = page.locator("dialog.agent-setup")
+        await expect(dialog.locator(".setup-command")).to_have_text("codex update")
+        await dialog.get_by_role("button", name="Update", exact=True).click()
+        await expect(dialog.locator(".setup-done")).to_contain_text(
+            "Codex is up to date", timeout=20000
+        )
+        await ux_shoot(page, "self-codex-update-done", "light", "dialog.agent-setup")
+        await dialog.get_by_role("button", name="Done").click()
+        await expect(row.locator(".status")).not_to_have_text("Can't run here", timeout=10000)
+        assert not errors, errors
+        await context.close()
+        assert runtime.agent_status("codex")["status"] == agents.READY
+        # The sandbox's certificate: one click, asked first; trusted, the line goes.
+        runtime.sandbox_host, runtime.sandbox_gh = True, False
+        runtime.publish_state()
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await page.locator("#settings-button").click()
+            await page.locator("#settings-tabs [data-tab=general]").click()
+            hint, trust = page.locator("#sandbox-hint"), page.locator("#sandbox-trust")
+            await expect(hint).to_have_text(
+                "To let Copilot workers use gh inside the sandbox, trust Copilot's certificate "
+                "once: copilot sandbox ca create && copilot sandbox ca trust"
+            )
+            await expect(trust).to_have_text("Trust the sandbox's certificate")
+            await shoot(
+                page, "self-sandbox-trust", scheme, 1280, focus=page.locator("#sandbox-line")
+            )
+            await trust.click()
+            dialog = page.locator("dialog.agent-setup")
+            await expect(dialog.locator("h2")).to_have_text("Trust the sandbox's certificate")
+            await expect(dialog.locator(".setup-command")).to_have_text(
+                "copilot sandbox ca create\ncopilot sandbox ca trust"
+            )
+            await ux_shoot(page, "self-sandbox-consent", scheme, "dialog.agent-setup")
+            if scheme == "light":
+                await dialog.get_by_role("button", name="Not now").click()
+                assert not [run for run in ran() if run.startswith("sandbox")]
+            else:
+                await dialog.get_by_role("button", name="Trust it").click()
+                await expect(dialog.locator(".setup-done")).to_contain_text(
+                    "Trusted: workers can use gh inside the sandbox", timeout=15000
+                )
+                await ux_shoot(page, "self-sandbox-done", scheme, "dialog.agent-setup")
+                await dialog.get_by_role("button", name="Done").click()
+                await expect(trust).to_be_hidden()
+                await expect(hint).to_be_hidden()
+            assert not errors, errors
+            await context.close()
+        assert [run for run in ran() if run.startswith("sandbox")] == [
+            "sandbox ca status", "sandbox ca create", "sandbox ca trust", "sandbox ca status",
+        ]  # fmt: skip
+        assert runtime.sandbox_gh is True
+        # An MCP server a Codex worker needs signed in: Sign in on its card runs Codex's own
+        # command; signed in on its page, the card answers itself.
+        worker = "w" + uuid4().hex[:31]
+        store.create_session(worker, "worker", "Self-handle notes worker", "idle", cwd=str(folder))
+        target = {
+            "server": "notes",
+            "url": "",
+            "command": "codex mcp login notes",
+            "agent": "codex",
+        }
+        draft = store.create_draft(worker, "signin", target, "notes needs you to sign in")
+        runtime.publish_state()
+        for scheme in ("light", "dark"):
+            context, page, errors, _ = await agents_page(browser, scheme)
+            await at_home(page)
+            row = page.locator(f'#needs .your-ok .ok-row[data-id="{draft["id"]}"]')
+            await expect(row.get_by_role("button", name="Sign in", exact=True)).to_be_visible()
+            await row.locator(".more-button").click()
+            await row.get_by_role("menuitem", name="Details").click()
+            card = page.locator(f'#needs .ok-details .card.draft[data-id="{draft["id"]}"]')
+            await expect(card.get_by_role("button", name="Sign in to notes")).to_be_visible()
+            await expect(card).not_to_contain_text("in a terminal, then press")
+            await expect(card.locator("details.setup-manual")).to_contain_text(
+                "codex mcp login notes"
+            )
+            await shoot(page, "self-mcp-card", scheme, 1280, target="#needs", focus=card)
+            if scheme == "dark":
+                await card.get_by_role("button", name="Sign in to notes").click()
+                dialog = page.locator("dialog.agent-setup")
+                await expect(dialog.locator("h2")).to_have_text("Sign in to notes")
+                await expect(
+                    dialog.get_by_role("link", name="Open sign-in page")
+                ).to_have_attribute("href", re.compile(r"^https://mcp\.acme\.test/authorize\?"))
+                await ux_shoot(page, "self-mcp-dialog", scheme, "dialog.agent-setup")
+                (codex_home / "approve").write_text("ok")
+                await expect(dialog.locator(".setup-done")).to_contain_text(
+                    "Signed in to notes", timeout=15000
+                )
+                await dialog.get_by_role("button", name="Done").click()
+                await expect(row).to_have_count(0, timeout=10000)
+            assert not errors, errors
+            await context.close()
+        assert store.draft(draft["id"])["status"] != "pending"
+        # Copilot alone can't run: Home's card offers its Sign in (its code shown in the
+        # dialog) and, not installed, Install (its official installer, asked first).
+        missing = "Copilot CLI 'copilot' not found."
+        for problem, button in (("Copilot is not signed in.", "Sign in to Copilot"),
+                                (missing, "Install Copilot")):  # fmt: skip
+            runtime.copilot_problem = problem
+            runtime.status = {"state": "error", "error": problem, "waits": True, "setup": True}
+            runtime.publish_state()
+            context, page, errors, _ = await agents_page(browser, "light")
+            card = page.locator("#home-setup")
+            await expect(card.locator(".label")).to_have_text("Set up a coding agent")
+            await expect(card.get_by_role("button", name=button)).to_be_visible()
+            await expect(card.locator("details.setup-manual summary")).to_have_text(
+                "Or in a terminal"
+            )
+            name = "signin" if "signed" in problem else "install"
+            await shoot(page, f"self-home-card-{name}", "light", 1280, target="#home-setup")
+            await card.get_by_role("button", name=button).click()
+            dialog = page.locator("dialog.agent-setup")
+            if name == "signin":
+                await expect(dialog.locator(".setup-code code")).to_have_text("ACME-1234")
+                await ux_shoot(
+                    page, "self-home-copilot-signin-dialog", "light", "dialog.agent-setup"
+                )
+                await dialog.get_by_role("button", name="Cancel").click()
+                await expect(dialog.get_by_role("button", name="Try again")).to_be_visible()
+            else:
+                await expect(dialog.locator("h2")).to_have_text("Install Copilot")
+                await expect(dialog.locator(".setup-command")).to_contain_text(
+                    "gh.io/copilot-install"
+                )
+                await ux_shoot(page, "self-home-copilot-install", "light", "dialog.agent-setup")
+            if name == "signin":
+                await dialog.get_by_role("button", name="Close").click()
+            else:
+                await page.keyboard.press("Escape")  # (Nothing installed: not asked to.)
+            await expect(dialog).to_have_count(0)
+            assert not errors, errors
+            await context.close()
+        assert "login --device-code" in ran()
+    finally:
+        runtime.status = kept
+        runtime.copilot_problem = kept_problem
+        runtime.copilot_older = ""
+        runtime.sandbox_host, runtime.sandbox_gh = kept_sandbox
+        os.environ.pop("FAKE_CODEX_VERSION", None)
+        (codex_home / "updated").unlink(missing_ok=True)
+        copilot_off_path(copilot)
+        codex_off_path(folder)
+        runtime.glanced.clear()
+        runtime.agent_failed.clear()
+        runtime.publish_state()
+    log(
+        "self-handle: Copilot's Sign in and Install, Update, the sandbox's certificate, MCP Sign in"
+    )
 
 
 if __name__ == "__main__":
