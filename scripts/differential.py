@@ -1108,18 +1108,25 @@ FEATURES["autopilot"] = Feature(
             value=True,
         ),
         Allow(
-            "its switch line in Settings → General",
-            element="#settings-dialog #autopilot-line",
+            "its switch line in Settings → General's On its own (its Options folded, hidden)",
+            element="#settings-dialog #autopilot-line, #settings-dialog #autopilot-more",
             views=r"^settings-general-",
+        ),
+        Allow(
+            "its switch's field in Settings → General", data=r"^page\.settings\.fields\.autopilot$"
         ),
         Allow("how an owner message came in (ingress), stored with it", data=r"\.meta\.ingress$"),
         Allow("how a decision card was answered (ingress)", data=r"\.db\.kv\.ingress:"),
     ],
     allow_on=[
         Allow(
-            "its switch line in Settings → General, checked, and its group",
-            element="#settings-dialog #autopilot-line, #settings-dialog #autopilot-group",
+            "its switch line in Settings → General, checked, and its Options",
+            element="#settings-dialog #autopilot-line, #settings-dialog #autopilot-more",
             views=r"^settings-general-",
+        ),
+        Allow(
+            "its switch's and its Options' fields in Settings → General",
+            data=r"^page\.settings\.fields\.autopilot(?:_credits|_scope|_repos|_ask_first)?$",
         ),
         Allow(
             "its menu in Home's header",
