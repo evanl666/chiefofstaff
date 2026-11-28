@@ -702,6 +702,29 @@ FIXES: list[Allow] = [
         element="#needs .card > .subject",
         views=r"^home",
     ),
+    # 0.1.61 (QA T2): a Slack draft's note in the owner's language, the reply in the
+    # conversation's: the note's field, the Slack session's rule, and the owner's language
+    # (reply_in) on the Router's messages to the Slack session.
+    Allow(
+        "a draft's note in the owner's language: its field",
+        data=r"\.options\.tools\[\d+\]\.parameters\.properties\.note\.description$",
+        value="One line for the owner: what this answers, in the owner's language (the reply_in "
+        "of the message that asked for it), whatever language the reply itself is in",
+    ),
+    Allow(
+        "a draft's note in the owner's language: the Slack session's rule",
+        data=r"\.system_message\.content$",
+        lines=r"^   (?:you will get the outcome\. Its `note` \(what it answers, shown to the owner "
+        r"on its card\) and|whatever you tell the owner or the Router are in the owner's "
+        r"language, which a message's|reply_in attribute names \(English, Chinese…\), even "
+        r"when the reply is in another\.)$",
+    ),
+    Allow(
+        "the owner's language on the Router's messages to the Slack session",
+        data=r"(?:\.db\.messages\[\d+\]\.meta\.prompt|^backend\.sent\.slack\.slack:Slack\[\d+\]"
+        r"\.prompt|^backend\.turns\.slack:Slack\[\d+\]\[\d+\])$",
+        added=r' reply_in="[A-Za-z]+"',
+    ),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
