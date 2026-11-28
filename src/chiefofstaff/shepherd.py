@@ -819,6 +819,7 @@ class Shepherd(Keeping, Steps):
             if not claim or claim["state"] in {CLAIM_ENDED, HANDING}:
                 return claim
             repo, number = repo_number(target)
+            was = (claim.get("details") or {}).get("state")
             details = await self.runtime.github.pr_details(repo, number)
             self.read_at[target] = time.time()
             self.control.update_claim(target, head=details["head"], details=details,
@@ -834,6 +835,8 @@ class Shepherd(Keeping, Steps):
                 return self.control.claim(target)
             if details["state"] == "CLOSED":
                 self.stale_plans(target, "The PR was closed.")
+                if was != "CLOSED":
+                    self.over_lately(claim)
                 return claim
             if task and not claim["delivered"] and task["status"] in {"review", "done"}:
                 self.control.update_claim(target, delivered=1)
@@ -917,6 +920,7 @@ class Shepherd(Keeping, Steps):
         self.drop_step_logs(claim["target"])
         for prefix in TARGET_KEYS:
             self.store.delete(f"{prefix}:{claim['target']}")
+        self.over_lately(claim)
 
     def drop_step_logs(self, target: str):
         """The logs a step read go once the PR merges or closes."""

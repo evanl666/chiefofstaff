@@ -755,7 +755,8 @@ function mergeCard(draft) {
     target.title ? el("div", { class: "note strong", text: `“${target.title}”` }) : null,
     notRun ? el("div", { class: "note", title: (target.not_run || []).join(", "), text: checksWords(target) }) : null,
     notRun ? el("div", { class: "note", text: checked ? `Its worker checked: ${checked}` : "Its worker checked nothing itself" }) : null,
-    el("div", { class: "note", text: [notRun ? "" : checksWords(target), review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ") }),
+    // Its PR named and linked here too: under Your OK, Details shows this part only.
+    el("div", { class: "note" }, el("a", { class: "pr", href: target.url, target: "_blank", rel: "noreferrer", text: target.label, "data-tip": "Open on GitHub" }), ` · ${[notRun ? "" : checksWords(target), review, `head ${String(target.head || "").slice(0, 7)}`].filter(Boolean).join(" · ")}`),
     draft.outcome ? el("div", { class: "note", text: draft.outcome }) : null,
   );
   const decide = decider(draft, node, error);

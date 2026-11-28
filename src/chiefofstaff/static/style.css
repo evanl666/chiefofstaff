@@ -2363,6 +2363,13 @@ dialog .row label.hours:not(.grow) { width: auto; flex: none; }
 }
 .card.task .row-line .why + .latest::before, .card.task .row-line .quiet + .latest::before, .card.task .row-line .object + .latest::before { content: "— "; }
 .card.task .row-line .step { font-family: var(--mono); }
+/* Prepared for you: its PR named, what happened and what its one action does, said whole (it
+   wraps rather than cut off what it says, owner report 0.1.61). */
+.card.task .row-line.kept { white-space: normal; }
+.card.task .row-line.kept > .why { white-space: normal; overflow: visible; text-overflow: clip; }
+/* A PR named in a line (a kept PR's row, a merge's Details): its link as tall as a control to hit
+   (its line no taller), and underlined, told from the words around it by more than its color. */
+.card :is(.row-line, .kept-line, .note) a.pr { display: inline-block; padding: 5px 0; margin: -5px 0; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .card.task .row-foot { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; margin-left: 16px; min-width: 0; font-size: var(--small); line-height: 18px; color: var(--muted); }
 .card.task .row-foot:empty { display: none; }
 /* Its worker: a small reference to its chat, never the main thing on the row. */
@@ -2492,6 +2499,7 @@ details.handled time { flex: none; font-variant-numeric: tabular-nums; }
 .card.task .kept-line::before { content: "↻ "; color: var(--accent); }
 .card.task .kept-line.refused { color: var(--muted); }
 .card.task .kept-line.refused::before { content: ""; }
+.card.task .kept-does { font-size: var(--small); color: var(--muted); margin: 2px 0 0 1.2em; }
 
 .plan-dialog .plan-body { display: grid; gap: 14px; padding-top: 14px; align-content: start; }
 .plan-summary { color: var(--soft); }

@@ -96,7 +96,8 @@ class TaskBook:
 
     def listed(self, *, include_ended_since: str = "") -> list[dict]:
         """Open and in-review tasks (a result to accept, however old), those that ended since
-        the given time, finished ones with news the owner has not seen, and accepted ones
+        the given time, finished ones with news the owner has not seen, those whose PR Prepared
+        for you kept moving merged or closed since (their rows say so), and accepted ones
         still monitored (however long ago they were accepted: what is followed up for them
         does not go quiet out of sight). Not the placeholder task of an adopted session, until
         it is continued."""
@@ -108,10 +109,12 @@ class TaskBook:
             f"""SELECT * FROM tasks WHERE (status IN ('queued','running','waiting','review')
             OR (ended_at IS NOT NULL AND ended_at>=?)
             OR (status='failed' AND ended_at>=?)
-            OR 'news:' || id IN (SELECT key FROM kv WHERE key LIKE 'news:%'))
+            OR 'news:' || id IN (SELECT key FROM kv WHERE key LIKE 'news:%')
+            OR 'keptover:' || id IN (SELECT key FROM kv WHERE key LIKE 'keptover:%'
+                AND value>=?))
             AND NOT (status='done' AND result=?) AND session_id NOT IN ({HELPERS})
             ORDER BY created_at""",  # noqa: S608  (HELPERS: constant SQL)
-            (since, failed, ADOPTED),
+            (since, failed, since, ADOPTED),
         )
         # Only a worker still open follows anything up: what it follows, the runs it said go
         # on. So the list stays as long as the open workers' work, not every task ever.

@@ -64,6 +64,14 @@ class Keeping:
         self.control.to_owner(target, why, claim.get("head") or "")
         self.publish_holder(claim)
 
+    def over_lately(self: Shepherd, claim: dict):  # type: ignore[misc]
+        """Its PR merged or closed: its tasks (its holder, its origin) say so on Home a while
+        (Recently finished, as of now: see Tasks.listed), and its row is drawn again now."""
+        stamp = _now()
+        for task_id in {claim.get("holder") or "", claim.get("origin_task") or ""} - {""}:
+            self.store.set(f"keptover:{task_id}", stamp)
+        self.publish_holder(claim)
+
     def publish_holder(self: Shepherd, claim: dict):  # type: ignore[misc]
         for task_id in {claim.get("holder") or "", claim.get("origin_task") or ""} - {""}:
             if task := self.runtime.tasks.find(task_id):
@@ -376,15 +384,27 @@ class Keeping:
 
     def task_view(self: Shepherd, task: dict) -> dict | None:  # type: ignore[misc]
         """A task's kept PR (the most pressing, when it holds several): where the shepherd
-        stands, in a line, and the row's one action. None for a task with none."""
+        stands, in a line, and the row's one action. Once its PR merged, that, as a trace (it
+        leaves Needs you saying so). None for a task with none."""
         if not self.on() or not self.control.exists():
             return None
-        claims = [c for c in self.control.held_by(task["id"]) if c["state"] != CLAIM_ENDED]
+        held = self.control.held_by(task["id"])
+        claims = [c for c in held if c["state"] != CLAIM_ENDED]
+        if not claims:
+            claims = sorted(held, key=lambda c: c["updated_at"])[-1:]
         if not claims:
             return None
         views = [self.claim_view(claim, task) for claim in claims]
         views.sort(key=lambda view: view["rank"])
         return views[0]
+
+    def over(self: Shepherd, target: str) -> str:  # type: ignore[misc]
+        """Whether a kept PR is over, as the shepherd last read it: "merged" or "closed" (its task
+        waits on it no more), else ""."""
+        if not self.on() or not self.control.exists():
+            return ""
+        claim = self.control.claim(target)
+        return claim_over(claim) if claim else ""
 
     def claim_view(self: Shepherd, claim: dict, task: dict) -> dict:  # type: ignore[misc]
         from .shepherd import KIND_WORDS, short_label
@@ -394,15 +414,23 @@ class Keeping:
         details = claim.get("details") or {}
         step = self.control.open_step(target)
         last = (self.control.steps(target) or [None])[-1]
+        repo, number = target.removeprefix("github:").rsplit("#", 1)
         view: dict[str, Any] = {
-            "target": target, "label": label, "url": details.get("url") or "",
+            "target": target, "label": label,
+            "url": details.get("url") or f"https://github.com/{repo}/pull/{number}",
             "state": claim["state"], "reason": claim["reason"], "keep": bool(claim["keep"]),
             "merge_when_ready": bool(claim["merge_when_ready"]),
             "accepted": (claim.get("accepted") or {}).get("sha") or "",
             "accept_note": self.store.get(f"acceptnote:{target}") or "",
             "head": details.get("head") or claim.get("head") or "", "line": "", "action": None,
-            "step": None, "rank": 3, "journal": self.journal_view(target),
+            "step": None, "rank": 3, "journal": self.journal_view(target), "ended": "",
         }  # fmt: skip
+        if over := claim_over(claim):
+            # Merged or closed: nothing to do on it, said where its row goes (not as if it
+            # still waited for a review).
+            view.update(line=f"{label} {over}.", ended=over, rank=5,
+                        ended_at=self.store.get(f"keptover:{task['id']}") or "")  # fmt: skip
+            return view
         mine = claim["holder"] == task["id"]
         if not mine:
             view["line"] = (
@@ -411,7 +439,8 @@ class Keeping:
             view["rank"] = 4
             return view
         if claim["state"] == PAUSED:
-            view["line"] = paused_words(claim["reason"], claim.get("paused_head") or "")
+            why = paused_words(claim["reason"], claim.get("paused_head") or "")
+            view["line"] = f"{label} paused: {why}." if why else f"{label} paused."
             view["action"] = {"kind": "resume", "label": "Resume"}
             view["rank"] = 1
             return view
@@ -573,20 +602,31 @@ def sentence(words: str, capital: bool = True) -> str:
 
 
 def paused_words(reason: str, head: str) -> str:
-    """Why a PR waits for the owner's Resume, in a line (its status says Paused)."""
+    """Why a PR waits for the owner's Resume, in a few plain words after "api#12 paused: " (""
+    when nothing says why). Not who pushed a commit: the owner may have."""
     if reason.startswith("new commits it didn't push"):
         pushed = head[:7] or reason.rsplit("(", 1)[-1].rstrip(")")
-        return f"Someone else pushed {pushed}, so it's waiting for you."
+        return f"commit {pushed} wasn't pushed by its worker"
     if reason.startswith("stacked"):
-        return "Another PR now builds on this one, so it's waiting for you."
+        return "another PR now builds on it"
     if reason.startswith("from a fork"):
-        return "It comes from a fork now, so it's waiting for you."
+        return "it comes from a fork now"
     if reason.startswith("a check vanished after the push: "):
         checks = reason.split(": ", 1)[1]
-        return f"{checks} didn't run after its fix, so it's waiting for you."
-    if not reason:
-        return "It's waiting for you."
-    return sentence(f"{reason}, so it's waiting for you")
+        return f"{checks} didn't run after its fix"
+    if reason == "its worker was reopened":
+        return "its worker was closed, then reopened"
+    return reason.strip().rstrip(".")
+
+
+def claim_over(claim: dict) -> str:
+    """A claim's PR merged or closed, as last read: "merged" or "closed", else ""."""
+    details = claim.get("details") or {}
+    if claim["state"] == CLAIM_ENDED:
+        return claim["reason"] or "merged"
+    if details.get("merged") or details.get("state") == "MERGED":
+        return "merged"
+    return "closed" if details.get("state") == "CLOSED" else ""
 
 
 def _now() -> str:

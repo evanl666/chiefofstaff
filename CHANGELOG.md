@@ -141,6 +141,20 @@ Home shows the Router's chat at once, and the page reads less and says it right.
 - **A long note from the Router, or a long question, reads whole**: its start, then *Show more*
   (it was cut at 240 px in a box that didn't look scrollable). The Profile row in *Your OK* has
   its ⋯ (*Discard*), as every row does.
+- **A PR kept moving that pauses says which, why, and what *Resume* does.** Its row under *Needs
+  you* said only "Its worker was reopened, so it's waiting for you." with *Resume*, cut off when
+  long, and what *Resume* does only in a tip on hover. It now names the PR, with its link, and
+  says it all: *keel#2 paused: its worker was closed, then reopened. Resume to keep it moving.*
+  *Fix it*, *Review fix* and *Look* say what they do too, and opened, the row says what *Resume*
+  does in full. It no longer says "someone else" pushed a commit you may have pushed yourself.
+- **A finished task's row shows its whole result when opened.** Its title promised to show it
+  all, but the result stayed cut to two lines with no way to read the rest. It now reads whole (a
+  long one folded at first, with *Show more*).
+- **A kept PR that merges says so.** Once its PR merged, the row left *Needs you* without a word,
+  and its task stayed under *Monitoring* as *Waiting for review*. It now says *keel#2 merged.*
+  (or *closed.*) and goes to *Recently finished*, first, however long ago its task finished
+  (under *Monitoring* while the task still waits on something else).
+- *Ready to merge*'s *Details* names the PR, with its link.
 
 Decision cards: a card you answered another way leaves, one choice is one card, and two
 choices are never one.

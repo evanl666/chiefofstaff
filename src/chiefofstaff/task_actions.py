@@ -1840,6 +1840,8 @@ class TaskActions:
         if prs is None:
             prs = (self.receipts(task) or {}).get("prs") or []
         prs = [pr for pr in prs if pr.get("own") and pr["label"].lower() in followed]
+        # Kept moving, and read merged or closed since: nothing to fix there (its row says so).
+        prs = [pr for pr in prs if not self.runtime.shepherd.over(f"github:{pr['label']}")]
         ranked = [(PR_MARKERS[word], pr) for pr in prs if (word := pr_status(pr)) in PR_MARKERS]
         if not ranked:
             return "", ""
@@ -5283,6 +5285,8 @@ class TaskActions:
                 )
                 if pr.get("state") in {"MERGED", "CLOSED"}:
                     continue
+                if self.runtime.shepherd.over(key):
+                    continue  # Kept moving, and read merged or closed since: over (its row says).
                 if role == "reviewed" and task["status"] == "done":
                     continue  # Its review was delivered and accepted: not the owner's to watch.
                 if role == "referenced" and not self.store.get(f"given:{row['id']}:{key}"):

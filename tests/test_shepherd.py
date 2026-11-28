@@ -662,10 +662,50 @@ async def test_a_head_the_journal_does_not_explain_pauses_it(world):
     assert claim["state"] == "paused" and head[:7] in claim["reason"]
     view = runtime.task_actions.view(runtime.tasks.get(world.task))["shepherd"]
     assert view["action"] == {"kind": "resume", "label": "Resume"}
-    assert view["line"] == f"Someone else pushed {head[:7]}, so it's waiting for you."
+    # Owner report 0.1.61: which PR, and why, in plain words (not "someone else": they may
+    # have pushed it themselves); its link with it.
+    assert view["line"] == f"api#12 paused: commit {head[:7]} wasn't pushed by its worker."
+    assert view["url"] == "https://github.com/acme/api/pull/12"
     await runtime.shepherd.resume(TARGET)
     claim = runtime.shepherd.control.claim(TARGET)
     assert claim["state"] == "idle" and runtime.shepherd.control.explains(claim, head)
+
+
+@pytest.mark.parametrize("how", ["merged", "closed"])
+async def test_a_paused_pr_that_merges_or_closes_leaves_needs_you_saying_so(world, how):
+    """Owner report 0.1.61: a paused PR's row asked for Resume; once the PR merged it left Needs
+    you without a word, and its task said "Waiting for review" of a PR that had merged. It
+    says so now ("api#12 merged."), with nothing to resume, and waits on it no more; its task
+    stays on Home a while (Recently finished), however long ago it finished."""
+    from chiefofstaff.runtime import TASKS_SHOWN_HOURS
+    from chiefofstaff.store import hours_ago
+
+    runtime = await claimed(world)
+    runtime.shepherd.control.update_claim(TARGET, delivered=1)
+    # Accepted long ago (out of Recently finished), its PR still followed.
+    long_ago = "2026-01-01T00:00:00+00:00"
+    runtime.store.execute("UPDATE tasks SET status='done', ended_at=? WHERE id=?",
+                          (long_ago, world.task))  # fmt: skip
+    runtime.shepherd.control.pause(TARGET, "its worker was reopened", world.github.head())
+    task = runtime.tasks.get(world.task)
+    kept = runtime.task_actions.view(task)["shepherd"]
+    assert kept["action"]["kind"] == "resume"
+    assert kept["line"] == "api#12 paused: its worker was closed, then reopened."
+    if how == "merged":
+        world.github.merged, world.github.state = True, "MERGED"
+    else:
+        world.github.state = "CLOSED"
+    await runtime.shepherd.read(TARGET)
+    task = runtime.tasks.get(world.task)
+    view = runtime.task_actions.view(task)
+    kept = view["shepherd"]
+    assert kept["line"] == f"api#12 {how}." and kept["ended"] == how and kept["action"] is None
+    assert kept["url"] == "https://github.com/acme/api/pull/12" and kept["ended_at"]
+    # Nothing of it for the owner now: not to resume, nor its CI that failed before it merged.
+    assert view["attention"] == ""
+    assert TARGET not in [item["key"] for item in runtime.task_actions.monitoring(task)]
+    listed = runtime.tasks.listed(include_ended_since=hours_ago(TASKS_SHOWN_HOURS))
+    assert world.task in [found["id"] for found in listed]
 
 
 async def test_budget_zero_runs_nothing_unasked_and_fix_it_is_charged(world):
