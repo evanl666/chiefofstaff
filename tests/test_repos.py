@@ -4827,6 +4827,9 @@ async def test_receipts_show_what_was_observed_next_to_the_report(tmp_path, git_
     run("git", "add", ".", cwd=tree)
     run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "Fix", cwd=tree)
     for call, code in (("c1", 1), ("c2", 0)):
+        if code == 0:  # Its fix, between the failing run and the passing one.
+            worker.emit("tool.execution_start", tool_call_id="e1", tool_name="edit",
+                        arguments={"path": str(tree / "fix.py")})  # fmt: skip
         worker.emit(
             "tool.execution_start",
             tool_call_id=call,

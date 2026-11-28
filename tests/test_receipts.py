@@ -53,8 +53,9 @@ def test_exit_codes_come_from_copilots_output():
 
 
 def test_claims_are_checked_against_what_was_observed():
+    fix = command("sed -i 's/>/>=/' app/orders.py", 0)
     clean = receipts.summarize(
-        [command("uv run pytest -q", 1), command("uv run pytest -q", 0)],
+        [command("uv run pytest -q", 1), fix, command("uv run pytest -q", 0)],
         {"checkouts": [{"files": 3, "insertions": 40, "deletions": 2, "commits": 1}]},
         "Fixed the bug. All tests pass.",
     )
@@ -114,6 +115,7 @@ def test_acceptance_criteria_count_only_what_was_seen():
     ]  # fmt: skip
     commands = [
         command("uv run pytest tests/test_orders.py", 1),
+        command("sed -i 's/>/>=/' app/orders.py", 0),  # The fix.
         command("uv run pytest tests/test_orders.py", 0),
         command("ruff check .", 1),
     ]
@@ -695,3 +697,128 @@ def test_a_check_github_never_started_is_ci_that_did_not_run():
     found = receipts.summarize([], {"prs": [pr]}, "")
     assert found["notes"] == ["CI didn't run on app#15: GitHub Actions minutes are used up"]
     assert not found["flags"]
+
+
+def ran(text, code, at, kind=None):
+    """A command that ran at minute `at` (its start; it ended half a minute later)."""
+    return command(text, code, kind) | {
+        "started_at": f"2026-11-27T20:{at:02d}:00+00:00",
+        "ended_at": f"2026-11-27T20:{at:02d}:30+00:00",
+    }
+
+
+def minute(at):
+    return f"2026-11-27T20:{at:02d}:10+00:00"
+
+
+CHANGED = {"checkouts": [{"files": 1, "insertions": 2, "deletions": 1, "commits": 0}]}
+
+
+def test_a_failing_test_made_to_pass_is_the_same_tests_with_a_change_in_between():
+    """QA 0.1.61 T3: "✗→✓ tests" (a failing test made to pass) after a failing run of another
+    test command, with nothing changed (live: `python3 -m unittest tests.test_missing_module`
+    failed to import, then `python3 -m unittest discover -s tests` passed, 0 files changed)."""
+    nothing = {"checkouts": [{"files": 0, "insertions": 0, "deletions": 0, "commits": 0}]}
+    found = receipts.summarize(
+        [ran("python3 -m unittest tests.test_missing_module", 1, 20),
+         ran("python3 -m unittest discover -s tests", 0, 22)],
+        nothing, "All tests pass.",
+    )  # fmt: skip
+    assert found["tests"]["passed"] is True and found["tests"]["failed_before"] is False
+
+    def made_to_pass(commands, edits=(), evidence=CHANGED):
+        found = receipts.summarize(commands, evidence, "Fixed.", edits=list(edits))
+        return found["tests"]["failed_before"]
+
+    failing, passing = (
+        ran("uv run pytest -q tests/test_calc.py", 1, 20),
+        ran("uv run pytest -q", 0, 25),
+    )
+    assert made_to_pass([failing, passing], edits=[minute(22)]), "fixed, then the whole suite"
+    assert not made_to_pass([failing, passing]), "run again with nothing changed: flaky"
+    assert not made_to_pass([failing, passing], edits=[minute(18)]), "changed before it failed"
+    assert made_to_pass([failing, ran("sed -i 's/-/+/' calc.py", 0, 22), passing])
+    assert made_to_pass([failing, ran("printf 'x' > calc.py && uv run pytest -q", 0, 25)])
+    assert not made_to_pass([failing, ran("git status && git diff", 0, 22), passing])
+    suite, some = ran("uv run pytest -q", 1, 20), ran("uv run pytest -q tests/a.py", 0, 25)
+    assert not made_to_pass([suite, some], edits=[minute(22)]), "fewer tests than failed"
+    unchanged = {"checkouts": [{"files": 0, "commits": 0, "uncommitted": 0}]}
+    assert not made_to_pass([failing, passing], [minute(22)], unchanged), "its checkouts: none"
+
+
+def test_a_pass_before_the_last_edit_of_the_code_says_so():
+    """A test run that passed, and code edited after it: it passed on other code than what is
+    delivered. An edit of notes after it, or a commit, is no change of the code."""
+    tests = [ran("uv run pytest -q", 0, 20)]
+    found = receipts.summarize(tests, CHANGED, "Tests pass.", edits=[minute(23)])
+    assert found["tests"]["passed"] is True and found["tests"]["before_edit"] is True
+    again = receipts.summarize([*tests, ran("uv run pytest -q", 0, 24)], CHANGED, "Tests pass.",
+                               edits=[minute(23)])  # fmt: skip
+    assert "before_edit" not in again["tests"], "run again after it"
+    for after in ("echo 'Done.' >> NOTES.md", "git add -A && git commit -qm 'Fix calc'"):
+        later = receipts.summarize([*tests, ran(after, 0, 23)], CHANGED, "Tests pass.")
+        assert "before_edit" not in later["tests"], after
+    rewritten = receipts.summarize([*tests, ran("sed -i 's/a/b/' calc.py", 0, 23)], CHANGED, "")
+    assert rewritten["tests"]["before_edit"] is True
+
+
+def test_verified_needs_the_tests_a_criterion_speaks_of_run_on_the_code_as_it_is():
+    """Sibling overclaims: "Verified" by a run of only some of the tests (the one file, or a
+    pattern of them, for `pytest` or "all tests pass"), or by a run before the code changed."""
+
+    def state(criterion, evidence, commands, edits=()):
+        claim = {"criterion": criterion, "result": "met", "evidence": evidence}
+        [found] = receipts.summarize(commands, CHANGED, "Done.", [criterion], [claim],
+                                     edits=list(edits))["criteria"]  # fmt: skip
+        return found["state"], found.get("partial", False), found.get("before_edit", False)
+
+    one = [ran("uv run pytest tests/test_one.py -q", 0, 20)]
+    assert state("Login works", "`uv run pytest -q` passes", one) == ("claimed", True, False)
+    pattern = [ran("pytest -k login -q", 0, 20)]
+    assert state("Login works", "`pytest -q`: 12 passed", pattern) == ("claimed", True, False)
+    assert state("All tests pass", "`uv run pytest tests/test_one.py -q`", one) == (
+        "claimed", True, False,
+    )  # fmt: skip
+    assert state("Orders are idempotent", "`uv run pytest tests/test_one.py`", one) == (
+        "verified", False, False,
+    )  # fmt: skip
+    whole = [ran("uv run pytest -q", 0, 20)]
+    assert state("All tests pass", "`uv run pytest -q` passes", whole) == ("verified", False, False)
+    assert (
+        state("All tests pass", "`pytest tests/`", [ran("pytest tests/", 0, 20)])[0] == "verified"
+    )
+    assert state("All tests pass", "`uv run pytest -q`", whole, [minute(23)]) == (
+        "claimed", False, True,
+    )  # fmt: skip
+
+
+def edit(session, call, path):
+    session.emit("tool.execution_start", tool_name="edit", arguments={"path": path},
+                 tool_call_id=call)  # fmt: skip
+    session.emit("tool.execution_complete", tool_call_id=call, success=True,
+                 result=SimpleNamespace(content=f"Edited {path}"))  # fmt: skip
+
+
+async def test_its_workers_edits_tell_a_fix_from_a_rerun_and_a_pass_from_a_stale_one(harness):
+    """QA 0.1.61 T3 and its siblings, through a worker's own steps: the same tests failing,
+    then passing after its edit of code, were made to pass; with only its notes edited, they
+    were run again; an edit of code after they passed makes that pass one on other code."""
+    runtime, worker, session = await worker_with_task(harness)
+    failed, passed = "F\n1 failed in 0.1s\n<exited with exit code 1>", "1 passed in 0.1s"
+    run(session, "c1", "uv run pytest -q tests/test_calc.py", failed)
+    edit(session, "e1", "/w/calc/NOTES.md")
+    run(session, "c2", "uv run pytest -q tests/test_calc.py", passed)
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["failed_before"] is False, "notes are no fix"
+    run(session, "c3", "uv run pytest -q tests/test_calc.py", failed)
+    edit(session, "e2", "/w/calc/calc.py")
+    run(session, "c4", "uv run pytest -q", passed)
+    await settle(runtime)
+    tests = observed_tests(runtime, worker)
+    assert tests["failed_before"] is True and "before_edit" not in tests
+    edit(session, "e3", "/w/calc/CHANGELOG.md")
+    await settle(runtime)
+    assert "before_edit" not in observed_tests(runtime, worker)
+    edit(session, "e4", "/w/calc/calc.py")
+    await settle(runtime)
+    assert observed_tests(runtime, worker)["before_edit"] is True

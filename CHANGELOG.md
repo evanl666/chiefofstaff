@@ -10,6 +10,13 @@ runs every agent.
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
 
+- **Receipts claim a fix only when there was one.** A card said *✗→✓ tests* (a failing test
+  made to pass) after one test command failed and another, the whole suite, passed with nothing
+  changed. It now takes the same tests (or more) failing, then passing, with the code changed in
+  between; otherwise it is *✓ tests*. Two more overclaims are gone: tests that passed before the
+  last edit of the code say *✓ tests · before last edit*, and a criterion is no longer
+  *verified* by a run of one test file or a pattern (`-k login`) when it speaks of all the tests,
+  nor by a run before the code changed.
 - **A PR whose CI never ran is offered to merge.** GitHub refused to run a PR's CI (the
   account's Actions minutes used up), so it got no Merge card, and the Router told you to merge
   it on GitHub. A PR of yours whose only checks that did not pass never ran is now on *Your OK*

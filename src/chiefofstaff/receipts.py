@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
+from functools import lru_cache
 
 # Copilot's shell tools (bash on macOS and Linux, powershell on Windows).
 SHELL_TOOLS = frozenset({"bash", "shell", "powershell", "run_in_terminal"})
@@ -245,6 +246,127 @@ def test_runs(command: str) -> list[str]:
     `cd svc && uv run pytest -q 2>&1 | tail -5; git status`."""
     test = dict(KINDS)["test"]
     return [text for words in simple_commands(command) if test.search(text := program(words))]
+
+
+# Options of test runners that pick which tests run, not how they run or report (`-q`, `-x`,
+# `--tb=short`): pytest's -k and -m, Go's -run, jest's -t and --testNamePattern, mocha's --grep…
+NARROWING = frozenset({
+    "-k", "-m", "--lf", "--last-failed", "-run", "--run", "-t", "--grep", "-g",
+    "--testNamePattern", "--testPathPattern", "--filter", "--only", "--test", "--tests", "--exact",
+})  # fmt: skip
+# The latest runs of a kind compared for a failing one made to pass (a task may run thousands).
+RUNS_COMPARED = 40
+# What follows an option that picks no test, as its value: a number, a plugin's `no:name`, a
+# report style (`--tb short`).
+OPTION_VALUE = re.compile(r"\d+(\.\d+)?|[\w-]+:[\w-]+|short|long|line|native|no|auto")
+# Tests a run names one by one: a test file, a test in one (`::`), a dotted module (unittest's
+# `tests.test_calc`); not a folder, which holds the suite or a part of it.
+NAMED_TEST = re.compile(
+    r".*(::.*|\.(py|js|jsx|ts|tsx|mjs|cjs|rb|go|rs|java|kt|php|cs|swift|exs?|scala))"
+    r"|[A-Za-z_]\w*(\.[A-Za-z_]\w*)+"
+)
+# An acceptance criterion about the whole suite: "all tests pass", "the full test suite".
+ALL_TESTS = re.compile(
+    r"\b(all|every|whole|full|entire)\W+(?:\w+\W+){0,3}?(tests?|specs?|suites?)\b|全部测试|所有测试",
+    re.IGNORECASE,
+)
+
+
+@lru_cache(maxsize=4096)
+def picked(run: str) -> tuple[str, frozenset[str]]:
+    """A test run (from its runner on, see test_runs) as the tests it picks: its runner
+    (`pytest`, `unittest`, `npm test`) and what follows it but options that only change how it
+    runs or reports."""
+    found = dict(KINDS)["test"].match(run)
+    runner = found.group(0) if found else ""
+    picks: set[str] = set()
+    option = ""
+    for word in words(run[len(runner) :] if found else run):
+        if word.startswith("-") and word.split("=", 1)[0] not in NARROWING:
+            option = "" if "=" in word else word
+            continue
+        if option and OPTION_VALUE.fullmatch(word):
+            option = ""
+            continue  # The value of an option that picks no test (`--count 20`, `-p no:x`).
+        option = ""
+        picks.add(word)
+    return runner, frozenset(picks)
+
+
+def covers(wider: str, narrower: str) -> bool:
+    """Whether a command line's test run ran the tests another one's ran: the same run, or a
+    wider one (the whole suite after one of its files), whatever else either line does
+    (`| tail`, `; git status`). Not another test of the same suite."""
+    for one in test_runs(wider):
+        for other in test_runs(narrower):
+            (runner, picks), (other_runner, other_picks) = picked(one), picked(other)
+            if runner == other_runner and picks <= other_picks:
+                return True
+    return False
+
+
+def picks_some(command: str) -> bool:
+    """Whether every test run in a command line runs some tests only: named ones (a file, a
+    test, a module) or a pattern of them (`-k login`), not the suite or a folder of it."""
+    found = test_runs(command)
+    return bool(found) and all(
+        any(word in NARROWING or NAMED_TEST.fullmatch(word) for word in picked(run)[1])
+        or any(word.split("=", 1)[0] in NARROWING for word in picked(run)[1])
+        for run in found
+    )
+
+
+# What in a command line writes files the code is made of: output into a file (not
+# /dev/null, a log, notes or a scratch file), an in-place edit, files copied, moved, removed or
+# patched, git putting other files in place, or a script fed to an interpreter from a heredoc.
+REDIRECTS = frozenset({">", ">>", "&>", "&>>", ">|"})
+REWRITES = re.compile(
+    r"^(?:(?:sed|perl|ruby)\b.*\s-\w*i\b|(?:cp|mv|rm|touch|patch|truncate|ln|install)\b|"
+    r"git (?:apply|am|checkout|restore|switch|stash|merge|rebase|cherry-pick|reset|revert|pull)\b)"
+)
+INTERPRETERS = re.compile(r"^(?:python[\d.]*|node|ruby|perl|bash|sh|zsh|deno|bun|php)\b")
+# Files that are not code, by their names: notes and docs, logs, output.
+NOT_CODE = re.compile(
+    r"(?i)(^|/)(readme|changelog|changes|notes|license|authors|contributing)[^/]*$|"
+    r"\.(md|rst|adoc|txt|log|out)$"
+)
+# Where a command's output goes that is no file of the code: nowhere, or a scratch folder.
+SCRATCH = re.compile(r"^(/dev/|/tmp/|/private/tmp/)")
+
+
+def code_edit(path: str) -> bool:
+    """Whether a file a worker wrote is code (not its notes, docs, a log or output)."""
+    return bool(path) and not NOT_CODE.search(path)
+
+
+def part_writes_code(words: list[str]) -> bool:
+    """Whether a simple command (its words, see simple_commands) writes code (see REWRITES)."""
+    for index, word in enumerate(words[:-1]):
+        target = words[index + 1]
+        if word in REDIRECTS and code_edit(target) and not SCRATCH.match(target):
+            return True
+    text = program(words)
+    if REWRITES.match(text):
+        return True
+    if text.startswith("tee") and any(
+        code_edit(word) and not SCRATCH.match(word) for word in words[1:] if word[:1] != "-"
+    ):
+        return True
+    return "<<" in words and bool(INTERPRETERS.match(text))
+
+
+@lru_cache(maxsize=4096)
+def writes_code(command: str, side: str = "") -> bool:
+    """Whether a command line writes code: what may have changed between two test runs, not
+    what only reads or runs tests. `side`: only its part "before" its first test run, or
+    "after" it (`fix && pytest`, `pytest; fix`)."""
+    parts = simple_commands(command)
+    if side:
+        test = dict(KINDS)["test"]
+        at = next((i for i, words in enumerate(parts) if test.search(program(words))), None)
+        if at is not None:
+            parts = parts[:at] if side == "before" else parts[at + 1 :]
+    return any(part_writes_code(words) for words in parts)
 
 
 def shown_command(command: str, name: str) -> str:
@@ -625,6 +747,7 @@ def criteria_results(
     commands: list[dict],
     earlier: list[dict] | None = None,
     since: str = "",
+    stale: Callable[[dict], bool] | None = None,
 ) -> list[dict]:
     """Each acceptance criterion with what the worker reported and what backs it.
 
@@ -633,6 +756,9 @@ def criteria_results(
     `earlier`: an earlier result's claims, for the criteria the latest report left out or did
     not check (a follow-up's): one met stands, marked `earlier`, verified only while what backs
     it holds (it passed as last run, after `since` when the code changed since then).
+    Not verified either (claimed, with why: `partial`, `before_edit`) by a test run of only
+    some of the tests it speaks of, nor by a run after which its worker changed code (`stale`:
+    whether it did after an observed command, see summarize).
     """
     results = []
     lines = Lines(commands)  # Each command read once, whatever the number of criteria.
@@ -649,6 +775,10 @@ def criteria_results(
         result = (claim or {}).get("result") or "not_checked"
         proof = (claim or {}).get("evidence", "")
         observed = backing(proof, commands, lines) if result == "met" else None
+        if observed and partial_run(criterion, proof, observed["command"]):
+            # Its latest run ran some of those tests only: the latest that ran them all, if any.
+            whole = [c for c in commands if not partial_run(criterion, proof, c["command"])]
+            observed = backing(proof, whole) or observed
         code = observed["exit_code"] if observed else None
         # A test run in which no test ran shows nothing: no exit code of its own to name.
         code = None if code == NO_TESTS_RAN else code
@@ -672,6 +802,11 @@ def criteria_results(
             and not after(observed.get("ended_at") or "", since)
         ):
             state = "claimed"  # Checked on the code as it was before.
+        why = {}
+        if state == "verified" and observed and partial_run(criterion, proof, observed["command"]):
+            state, why = "claimed", {"partial": True}  # Some of the tests it speaks of ran.
+        if state == "verified" and stale and observed and stale(observed):
+            state, why = "claimed", {"before_edit": True}  # On the code before its last edit.
         results.append(
             {
                 "criterion": criterion,
@@ -681,9 +816,22 @@ def criteria_results(
                 "command": cited_part(proof, observed["command"]) if observed else "",
                 "exit_code": code,
                 "earlier": carried,
+                **why,
             }
         )
     return results
+
+
+def partial_run(criterion: str, evidence: str, command: str) -> bool:
+    """Whether the test run that backs a criterion ran only some of the tests it speaks of:
+    fewer than the run its evidence quotes (`pytest -k login` for `pytest`), or, for the whole
+    suite ("all tests pass"), named tests or a pattern of them (`pytest tests/test_a.py`)."""
+    if not test_runs(command):
+        return False
+    quoted = [text for text in QUOTED.findall(evidence or "") if test_runs(text)]
+    if quoted and not any(covers(command, text) for text in quoted):
+        return True
+    return bool(ALL_TESTS.search(criterion)) and picks_some(command)
 
 
 def verdict(results: list[dict]) -> str:
@@ -724,17 +872,71 @@ def summarize(
     earlier: list[dict] | None = None,
     since: str = "",
     said_changed: bool | None = None,
+    edits: list[str] | None = None,
 ) -> dict:
     """The receipts for a task: observed commands, changes and PRs, the acceptance criteria and
     what backs them, and what disagrees. `earlier`, `since`: see criteria_results.
     `said_changed`: whether its worker said it changed files (report's changed_code; None when
-    it did not say)."""
+    it did not say). `edits`: when its worker's edits wrote code (ISO times, see code_edit)."""
     commands = list(commands)
     evidence = evidence or {}
+    edits = sorted(edits or [])
     by_kind: dict[str, list[dict]] = {}
-    for command in commands:
+    position: dict[int, int] = {}
+    for index, command in enumerate(commands):
+        position[id(command)] = index
         if command["kind"]:
             by_kind.setdefault(command["kind"], []).append(command)
+
+    def changed_between(earlier: dict, later: dict) -> bool:
+        """Whether code may have changed after one run and before a later one: its worker's edit
+        in between, a command in between that writes code, or the part of either line after or
+        before its run that does (`pytest; fix`, `fix && pytest`)."""
+        start = earlier.get("ended_at") or ""
+        end = later.get("started_at") or later.get("ended_at") or ""
+        if start and end and any(start <= at <= end for at in edits):
+            return True
+        between = commands[position[id(earlier)] + 1 : position[id(later)]]
+        return (
+            any(writes_code(c["command"]) for c in between)
+            or writes_code(earlier["command"], "after")
+            or writes_code(later["command"], "before")
+        )
+
+    def same_tests(later: dict, earlier: dict, name: str) -> bool:
+        """Whether a later run ran what an earlier one did: for tests, the same tests or more
+        (covers); for a check or a build, the same command."""
+        if name == "test":
+            return covers(later["command"], earlier["command"])
+        return shown_command(later["command"], name) == shown_command(earlier["command"], name)
+
+    def made_to_pass(runs: list[dict], final: dict, name: str) -> bool:
+        """Failing first, then passing (what a regression test for a fix shows), its last run
+        passing: only a run of the tests that failed, after code changed in between (QA 0.1.61
+        T3: a failing run of another test, nothing changed, then the suite passing was no
+        failing test made to pass). A run in which no test ran is no failure."""
+        if final["exit_code"] != 0 or nothing_changed():
+            return False
+        recent = runs[-RUNS_COMPARED:]
+        return any(
+            failed["exit_code"] not in {0, NO_TESTS_RAN}
+            and passed["exit_code"] == 0
+            and same_tests(passed, failed, name)
+            and changed_between(failed, passed)
+            for at, failed in enumerate(recent[:-1])
+            for passed in recent[at + 1 :]
+        )
+
+    def edited_after(final: dict) -> bool:
+        """Whether code was edited after the run (a pass on the code as it was before then)."""
+        end = final.get("ended_at") or ""
+        if end and any(at > end for at in edits):
+            return True
+        at = position.get(id(final))
+        later = commands[at + 1 :] if at is not None else []
+        return writes_code(final["command"], "after") or any(
+            writes_code(c["command"]) for c in later
+        )
 
     ended: dict[str, str] = {}
 
@@ -757,14 +959,14 @@ def summarize(
             "exit_code": None if none else final["exit_code"],
             "passed": final["exit_code"] == 0,
             "runs": len(every),
-            # Failing first, then passing: what a regression test for a fix shows (a run in
-            # which no test ran is no failure).
-            "failed_before": final["exit_code"] == 0
-            and any(c["exit_code"] not in {0, NO_TESTS_RAN} for c in runs[:-1]),
+            "failed_before": made_to_pass(runs, final, name),
             "running": running,
         }
         if none:
             found["no_tests"] = True  # No pass, and no failure (nor exit code) to name.
+        elif final["exit_code"] == 0 and edited_after(final):
+            # Passed on the code as it was before its last edit: not the code it delivers.
+            found["before_edit"] = True
         return found
 
     checkouts = evidence.get("checkouts", [])
@@ -782,6 +984,15 @@ def summarize(
     if unchecked := sum(c.get("unchecked", 0) for c in checkouts):
         # In a clone in a worker's folder: files git-lfs keeps that may have changed, not read.
         changed["unchecked"] = unchecked
+
+    def nothing_changed() -> bool:
+        """Its checkouts read, and none of them has a change of its own."""
+        return (
+            bool(checkouts)
+            and not any(changed[key] for key in ("files", "commits", "uncommitted", "large"))
+            and not changed.get("unchecked")
+        )
+
     flags = []
     tests = last("test")
     prs = evidence.get("prs", [])
@@ -844,7 +1055,7 @@ def summarize(
         for pr in prs
         if pr.get("checks") == "not_run" and pr.get("state") not in {"CLOSED", "MERGED"}
     ]
-    results = criteria_results(criteria or [], claims or [], commands, earlier, since)
+    results = criteria_results(criteria or [], claims or [], commands, earlier, since, edited_after)
     for item in results:
         if item["state"] == "contradicted":
             flags.append(

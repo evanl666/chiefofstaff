@@ -148,8 +148,8 @@ More: [Reference → Decisions](reference.md#decisions).
 ### Receipts
 
 A worker's report is its claim; **receipts** are what Chief of Staff saw it do. Next to every
-result: the test and build commands it ran and their exit codes (*✗→✓ tests* when a failing test
-was made to pass), its commits and its diff, the PR checks. Each acceptance criterion is
+result: the test and build commands it ran and their exit codes (*✗→✓ tests* when failing tests
+passed after a change of the code), its commits and its diff, the PR checks. Each acceptance criterion is
 *verified* (a check was seen running and passing), *claimed* (only the report says so) or
 *failed*. A report that claims something nothing backs is flagged. More: [Reference →
 Receipts](reference.md#receipts).

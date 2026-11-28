@@ -2977,6 +2977,9 @@ async def test_a_sub_agents_commands_are_receipts(harness):
         ("c1", None, "F\n1 failed in 3.0s\n<shellId: 1 completed with exit code 1>"),
         ("c2", "task-1", "....\n4 passed in 3.1s\n<shellId: 2 completed with exit code 0>"),
     ]:
+        if parent:  # Its fix, then the sub-agent's run of the same tests.
+            session.emit("tool.execution_start", tool_name="edit", tool_call_id="e1",
+                         arguments={"path": "flows/flow.py"})  # fmt: skip
         session.emit("tool.execution_start", tool_name="bash", tool_call_id=call,
                      parent_tool_call_id=parent,
                      arguments={"command": "uv run pytest -q flows/"})  # fmt: skip
@@ -2987,7 +2990,9 @@ async def test_a_sub_agents_commands_are_receipts(harness):
     tests = runtime.task_actions.receipts(runtime.tasks.current(worker))["tests"]
     assert tests["passed"] is True and tests["failed_before"], "run again by a sub-agent"
     steps = [m["text"] for m in harness.store.messages(worker) if m["kind"] == "tool"]
-    assert len(steps) == 1, "a sub-agent's steps are not the worker's own"
+    assert steps == ["bash uv run pytest -q flows/", "edit flows/flow.py"], (
+        "a sub-agent's steps are not the worker's own"
+    )
 
 
 async def test_a_reply_to_copy_the_owner_posted_on_the_pr_is_settled(harness):

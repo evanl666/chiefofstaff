@@ -737,7 +737,13 @@ The review card shows them under *Observed* and flags disagreements, e.g. *Says 
 no test run was observed*, *The last test run failed (exit 1)*, *Checks are failing on
 acme/app#7*, or *Says it made changes, but its checkouts have none* (each worker says with its
 report whether it changed files). A test that failed first and then passed (a regression test
-for a fix) shows as *✗→✓ tests*. *Copy report* puts goal, result and receipts into markdown.
+for a fix) shows as *✗→✓ tests*: the same tests (or more: the whole suite after one of its
+files), with the code changed in between (an edit of code, not of notes; a command that wrote
+it). Another test failing first, or the same tests run again with nothing changed, is *✓
+tests*. Tests that passed before the last edit of the code say so (*✓ tests · before last
+edit*), and a criterion is *verified* only by a run of all the tests it speaks of (not one
+file, or a pattern, for "all tests pass") on the code as it is. *Copy report* puts goal,
+result and receipts into markdown.
 
 Receipts show the latest: the card changes as soon as a test run, push or commit ends, also
 after the report (work on its PR). A test run Copilot left running (a long suite, or one in the
