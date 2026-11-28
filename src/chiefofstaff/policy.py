@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -6109,8 +6110,9 @@ def assigned(words: Iterable[str]) -> dict[str, str]:
 
 
 @functools.lru_cache(maxsize=4)
-def installed_tools(path: str) -> tuple[tuple[str, str, tuple[int, int], int], ...]:
-    """gh and git as a PATH finds them: each one's name, real file, file id and size. Not one
+def installed_tools(path: str, minute: int) -> tuple[tuple[str, str, tuple[int, int], int], ...]:
+    """gh and git as a PATH finds them (read again each `minute`: an update moves them): each
+    one's name, real file, file id and size. Not one
     another name in its folder runs too (macOS's /usr/bin/git: one stub of Xcode's tools for
     git, python3, make…, which runs the tool its name says: under another, not git)."""
     found = []
@@ -6172,7 +6174,8 @@ def tool_of(place: str) -> str | None:
     if not stat.S_ISREG(status.st_mode):
         return None
     real, identity = os.path.realpath(place), (status.st_dev, status.st_ino)
-    for tool, tool_real, tool_identity, size in installed_tools(os.environ.get("PATH", "")):
+    tools = installed_tools(os.environ.get("PATH", ""), int(time.monotonic() // 60))
+    for tool, tool_real, tool_identity, size in tools:
         if real == tool_real or identity == tool_identity:
             return tool
         if size == status.st_size and size:
