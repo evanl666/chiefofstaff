@@ -22,6 +22,7 @@ from conftest import Harness, call_tool, cwd_of, fake_codex, shadowing_repositor
 from copilot import Tool, define_tool
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import BaseModel
+from test_floor_branches import remote_branches, teammate_repo
 
 from chiefofstaff import agents, backend_codex, events, policy, provenance
 from chiefofstaff import runtime as runtime_module
@@ -3235,6 +3236,49 @@ async def test_a_codex_worker_acting_on_its_own_is_held_to_the_floor(tmp_path, m
         assert "get_pull_request" in str(harness.kinds(worker)), "its reads run"
         assert ran.read_text() == "pr view 4\n", "only the read ran"
         assert "Stopped" not in str(harness.kinds(worker))
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in Codex runs commands in zsh")
+async def test_a_codex_worker_deletes_no_teammates_branch_and_writes_nothing_through_gh(
+    tmp_path, monkeypatch
+):
+    """0.1.61 (QA T1): acting on its own, a Codex worker's `git push origin --delete` of a
+    teammate's branch went through, and so did `gh repo delete`. Both refused now, as every
+    worker's: the teammate's branch stays; its gh reads still run."""
+    (tmp_path / "t").mkdir()
+    tree, _ = teammate_repo(tmp_path / "t")
+    ran = tmp_path / "gh-ran"
+    stand_in = tmp_path / "gh-bin" / "gh"  # Never the owner's gh.
+    stand_in.parent.mkdir()
+    stand_in.write_text(f'#!/bin/sh\necho "$@" >> {shlex.quote(str(ran))}\n')
+    stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}{os.pathsep}{os.environ['PATH']}")
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        delete = f"git -C {shlex.quote(str(tree))} push origin --delete teammate/feature"
+        worker = await spawn(runtime, harness, f"Run the shell command `{delete}`. Report done: x")
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+        assert runtime.yolo(harness.store.session(worker))
+
+        def notices() -> list[str]:
+            return [text for kind, text in harness.kinds(worker) if kind == "notice"]
+
+        ask = policy.FLOOR_ASK
+        assert any(policy.REWRITE in text and ask in text for text in notices()), notices()
+        assert "teammate/feature" in remote_branches(tree)
+        # (The Router is not let ask for it: the owner's own words.)
+        await runtime.owner_send(
+            worker,
+            "Run the shell command `gh repo delete acme/api --yes`. Run the shell command "
+            "`gh pr view 4`. Report done: tried",
+        )
+        await until(lambda: any("`gh repo delete`" in text for text in notices()), 30)
+        await until(lambda: ran.exists(), 30)
+        await turn_over(runtime, worker)
+        assert ran.read_text() == "pr view 4\n", "only the read ran"
     finally:
         await runtime.stop()
 

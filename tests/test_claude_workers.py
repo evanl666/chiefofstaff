@@ -20,6 +20,7 @@ import pytest
 from by_hand import opened_by_hand, resumed_by_hand_is_let_go_and_said_closed_once
 from conftest import Harness, call_tool, settle
 from copilot.tools import ToolInvocation
+from test_floor_branches import remote_branches, teammate_repo
 
 from chiefofstaff import agents, backend_claude, policy, prompts
 from chiefofstaff.models import Settings
@@ -455,6 +456,45 @@ async def test_a_claude_worker_acting_on_its_own_is_held_to_the_floor(
         notices = [text for kind, text in harness.kinds(worker) if kind == "notice"]
         ask = policy.FLOOR_ASK
         assert any("`gh pr comment`" in text and ask in text for text in notices), notices
+        assert not ran.exists(), "it never ran"
+        await runtime.owner_send(worker, "Run the shell command `gh pr view 4`. Report done: read")
+        await until(lambda: ran.exists(), 30)
+        assert ran.read_text() == "pr view 4\n"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_claude_worker_deletes_no_teammates_branch_and_writes_nothing_through_gh(
+    tmp_path, claude_on_path, monkeypatch
+):
+    """0.1.61 (QA T1): acting on its own, a Claude worker's `git push origin --delete` of a
+    teammate's branch and its `gh repo delete` are refused, as every worker's: the teammate's
+    branch stays; its gh reads still run."""
+    (tmp_path / "t").mkdir()
+    tree, _ = teammate_repo(tmp_path / "t")
+    ran = tmp_path / "gh-ran"
+    stand_in = tmp_path / "gh-bin" / "gh"  # Never the owner's gh.
+    stand_in.parent.mkdir()
+    stand_in.write_text(f'#!/bin/sh\necho "$@" >> {shlex.quote(str(ran))}\n')
+    stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}:{os.environ['PATH']}")
+    delete = f"git -C {shlex.quote(str(tree))} push origin --delete teammate/feature"
+    harness, runtime, worker, _ = await claude_worker(
+        tmp_path, f"Run the shell command `{delete}`. Report done: tried"
+    )
+    try:
+        assert runtime.yolo(harness.store.session(worker))
+
+        def notices() -> list[str]:
+            return [text for kind, text in harness.kinds(worker) if kind == "notice"]
+
+        ask = policy.FLOOR_ASK
+        assert any(policy.REWRITE in text and ask in text for text in notices()), notices()
+        assert "teammate/feature" in remote_branches(tree)
+        await runtime.owner_send(
+            worker, "Run the shell command `gh repo delete acme/api --yes`. Report done: tried"
+        )
+        await until(lambda: any("`gh repo delete`" in text for text in notices()), 30)
         assert not ran.exists(), "it never ran"
         await runtime.owner_send(worker, "Run the shell command `gh pr view 4`. Report done: read")
         await until(lambda: ran.exists(), 30)
