@@ -27,17 +27,21 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   gets that again, once, with one line in its chat (*Chief of Staff restarted; asked the session
   to continue.*): your message to the Router, the Router's to a worker, a report to the Router.
   What its agent's own record shows it finished (Codex's turn completed, Copilot's or Claude's
-  final answer) is not given again. Your message says *Waiting to be sent* until it goes.
+  final answer) is not given again. Your message says *Waiting to be sent* until it goes. One
+  whose agent is turned off meanwhile fails, saying so, and does not go back to that turn by
+  itself later.
 - **Reconnecting, not thinking.** Until it is resumed, a session says *Reconnecting to Codex…*
-  (or its agent's name) on Home and in its chat, with no *Stop*. A resume given up after three
-  minutes is not the end: it is tried again by itself, waiting longer each time, and *Retry*
-  tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
+  (or its agent's name) on Home and in its chat, with no *Stop*, also while its agent can't
+  start yet (not found while it updates, hanging, signed out): it no longer fails then. A resume
+  given up after three minutes is not the end: it is tried again by itself, waiting longer each
+  time, and *Retry* tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
   for its next message.
 - **Stopping is shorter with several agents on.** Each agent's processes end before Chief of
   Staff does, all together (one agent after another before).
 - **Update and restart waits a little, and says for what.** *Restarting after the Router's turn
   ends…* (or a worker's): two minutes at most; a turn still running then goes on after the
-  restart, as above. It waited for every turn to end, however long.
+  restart, as above. A worker waiting for your answer to its question is not waited for (its
+  question stays). It waited for every turn to end, however long.
 
 Chief of Staff runs for you what it used to ask you to run in a terminal: Copilot's install and
 sign-in, an agent's update, the sandbox's certificate, an MCP server's sign-in, and its own update

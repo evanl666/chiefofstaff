@@ -1150,11 +1150,12 @@ class Runtime:
     def turns_running(self) -> str:
         """The turns running or starting now, as what an update waits for: "the Router's turn
         ends", "2 workers' turns end", "the Router's and a worker's turns end"; "" when none.
-        Not a session reconnecting after a restart: nothing of it runs."""
+        Not a session reconnecting after a restart, nor one waiting for the owner's answer to
+        its question: nothing of it runs."""
         router, workers, others = False, 0, []
         for row in self.store.open_sessions():
-            if row["id"] in self.reconnecting:
-                continue
+            if row["id"] in self.reconnecting or self.states[row["id"]].asking:
+                continue  # (Its turn waits for the owner's answer, kept across the restart.)
             if not (row["status"] in {"working", "starting"} or self.states[row["id"]].busy):
                 continue
             if row["role"] == ROUTER:
@@ -2031,13 +2032,13 @@ class Runtime:
     def gate_resumes(self, agent: str) -> list[str]:
         """The agent's sessions to resume now (to_resume), each with a gate that what is sent to
         it waits at (session_for) until resume_working is done with it; those at work shown as
-        reconnecting until they go on (reconnecting). Returns them."""
+        reconnecting until they go on (reconnecting), their turns cut short now. Returns them."""
         ids = self.to_resume(agent)
         for session_id in ids:
             gate = self.resumes.get(session_id)
             if gate is None or gate.is_set():
                 self.resumes[session_id] = asyncio.Event()
-        self.mark_resuming(agent, ids)
+        self.mark_resuming(agent, ids, self.restart_words(agent))
         return ids
 
     def restart_words(self, agent: str, own: bool = False) -> str:
@@ -2047,18 +2048,46 @@ class Runtime:
         named = backend.capabilities.name if backend and agent != COPILOT_AGENT else "Copilot"
         return f"{named} was restarted" if connections or own else "Chief of Staff restarted"
 
-    def mark_resuming(self, agent: str | None = None, ids: list[str] | None = None):
+    def mark_resuming(
+        self,
+        agent: str | None = None,
+        ids: list[str] | None = None,
+        why: str = "Chief of Staff restarted",
+    ):
         """The sessions at work on an agent (`agent`; else on any; `ids`: of these) as Chief of
         Staff stopped or that agent did: not resumed yet, shown as reconnecting (view) until
-        they are."""
+        they are. A turn of one still at work was cut short (why): what it was given is marked
+        now (cut_short), before anything sent to it meanwhile can settle it (session_for)."""
         for row in self.store.open_sessions():
             if ids is not None and row["id"] not in ids:
                 continue
-            if row["status"] != "working" and not self.store.get(f"cutshort:{row['id']}"):
+            cut = self.cut_off(row)
+            if not cut and not self.store.get(f"cutshort:{row['id']}"):
                 continue
             on = self.agent(row["id"])
             if agent is None or on == agent:
+                if cut:
+                    self.cut_short(row["id"], why)
                 self.reconnecting.setdefault(row["id"], on)
+
+    def turn_over(self, session_id: str):
+        """Its turn cut short ends without going on (stopped, its agent can't start): taken as
+        idle up to what it was sent, never as in flight again (cut_off)."""
+        sent = int(self.store.get(f"sent:{session_id}") or 0)
+        if sent > int(self.store.get(f"idle:{session_id}") or 0):
+            self.store.set(f"idle:{session_id}", str(sent))
+
+    def cut_off(self, row: dict) -> bool:
+        """Whether a turn of it was in flight as Chief of Staff or its agent stopped, where no
+        stop marked it (cut_short_all: killed, crashed): at work, or waiting for the owner while
+        its turn went on (it asked and kept at it), which only its marks show then: it was sent
+        a message after it was last idle."""
+        if row["status"] == "working":
+            return True
+        if row["status"] != "waiting":
+            return False
+        sent = int(self.store.get(f"sent:{row['id']}") or 0)
+        return sent > int(self.store.get(f"idle:{row['id']}") or 0)
 
     async def check_agent(self, agent: str, backend: Any):
         """What Chief of Staff's checks rely on, checked once per version of another agent (its
@@ -2343,6 +2372,8 @@ class Runtime:
                 "send it a message to try again.",
             )
             return
+        if self.cut_off(row):
+            self.cut_short(worker, self.restart_words(agent, own=True))
         try:
             await self.reconcile_sends(agent, only=[worker])
             await self.resume_working(agent, only=[worker])  # Failed with why if it can't.
@@ -2355,8 +2386,9 @@ class Runtime:
 
     async def recover_agents(self):
         """At start: other agents whose sessions were at work, or had messages on their way, are
-        started now, so their sessions go on as Copilot's do (resume_working). One that cannot
-        start (or that this Chief of Staff does not run) fails its sessions at work, with why."""
+        started now, so their sessions go on as Copilot's do (resume_working). One gone for good
+        (agent_gone: turned off, or one this Chief of Staff does not run) fails its sessions at
+        work, with why; one that can't start yet leaves them reconnecting (agent_not_yet)."""
         if not (named := set(self.store.items("agent:").values()) - {COPILOT_AGENT}):
             return
         rows = {row["id"]: row for row in self.store.open_sessions()}
@@ -2372,7 +2404,11 @@ class Runtime:
                     await self.connect_agent(agent)
                 except Exception as exc:
                     logger.warning("%s could not start.", agent, exc_info=True)
-                    self.fail_working(agent, f"Could not resume after restart: {describe(exc)}")
+                    why = f"Could not resume after restart: {describe(exc)}"
+                    if self.agent_gone(agent):
+                        self.fail_working(agent, why)
+                    else:
+                        self.agent_not_yet(agent, why)
         # Resumed in the background (agent_resumes): waited for a little, as Copilot's are.
         resuming = {entry.resuming for entry in self.agents.values() if entry.resuming}
         if pending := {task for task in resuming if not task.done()}:
@@ -2391,10 +2427,52 @@ class Runtime:
 
     def fail_working(self, agent: str, why: str, working: list[str] | None = None):
         """The agent cannot start: its sessions at work (as of `working`, else now) fail, with
-        why (nothing else would end their turns, and only its own sessions are touched)."""
+        why (nothing else would end their turns, and only its own sessions are touched); all
+        its turns cut short end (give_up_resume)."""
         for key in self.at_work_on(agent) if working is None else working:
             if (row := self.store.find_session(key)) and not row["closed_at"]:
                 self.fail(row, why)
+        if working is None:
+            cut = [key.removeprefix("cutshort:") for key in self.store.keys("cutshort:")]
+            for key in self.on_agent(agent, cut):
+                if row := self.store.find_session(key):
+                    self.give_up_resume(row, why)
+
+    def agent_gone(self, agent: str) -> bool:
+        """Whether an agent is gone for good for its sessions: turned off in Settings, or one
+        this Chief of Staff does not run here. Not one that can't start yet (not found while it
+        updates, hanging, signed out): it may start again."""
+        entry = self.agents.get(agent)
+        return entry is None or not entry.enabled() or sys.platform == "win32"
+
+    def agent_not_yet(self, agent: str, why: str):
+        """The agent can't start yet as Chief of Staff starts: its sessions cut short stay
+        reconnecting, tried again by the one recovery path (resume_again) until it starts, or
+        is turned off. Chief of Staff's own placed sessions go on with the next agent that can
+        (fail: role_failed)."""
+        placed = [
+            key
+            for key in self.at_work_on(agent)
+            if (row := self.store.find_session(key)) and self.role_key(row) in PLACED_ROLES
+        ]
+        if placed:
+            self.fail_working(agent, why, placed)
+        for key in self.on_agent(agent, list(self.reconnecting)):
+            if key not in placed:
+                logger.info("%s waits for %s: %s", key, agent, why)
+                self.resume_given_up(key)
+
+    def give_up_resume(self, row: dict, why: str):
+        """Its turn cut short won't go on (its agent is gone for good): one at work fails, with
+        why; one waiting for the owner waits on, its turn over. Never resumed by itself later."""
+        if row["closed_at"]:
+            return
+        if row["status"] == "working":
+            self.fail(row, why)
+            return
+        self.store.delete(f"cutshort:{row['id']}")
+        self.turn_over(row["id"])
+        self.resume_over(row["id"])
 
     # Admission: whether another agent's worker may run now. Copilot's sessions always may.
 
@@ -10148,7 +10226,7 @@ class Runtime:
         ids = [
             row["id"]
             for row in rows
-            if row["status"] == "working" or row["id"] in sending or row["id"] in cut
+            if self.cut_off(row) or row["id"] in sending or row["id"] in cut
         ]
         return self.on_agent(agent, ids)
 
@@ -10214,9 +10292,14 @@ class Runtime:
                     await self.agent_ready(agent, row)
                 elif self.backend is None:
                     continue  # (Copilot's own reconnect resumes it.)
-            except Exception:
+            except Exception as exc:
+                if agent != COPILOT_AGENT and self.agent_gone(agent):
+                    self.give_up_resume(row, f"Could not resume after restart: {describe(exc)}")
+                    continue
                 logger.info("%s can't resume %s yet.", agent, session_id, exc_info=True)
                 continue
+            if (gate := self.resumes.get(session_id)) and not gate.is_set():
+                continue  # Its agent just started: it resumes it with its others (agent_resumes).
             what = str((self.delivery.cut_record(session_id) or {}).get("why") or "")
             self.resume_tries[session_id] = self.background(
                 self.resume_one(row, what or "Chief of Staff restarted")
@@ -10244,10 +10327,12 @@ class Runtime:
             ]
             if given:
                 self.store.set(f"sent:{session_id}", str(given[0] - 1))
+        self.turn_over(session_id)
         self.delivery.defer_pending(session_id)
         if (trying := self.resume_tries.pop(session_id, None)) and not trying.done():
             trying.cancel()
         self.resume_over(session_id)
+        self.resumed(session_id)  # What is sent to it next does not wait for the others.
         if (row := self.store.find_session(session_id)) and row["status"] == "working":
             self.update_session(session_id, status="idle", activity="")
 
@@ -10256,6 +10341,9 @@ class Runtime:
         given up, it is tried again later (resume_given_up). What waits for it goes on either way
         (resumed)."""
         session_id = row["id"]
+        if self.delivery.cut_record(session_id) is None and session_id not in self.reconnecting:
+            self.resumed(session_id)  # Settled meanwhile: what it was given went, or waits.
+            return
         self.reconnecting.setdefault(session_id, self.agent(session_id))
         token = RESUMING.set(True)
         try:
@@ -10295,7 +10383,7 @@ class Runtime:
             )
             outcome = {True: "it arrived", False: "resending", None: "unknown, resending"}
             logger.info("Interrupted send to %s: %s.", session_id, outcome[arrived])
-            if row["status"] != "working":
+            if row["status"] != "working" and not self.delivery.cut_record(session_id):
                 self.resumed(session_id)
 
     async def resume_working(
@@ -10315,8 +10403,18 @@ class Runtime:
         mine = set(self.on_agent(agent, [row["id"] for row in rows]))
         if only is not None:
             mine &= set(only)
+        if at_work is None:
+            # Not marked as its agent started (gate_resumes): its turn cut short now, before
+            # anything is awaited.
+            for row in rows:
+                if row["id"] in mine and self.cut_off(row):
+                    self.cut_short(row["id"], what)
         for row in rows:
             if row["id"] not in mine:
+                continue
+            # As it is now, not as it was: each before it waited for those before it, meanwhile
+            # settled (sent with the owner's message: session_for), or stopped (drop_resume).
+            if not (row := self.store.find_session(row["id"])) or row["closed_at"]:
                 continue
             if self.shepherd.marked(row["id"]):
                 # Left in a shepherd step: never continued in its normal profile.
@@ -10335,6 +10433,9 @@ class Runtime:
                 continue
             if at_work is not None and row["id"] not in at_work:
                 continue  # Its turn began since: at work, not cut short.
+            if not self.store.get(f"cutshort:{row['id']}") and row["id"] not in self.reconnecting:
+                self.resumed(row["id"])  # Settled meanwhile: never given its turn again.
+                continue
             if agent == COPILOT_AGENT and self.too_large(row["id"]):
                 self.resume_over(row["id"])
                 self.store.delete(f"cutshort:{row['id']}")  # (Its fresh one is told.)
@@ -10372,20 +10473,27 @@ class Runtime:
         """resume_working's for one session cut short at work (cut_short): opened again, it gets
         what it had not finished, once, with a note (Delivery.settle_cut); its own record showing
         it finished all of it, its turn's end is taken now. True once done (failed with why when
-        it can't be resumed); cancelled when its bound runs out."""
+        it can't be resumed); cancelled when its bound runs out. Its record is made as it is cut
+        short (mark_resuming, resume_working), never here: one settled meanwhile (sent with the
+        owner's message, stopped) is not given it again. One still reconnecting without one (a
+        try cut off as it sent it) gets what was not sent of it."""
         session_id = row["id"]
-        self.cut_short(session_id, what)
-        record = self.delivery.cut_record(session_id) or {}
-        upto = int(record.get("upto") or 0)
-        since = self.store.prompts(session_id, after=int(record.get("after") or 0))
-        given = [message for message in since if message["id"] <= upto]
-        # What it goes on with: the tasks of what it was given are taken up again.
-        if row["role"] == WORKER and (
-            named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
+        record = self.delivery.cut_record(session_id)
+        if record is None and not (
+            session_id in self.reconnecting and self.delivery.has_unsent(session_id)
         ):
-            self.took_up(session_id, named, switch=False)
-        if any(message["kind"] == "owner" for message in since):
-            self.states[session_id].owner_turn = True
+            return True
+        if record is not None:
+            upto = int(record.get("upto") or 0)
+            since = self.store.prompts(session_id, after=int(record.get("after") or 0))
+            given = [message for message in since if message["id"] <= upto]
+            # What it goes on with: the tasks of what it was given are taken up again.
+            if row["role"] == WORKER and (
+                named := [task for m in given for task in tasks_named(m["meta"]["prompt"])]
+            ):
+                self.took_up(session_id, named, switch=False)
+            if any(message["kind"] == "owner" for message in since):
+                self.states[session_id].owner_turn = True
         try:
             try:
                 session = await self.session_for(session_id)
@@ -10394,6 +10502,10 @@ class Runtime:
                 # cut short on kept for when they say to use them (settings_go_on).
                 self.states[session_id].owner_turn = False
                 await self.settings_stop(session_id)
+                return True
+            if record is None:
+                if session_id in self.reconnecting and self.delivery.has_unsent(session_id):
+                    await self.delivery.flush(session_id, session)
                 return True
             async with self.states[session_id].sending:
                 settled = await self.delivery.settle_cut(session_id, session)
@@ -10518,6 +10630,9 @@ class Runtime:
 
     def fail(self, row: dict, message: str):
         self.resume_over(row["id"])
+        # Its turn cut short by a restart ends here: it never goes on by itself later (a placed
+        # role moved to the next agent is given what it was on: role_failed).
+        self.store.delete(f"cutshort:{row['id']}")
         if (
             self.agents
             and not self.on_copilot(row["id"])

@@ -12,6 +12,7 @@ placing it), stayed "Thinking…" with no turn, and the message was never answer
 
 import asyncio
 import json
+import os
 import sys
 import time
 from types import SimpleNamespace
@@ -20,10 +21,11 @@ import pytest
 from conftest import FakeSession, Harness, call_tool, settle
 from test_roles import PASSED, saved, until
 
-from chiefofstaff import backend_claude, backend_codex
+from chiefofstaff import agents, backend_claude, backend_codex
 from chiefofstaff import runtime as runtime_module
 from chiefofstaff.backend import process_table, running
 from chiefofstaff.delivery import answered
+from chiefofstaff.models import DraftDecision
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Other agents need macOS/Linux")
 
@@ -390,6 +392,362 @@ async def test_stop_while_reconnecting_keeps_its_message_for_the_next_one(
         assert given(ASKED, turns) == 2 and "And thanks." in turns[-1], "with the next one"
     finally:
         codex_slow.released.set()
+        await runtime.stop()
+
+
+# Once settled or let rest, a cut turn is never continued again
+
+
+async def spawned(runtime, harness, instructions: str) -> str:
+    made = await call_tool(
+        runtime, "spawn_worker", harness.router_id, title=instructions[:30],
+        instructions=instructions, why_new="t",
+    )  # fmt: skip
+    return json.loads(made.text_result_for_llm)["session_id"]
+
+
+def notes(sent: list[str]) -> int:
+    return sum(p.startswith('<message from="system" type="restart">') for p in sent)
+
+
+async def test_a_cut_turn_the_owners_message_settled_first_is_not_continued_again(
+    tmp_path, monkeypatch
+):
+    """Review (High): three workers cut short; resuming the first two is slow (each just within
+    its bound), and the owner writes to the third meanwhile: their message, after its wait,
+    settles its cut turn (once). Resumes reached it later still continued it from its old row,
+    marking its turn anew: it was sent everything again, with a second note."""
+    monkeypatch.setattr(runtime_module, "SESSION_RESUME", 2.0)
+    monkeypatch.setattr(runtime_module, "RESUME_WAIT", 0.1)  # Connected while they resume.
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    first, second, third = [await spawned(runtime, harness, f"Port module {n}") for n in "ABC"]
+    await settle(runtime)
+    await runtime.stop()
+    client = harness.client
+    resume = client.resume_session
+
+    async def slow(session_id, **options):
+        if session_id in {first, second}:
+            await asyncio.sleep(1.5)
+        return await resume(session_id, **options)
+
+    client.resume_session = slow
+    again = Harness(harness.store.directory, client=client)
+    runtime = again.runtime
+    runtime.mark_resuming()
+    try:
+        await connected(again)
+        await runtime.owner_send(third, "Also port module D.")  # Waits its 2 s, then goes.
+        await until(lambda: runtime.resume_job.done(), 30)
+        await settle(runtime)
+        sent = again.session(third).sent
+        assert given('title="Port module C"', sent) == 2, "its task once more, not twice"
+        assert given("Also port module D.", sent) == 1
+        assert notes(sent) == 1, "one note"
+        for worker in (first, second):
+            assert notes(again.session(worker).sent) == 1
+    finally:
+        await runtime.stop()
+
+
+async def test_a_cut_turn_let_rest_while_others_resume_is_not_continued(tmp_path):
+    """Review (High): Stop on a worker reconnecting while another's resume is held: it rests,
+    what it was on held. The resume reaching it later sent it its task and a note, working
+    again."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    first = await spawned(runtime, harness, "Port module A")
+    second = await spawned(runtime, harness, "Port module B")
+    await settle(runtime)
+    await runtime.stop()
+    client = harness.client
+    resume, held = client.resume_session, asyncio.Event()
+
+    async def holding(session_id, **options):
+        if session_id == first:
+            await held.wait()
+        return await resume(session_id, **options)
+
+    client.resume_session = holding
+    again = Harness(harness.store.directory, client=client)
+    runtime = again.runtime
+    runtime.mark_resuming()
+    try:
+        await connected(again)
+        before = len(again.session(second).sent)
+        await runtime.workers.interrupt(second)
+        assert again.store.session(second)["status"] == "idle"
+        held.set()
+        await until(lambda: runtime.resume_job.done(), 30)
+        await settle(runtime)
+        assert len(again.session(second).sent) == before, "nothing sent: it rests"
+        assert again.store.session(second)["status"] == "idle"
+        assert runtime.view(again.store.session(second))["status"] == "idle"
+        task = [m for m in again.store.prompts(second) if "Port module B" in m["text"]][-1]
+        assert delivery(runtime, task) == "held", "for its next message"
+        assert notes(again.session(first).sent) == 1
+    finally:
+        held.set()
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("asked", [False, True])
+async def test_a_session_failed_after_a_restart_does_not_go_on_by_itself_later(
+    tmp_path, codex_log, asked
+):
+    """Review (Medium): Codex was turned off as Chief of Staff restarted, so its worker at work
+    failed, saying why; its cut turn was kept all the same, and the next time Codex started, it
+    was sent its task again and went back to work by itself (its task maybe another worker's by
+    then). One that had asked the owner as its turn went on is not failed: it waits on, its
+    turn over."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+    worker = await spawned(runtime, harness, "Wait 3 s. Then report done: Ported.")
+    await until(lambda: (s := runtime.states.handle(worker)) and s.turn, 30)
+    thread = runtime.copilot_id(worker)
+    if asked:
+        await call_tool(runtime, "ask_decision", worker, question="Port 8080 or 9090?")
+    await runtime.stop()
+    agents.save(harness.store, agents.planned(harness.store, {"codex": {"enabled": False}}))
+    again = await restarted(harness)
+    runtime = again.runtime
+    status = "waiting" if asked else "failed"
+    try:
+        assert again.store.session(worker)["status"] == status
+        if not asked:
+            said = [m["text"] for m in again.store.messages(worker) if m["kind"] == "error"]
+            assert any("Codex is turned off" in text for text in said), said
+        turns = len(started_with(codex_log, thread))
+        await saved(runtime, {"codex": {"enabled": True}})  # On again: Codex starts.
+        await runtime.connect_agent("codex")
+        await until(lambda: (job := runtime.agents["codex"].resuming) and job.done(), 30)
+        await settle(runtime)
+        assert len(started_with(codex_log, thread)) == turns, "not sent its task again"
+        assert again.store.session(worker)["status"] == status
+        assert not again.store.get(f"cutshort:{worker}")
+    finally:
+        await runtime.stop()
+
+
+async def test_a_cut_short_worker_waits_reconnecting_while_its_agent_cannot_start_yet(
+    tmp_path, codex_log, monkeypatch
+):
+    """QA (R1): Codex not found as Chief of Staff started again (its update under way, a PATH
+    that changed), a worker cut short by the restart failed at once ("Could not resume after
+    restart"), the Router told. It stays reconnecting, with Retry, and goes on, once, as soon
+    as Codex can start."""
+    harness = Harness(tmp_path / "data")
+    runtime = await harness.connect()
+    await saved(runtime, {"codex": {"enabled": True}, "new_workers": "codex"})
+    worker = await spawned(runtime, harness, "Wait 3 s. Then report done: Ported.")
+    await until(lambda: (s := runtime.states.handle(worker)) and s.turn, 30)
+    thread = runtime.copilot_id(worker)
+    await runtime.stop()
+    path, fake = os.environ["PATH"], str(tmp_path / "fake")
+    monkeypatch.setenv("PATH", os.pathsep.join(p for p in path.split(os.pathsep) if p != fake))
+    again = await restarted(harness)
+    runtime = again.runtime
+    try:
+        await settle(runtime)
+        row = again.store.session(worker)
+        shown = runtime.view(row)
+        assert row["status"] == "working", row["activity"]
+        assert shown["status"] == "resuming" and shown["retry"], shown
+        told = [m for m in again.store.messages(harness.router_id) if "Could not" in m["text"]]
+        assert not told, told
+        monkeypatch.setenv("PATH", path)  # Codex is back.
+        runtime.retry_resume(worker)
+        await until(lambda: again.store.session(worker)["status"] == "done", 30)
+        assert given("Wait 3 s. Then report done", started_with(codex_log, thread)) == 2
+        assert worker not in runtime.reconnecting
+    finally:
+        await runtime.stop()
+
+
+async def test_a_big_copilot_session_that_finished_its_turn_is_not_given_it_again(
+    tmp_path, monkeypatch
+):
+    """Review (Medium): a Copilot session whose log is big (the owner's Router is) is read from
+    its log, which gave its messages only: its answer never showed, so a turn it finished
+    before the stop was seen here was given again."""
+    from chiefofstaff import backend as backend_module
+
+    monkeypatch.setattr(backend_module, "BIG_LOG", 4096, raising=False)
+    harness = Harness(tmp_path / "data")
+    harness.client.home = tmp_path / "copilot"
+    runtime = await harness.connect()
+    router = harness.router_id
+    await runtime.owner_send(router, "Is the deploy done?")
+    await runtime.stop()
+    copilot = runtime.copilot_id(router)
+    log = harness.client.home / "session-state" / copilot / "events.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    said = harness.session(router).raw_sent
+    lines = [{"type": "tool.execution_complete", "data": {"result": "x" * 8000}}]
+    lines += [{"type": "user.message", "data": {"content": prompt}} for prompt in said]
+    answer = {"content": "Yes, at 9:02.", "toolRequests": []}
+    lines += [{"type": "assistant.message", "data": answer}]
+    log.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    sent = len(harness.session(router).sent)
+    again = Harness(harness.store.directory, client=harness.client)
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        assert len(again.session(router).sent) == sent, "nothing given again"
+        assert again.store.session(router)["status"] == "idle"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_repeated_message_lost_at_a_stop_is_given_again(harness, monkeypatch):
+    """Review (Medium): the owner's "go on" to a worker, answered; "go on" again, which Copilot
+    lost at the stop (never written down). The answered one, the same words, was taken for it:
+    its turn counted as finished, and the second "go on" was never given."""
+    runtime = await harness.connect()
+    worker = await spawned(runtime, harness, "Port module A")
+    session = harness.session(worker)
+    session.emit("session.idle")
+    await settle(runtime)
+    await runtime.owner_send(worker, "go on")
+    session.emit("session.idle")
+    await settle(runtime)
+    await runtime.owner_send(worker, "go on")
+    session.sent.pop()  # Lost: never reached Copilot.
+    session.raw_sent.pop()
+    await runtime.stop()
+    events = FakeSession.get_events
+
+    async def each_answered(self):
+        said = SimpleNamespace(content="Done.", tool_requests=None)
+        answer = SimpleNamespace(type=SimpleNamespace(value="assistant.message"), data=said)
+        return [item for event in await events(self) for item in (event, answer)]
+
+    monkeypatch.setattr(FakeSession, "get_events", each_answered)
+    again = Harness(harness.store.directory, client=harness.client)
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        sent = again.session(worker).sent
+        assert given("go on", sent) == 2, "given again, once"
+        assert again.store.session(worker)["status"] == "working"
+    finally:
+        await runtime.stop()
+
+
+# A worker that asked the owner mid-turn: given its turn again, never a second card or ask
+
+
+async def ask(runtime, worker: str, how: str) -> asyncio.Task | None:
+    """The worker asks the owner "8080 or 9090?": on a question card it waits on (ask_user), or
+    on a decision card (ask_decision), its turn going on."""
+    if how == "ask_user":
+        request = {"question": "8080 or 9090?"}
+        return asyncio.create_task(runtime.asks.on_user_input(request, {"sessionId": worker}))
+    await call_tool(runtime, "ask_decision", worker, question="8080 or 9090?")
+    return None
+
+
+def cards(harness) -> list[dict]:
+    return [d for d in harness.store.drafts() if d["kind"] in {"question", "decision"}]
+
+
+def open_asks(harness, worker: str) -> list[dict]:
+    return harness.store.all("SELECT * FROM asks WHERE session_id=? AND status='open'", (worker,))
+
+
+@pytest.mark.parametrize("how", ["ask_user", "ask_decision"])
+async def test_a_question_asked_mid_turn_is_one_card_and_one_ask_after_a_restart(tmp_path, how):
+    """QA (0.1.61): a worker asked the owner mid-turn (on a card it waits on, or a decision
+    card), and Chief of Staff restarted. Given its turn again it asks no second time by itself;
+    and when it asks the same again, it is still one card under Needs you and one open ask in
+    the ledger."""
+    first = Harness(tmp_path / "data")
+    runtime = await first.connect()
+    worker = await spawned(runtime, first, "Pick a port")
+    asking = await ask(runtime, worker, how)
+    await until(lambda: cards(first), 10)
+    await runtime.stop()
+    if asking:
+        asking.cancel()
+    second = Harness(tmp_path / "data", client=first.client)
+    second.runtime.asks.expire_requests()  # As it starts.
+    runtime = await second.connect()
+    try:
+        await settle(runtime)
+        assert given("Pick a port", second.session(worker).sent) == 2, "its turn given again"
+        # One card: the decision card, or the question it went on without.
+        shown = len(cards(second)) + len(runtime.snapshot()["questions"])
+        assert shown == 1 and len(open_asks(second, worker)) == 1
+        asking = await ask(runtime, worker, how)
+        await asyncio.sleep(0.2)
+        await settle(runtime)
+        pending = [d for d in cards(second) if d["status"] == "pending"]
+        assert len(pending) == 1, pending
+        assert runtime.snapshot()["questions"] == [], "the one it went on without, replaced"
+        assert len(open_asks(second, worker)) == 1, open_asks(second, worker)
+        if asking:
+            asking.cancel()
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("ended", [False, True])
+async def test_a_worker_that_asked_mid_turn_goes_on_once_after_a_crash(harness, ended):
+    """QA (Q7): Chief of Staff killed (no stop ran) while a worker that asked the owner went on
+    in its turn: its status said waiting, so nothing showed its turn in flight, and it was never
+    resumed. It goes on once, with one card and one ask, and the owner's answer reaches it once.
+    One that asked and ended its turn to wait is given nothing again."""
+    runtime = await harness.connect()
+    worker = await spawned(runtime, harness, "Tie breaker")
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "ask_decision", worker, question="Rule A or rule B?")
+    if ended:
+        session.emit("session.idle")
+        await settle(runtime)
+    assert harness.store.session(worker)["status"] == "waiting"
+    runtime.stopping = True  # Killed: no stop runs.
+    again = Harness(harness.store.directory, client=harness.client)
+    again.runtime.mark_resuming()  # As it starts.
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        sent = again.session(worker).sent
+        assert given('title="Tie breaker"', sent) == (1 if ended else 2), "its turn, once more"
+        assert notes(sent) == (0 if ended else 1)
+        [card] = [d for d in again.store.drafts() if d["kind"] == "decision"]
+        assert len(open_asks(again, worker)) == 1
+        before = len(sent)
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+        await settle(runtime)
+        assert given("Rule A", again.session(worker).sent[before:]) == 1, "the answer, once"
+    finally:
+        await runtime.stop()
+
+
+async def test_a_worker_that_asked_stopped_while_reconnecting_after_a_crash_rests(harness):
+    """Q7's: Stop on a worker reconnecting after a crash, its turn having gone on after it
+    asked: it rests, and is not taken as in flight at the next connect either."""
+    runtime = await harness.connect()
+    worker = await spawned(runtime, harness, "Tie breaker")
+    session = harness.session(worker)
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "ask_decision", worker, question="Rule A or rule B?")
+    runtime.stopping = True  # Killed: no stop runs.
+    again = Harness(harness.store.directory, client=harness.client)
+    again.runtime.mark_resuming()  # As it starts.
+    assert worker in again.runtime.reconnecting
+    await again.runtime.workers.interrupt(worker)
+    runtime = await again.connect()
+    try:
+        await settle(runtime)
+        assert notes(again.session(worker).sent) == 0, "it rests"
+        assert worker not in runtime.to_resume("copilot")
+    finally:
         await runtime.stop()
 
 

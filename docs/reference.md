@@ -2110,9 +2110,9 @@ When a newer release is out, one quiet line at the bottom of the sidebar says so
 `uvx`, installed with `uv tool` or pipx, or with pip into a virtual environment of its own,
 **Update and restart** does the rest: once the turns running end (the line says which:
 *Restarting after the Router's turn ends…*; two minutes at most, a turn still running then goes on
-after the restart; *Cancel* stops waiting), Chief of Staff gets the new version (`uvx
-chiefofstaff@<version>`, `uv tool upgrade chiefofstaff`, `pipx upgrade chiefofstaff`, or that
-environment's `uv pip` or `pip install --upgrade chiefofstaff`), stops as on Ctrl+C and starts
+after the restart; not a worker waiting for your answer; *Cancel* stops waiting), Chief of Staff
+gets the new version (`uvx chiefofstaff@<version>`, `uv tool upgrade chiefofstaff`, `pipx upgrade
+chiefofstaff`, or that environment's `uv pip` or `pip install --upgrade chiefofstaff`), stops as on Ctrl+C and starts
 again in its own place: the same terminal, port and private link. The page reloads by itself,
 every session goes on as after any restart, and Home says it updated (or why it couldn't: it then
 runs the version it had). Installed into a system's Python, or on Windows, the line says the
@@ -2128,9 +2128,10 @@ agent has it open again: your message to the Router, the Router's to a worker, a
 Router, with one line in its chat (*Chief of Staff restarted; asked the session to continue.*);
 what its agent's own record shows it finished is not given again. Until then it says
 *Reconnecting to Codex…* (or its agent's name), never *Thinking…*, and what it was given waits to
-be sent; a reconnect that takes long is tried again by itself, waiting longer each time, and
-*Retry* tries at once. A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was
-given waits for its next message.
+be sent; a reconnect that takes long, or an agent that can't start yet, is tried again by itself,
+waiting longer each time, and *Retry* tries at once (an agent turned off fails its sessions at
+work, saying so). A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was given
+waits for its next message.
 
 Your Copilot CLI updates itself, and the Copilot SDK Chief of Staff is built on can lag behind it.
 Chief of Staff tells which protocol your CLI speaks before starting it, and runs it when it speaks

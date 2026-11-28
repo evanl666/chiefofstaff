@@ -779,7 +779,8 @@ class Delivery:
         ]
         if not given:
             return Settled(f"{why} while you were working. Continue where you left off.", why)
-        received, finished = await self.agent_record(session_id, session, given)
+        after = int(record.get("after") or 0)
+        received, finished = await self.agent_record(session_id, session, given, after)
         if finished == len(given):
             # Its turn ended before the stop was seen here: handled, nothing goes again.
             for key in ("seen", "handled"):
@@ -808,35 +809,63 @@ class Delivery:
             why,
         )
 
-    async def agent_record(self, session_id: str, session, messages: list[dict]) -> tuple[int, int]:
+    async def agent_record(
+        self, session_id: str, session, messages: list[dict], after: int = 0
+    ) -> tuple[int, int]:
         """Of messages given in one turn (oldest first), how many its agent's own record of its
         conversation shows it received (up to the last one shown) and finished (up to the last
-        one a final answer came after, in a turn that ended); (0, 0) when it cannot be read."""
+        one a final answer came after, in a turn that ended); (0, 0) when it cannot be read.
+        Read where the turn began (turn_start: after `after`, the last message given before
+        it), each in the order given: one with the same words as an earlier one (the owner's
+        "go on" again) is never taken for it. A big Copilot log: its latest part."""
         try:
             if not hasattr(session, "get_events"):
                 return 0, 0
             events = [
                 (getattr(event.type, "value", str(event.type)), event.data)
-                for event in await self.conversation(session_id, session)
+                for event in await self.conversation(session_id, session, latest=True)
             ]
         except Exception:
             logger.warning("Could not read what %s did.", session_id, exc_info=True)
             return 0, 0
+        at, offset = self.turn_start(session_id, events, after), 0
         received = finished = 0
         for index, message in enumerate(messages):
-            texts = (message["meta"]["prompt"], self.runtime.told_prompt(message))
-            shown = [
-                at
-                for at, (kind, data) in enumerate(events)
-                if kind == "user.message"
-                and any(text in (getattr(data, "content", "") or "") for text in texts)
-            ]
-            if not shown:
+            if (found := received_at(events, self.prompt_texts(message), at, offset)) is None:
                 continue
+            at, offset = found
             received = index + 1
-            if answered(events, shown[-1]):
+            if answered(events, at):
                 finished = index + 1
         return received, finished
+
+    def prompt_texts(self, message: dict) -> list[str]:
+        """The words a message with a prompt reached its session in."""
+        texts = (message["meta"]["prompt"], self.runtime.told_prompt(message))
+        return [text for text in dict.fromkeys(texts) if text]
+
+    def turn_start(self, session_id: str, events: list[tuple[str, Any]], after: int) -> int:
+        """Where in an agent's record (events) a turn that began after message `after` begins:
+        just after the last message it was given up to that one (where the same words came
+        more than once, the last answered); its start when there is none, or it is not there
+        (a big log's latest part begins after it)."""
+        before = self.store.one(
+            "SELECT * FROM messages WHERE session_id=? AND id<=? "
+            "AND json_type(meta, '$.prompt') IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (session_id, after),
+        )
+        if not before:
+            return 0
+        before["meta"] = json.loads(before["meta"])
+        texts = self.prompt_texts(before)
+        shown = [
+            at
+            for at, (kind, data) in enumerate(events)
+            if kind == "user.message"
+            and any(text in (getattr(data, "content", "") or "") for text in texts)
+        ]
+        done = [at for at in shown if answered(events, at)]
+        return (done or shown or [-1])[-1] + 1
 
     # Delivery, as the chats show it: queued (not sent yet) -> sent -> received (its
     # conversation shows it) -> processed (the turn it was in ended); or resending, undelivered;
@@ -1180,6 +1209,25 @@ def digest(text: str) -> str:
 
 # How Claude Code's record says a turn was stopped before it ended.
 INTERRUPTED = "[Request interrupted"
+
+
+def received_at(
+    events: list[tuple[str, Any]], texts: list[str], at: int, offset: int
+) -> tuple[int, int] | None:
+    """Where in an agent's record (events) a message in one of these words was received first,
+    from event `at` on (its text from `offset`: messages sent together are one message): that
+    event, and where in its text the message ends; None when it is not there."""
+    for index in range(at, len(events)):
+        kind, data = events[index]
+        if kind != "user.message":
+            continue
+        content = getattr(data, "content", "") or ""
+        start = offset if index == at else 0
+        hits = [(found, text) for text in texts if (found := content.find(text, start)) >= 0]
+        if hits:
+            found, text = min(hits)
+            return index, found + len(text)
+    return None
 
 
 def answered(events: list[tuple[str, Any]], index: int) -> bool:

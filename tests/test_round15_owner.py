@@ -726,6 +726,14 @@ def test_what_an_update_waits_for_is_said_in_a_few_words(harness):
     assert runtime.turns_running() == "2 workers' turns end"
     session("watchdog", "idle")
     assert runtime.turns_running() == "2 workers' turns end"
+    # QA (R5): one blocked on the owner's answer runs nothing (its question is kept across the
+    # restart); one that asked on a card and kept at it does.
+    asked = session("worker", "waiting")
+    runtime.states[asked["id"]].busy = True
+    runtime.states[asked["id"]].asking["d1"] = "Which name?"
+    assert runtime.turns_running() == "2 workers' turns end"
+    runtime.states[asked["id"]].asking.clear()
+    assert runtime.turns_running() == "3 workers' turns end"
 
 
 async def test_an_update_that_failed_says_why_and_runs_as_before(harness, monkeypatch):

@@ -523,7 +523,7 @@ it was at work; once its agent has it open again, it gets what that turn was giv
 on. It is tried again by itself; *Retry* tries now. Nothing is lost to a restart.
 
 **Update and restart** waits for the turns running to end (two minutes at most; one still running
-then goes on after the restart). If it fails, Home says why, and the version you had keeps running.
+then goes on after the restart; a worker waiting for your answer doesn't hold it up). If it fails, Home says why, and the version you had keeps running.
 Installed into a system's Python, or on Windows, update with the command the sidebar shows.
 
 **On Windows**, Send to Chief, the sandbox and folder sizes are unavailable, and only Copilot runs
