@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chiefofstaff"
-version = "0.1.60"
+version = "0.1.61"
 description = "Your engineering chief of staff: runs Copilot, Codex and Claude Code as one team, follows every piece of work through to done, learns to work like you, and brings you only the decisions."
 license = "MIT"
 dynamic = ["readme"]

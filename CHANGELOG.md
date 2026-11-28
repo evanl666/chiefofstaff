@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.61 (2026-11-28)
 
 On every agent, no worker deletes or rewrites a branch that isn't its own, and a worker's `gh`
 only reads. A restart no longer loses what a session was on, and an agent that hangs
