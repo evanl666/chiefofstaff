@@ -728,6 +728,9 @@ FIXES: list[Allow] = [
         data=r"\./api/state\.agents_status\[\d+\]\.update$",
         value={"command": "codex update", "then": ""},
     ),
+    # 0.1.61 (QA T3): when a worker edited code, kept per task, so a test run is told fixed
+    # (failing, an edit, passing) from run again, and a pass before the last edit says so.
+    Allow("QA T3: when each task's worker edited code", data=r"\.db\.kv\.editsat:<task-\d+>$"),
 ]
 
 # Where the owner's other Copilot sessions stand (others.py, docs/design/adopt-sessions.md): on
