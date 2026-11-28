@@ -968,7 +968,9 @@ of Staff's call, not the asking worker's: two asks are the same choice when they
 their telling words (numbers such as *1.11* whole; Chinese by pairs of characters) and neither
 asks about something the other doesn't, with no model call. "Which port should the API server
 use?" and "Which port should the metrics server use?" are two choices, as are staging and prod,
-even with the same options: when unsure, it asks. Within one of your requests (the workers of a team) or one worker's tasks, asks of the same
+even with the same options: when unsure, it asks. Two parts of a team that each wait for the
+other (each asked the other first, with `ask_session`) and then both ask you are asking one
+choice, however differently each puts it: one card. Within one of your requests (the workers of a team) or one worker's tasks, asks of the same
 choice are one card under *Needs you*: *Asked by 2 workers + the Router: one answer reaches them
 all*, with what each asked folded in it and each worker's own question when it said it in other
 words (*Not the same* gives one its own card again), and the count says one; a team's page

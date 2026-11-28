@@ -40,6 +40,9 @@ D12 Two workers of one request ask two different choices that share words (the A
 D13 After "Deploy the API to staging now?" → Yes, the worker asks "Deploy the API to prod now?":
     a card, not "decided already"; nothing goes to prod without a yes (Q4).
 D14 A worker asks the same choice again in other words while its card is open: one card (Q2).
+D15 Two parts of one request, each told to let the other choose first, ask each other, then
+    each asks the owner how to settle it in its own words: one item under Needs you; one answer
+    reaches both, and both use it (QA61 teamwork T11).
 
 Uses your signed-in Copilot CLI and consumes premium requests (LIVE_COPILOT_MODEL,
 claude-sonnet-5.5 by default); the Copilot sessions it creates are deleted at the end; about 40
@@ -50,7 +53,7 @@ app, the next one for the stand-in Slack. Scenarios by name run alone (D3 runs D
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D1 D6
     TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D7 D10
-    TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D11 D14
+    TMPDIR=<scratch> uv run --extra dev --with playwright python scripts/live_decisions.py D11 D15
 
 D8 and D9 run D7 first.
 """
@@ -738,6 +741,67 @@ async def d14_asked_again_in_other_words_while_open_is_one_card(run: Run):
     )
 
 
+async def d15_two_parts_waiting_on_each_other_ask_once(run: Run):
+    app = run.app
+    rule = (
+        "You may not choose first: first ask the {other} worker with ask_session which number it "
+        "will use, and wait for its answer. If you are both waiting for each other, ask me how to "
+        "settle it with report(status='question'), in your own words, and end your turn to wait. "
+        "Once you know your number, write it alone into {file} in your own folder and report done."
+    )
+    await run.say(
+        "Start two workers in parallel (no project), titled 'Left Margin' and 'Right Margin', for "
+        "one piece of work: a page's left and right margins in pixels, which must add up to 100. "
+        "Tell 'Left Margin', word for word: Choose the left margin. "
+        + rule.format(other="Right Margin", file="left.txt")
+        + " Tell 'Right Margin', word for word: Choose the right margin. "
+        + rule.format(other="Left Margin", file="right.txt")
+    )
+    left = await run.worker("Left Margin")
+    right = await run.worker("Right Margin")
+    both = (left["id"], right["id"])
+
+    def open_asks():
+        return run.db(
+            "SELECT id, subject_id, session_id FROM asks WHERE status='open' AND session_id IN "
+            "(?,?)",
+            both,
+        )
+
+    async def both_asked():
+        return {a["session_id"] for a in open_asks()} == set(both) or None
+
+    await wait_for("both parts ask the owner", both_asked, 600, app)
+    await asyncio.sleep(15)
+    asks = open_asks()
+    subjects = {a["subject_id"] for a in asks}
+    run.check(
+        "D15 two parts waiting on each other ask the owner one choice: one item",
+        len(subjects) == 1,
+        f"{len(asks)} open ask(s) in {len(subjects)} subject(s)",
+    )
+    answer = "Left uses 60 and Right uses 40."
+    for worker in (left, right):
+        cards = [c for c in run.joined(worker["id"]) if c["status"] == "pending"]
+        for card in cards:
+            await app.post(f"/api/drafts/{card['id']}", {"action": "answer", "text": answer})
+        tasks = await run.tasks_of(worker["id"])
+        question = (tasks[-1].get("question") or {}) if tasks else {}
+        if not cards and question.get("id"):
+            await app.post(f"/api/questions/{question['id']}/answer", {"text": answer})
+        await asyncio.sleep(5)
+    for worker in (left, right):
+        await run.task(worker["id"], *FINISHED, timeout=900)
+    left = await app.get(f"/api/sessions/{left['id']}")
+    right = await app.get(f"/api/sessions/{right['id']}")
+    numbers = (written(left, "left.txt"), written(right, "right.txt"))
+    run.check(
+        "D15 one answer reached both, and both used it",
+        numbers == ("60", "40"),
+        f"left.txt {numbers[0]!r}, right.txt {numbers[1]!r}",
+    )
+
+
 async def main():
     wanted = {name.upper() for name in sys.argv[1:]}
 
@@ -787,9 +851,13 @@ async def main():
                 ("D12", d12_two_choices_sharing_words_are_two_cards),
                 ("D13", d13_prod_is_not_answered_by_staging),
                 ("D14", d14_asked_again_in_other_words_while_open_is_one_card),
+                ("D15", d15_two_parts_waiting_on_each_other_ask_once),
             ):
                 if runs(name):
-                    await scenario(run)
+                    try:
+                        await scenario(run)
+                    except Exception as exc:  # The next one runs all the same.
+                        run.check(f"{name} ran to its end", False, f"{type(exc).__name__}: {exc}")
         except BaseException:
             router = (await app.get("/api/state"))["router_id"]
             print(transcript(await app.get(f"/api/sessions/{router}/messages")))

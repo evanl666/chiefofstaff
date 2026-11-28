@@ -364,7 +364,7 @@ class Decisions:
                     CLOSED,
                 )
             choices = [o.choice for o in params.options]
-            matches = ledger.match(question, anchor, options=choices)
+            matches = ledger.match(question, anchor, options=choices, session_id=caller)
             found = [m for m in matches if m["level"] == "same"]
             decision = next(
                 (

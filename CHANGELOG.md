@@ -188,7 +188,8 @@ choices are never one.
   of "Deploy the API to staging now? → Yes". Asks are now the same choice only when neither asks
   about something the other doesn't, even with the same options; when unsure they are two cards,
   *Possibly the same as* (*Merge*). A card several workers ask in their own words shows each
-  one's question.
+  one's question. Two parts of a team deadlocked on each other (each told to let the other
+  choose first) that both ask you how to settle it are one card, however each words it.
 - **A question moves with its work.** After *Continue with* another agent, the old worker kept
   its open question and your answer went to it. The question now moves to the worker doing the
   work, and your answer reaches that one.
