@@ -78,6 +78,13 @@ def end_processes(tree: dict[int, str], wait: float = 3.0):
             return
 
 
+def kill_now(tree: dict[int, str]):
+    """Processes killed at once (a hung one may ignore anything gentler, a stopped one does)."""
+    for pid in tree:
+        with suppress(OSError):
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
 def running(pid: int) -> bool:
     if sys.platform == "win32":
         import psutil

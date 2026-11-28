@@ -2148,6 +2148,15 @@ waiting longer each time, and *Retry* tries at once (an agent turned off fails i
 work, saying so). A worker's *Stop: don't go on* (**⋯**) lets it rest instead: what it was given
 waits for its next message.
 
+**An agent that stops answering is started again.** Codex and Claude Code run each session in a
+process of their own. One that hangs (alive, answering nothing) is noticed: a turn it says
+nothing of for 30 seconds, or a request it leaves unanswered for 15, has it asked whether it
+answers at all (twice, 5 seconds each). When it doesn't, its process is ended and its session goes
+on in a new one, with one line in its chat (*Codex stopped answering; restarting it…*); twice
+within two minutes, the session fails instead, with why. *Stop* on a hung agent acts within
+seconds (it waits 3 for an answer) and the next message starts it again. An agent quiet in a long
+command answers, and is left alone. Copilot is watched the same way since 0.1.59.
+
 Your Copilot CLI updates itself, and the Copilot SDK Chief of Staff is built on can lag behind it.
 Chief of Staff tells which protocol your CLI speaks before starting it, and runs it when it speaks
 that protocol (protocol 4, Copilot 1.0.113 and later, through a small adapter of its own). For a
@@ -2161,7 +2170,10 @@ status says so while your own CLI is not the one running.
 Everything stays on your machine, in the data directory (`--data-dir`, default per
 `platformdirs`, e.g. `~/Library/Application Support/chiefofstaff`): a SQLite database with
 sessions, tasks and timelines, workspaces under `work/` and, while Send to Chief is on, its
-socket in `send/`. Conversations themselves are stored by their agent: Copilot's in
+socket in `send/`. A database Chief of Staff can't use (damaged, held by another program, not
+writable, or emptied to 0 bytes in a folder of earlier runs) ends its start with one line naming
+the file and what to do; it is never replaced by a new, empty one. Conversations themselves are
+stored by their agent: Copilot's in
 `~/.copilot/session-state`, where every one is a real Copilot session (`copilot --resume <id>`
 works); Codex's and Claude Code's where those agents keep them (**⋯** → *Continue in a terminal*
 gives the command).

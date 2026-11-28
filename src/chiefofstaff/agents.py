@@ -26,6 +26,10 @@ CONFIG = "agents"
 # The agents this release runs workers on, by the name rows keep (`agent:<row>`).
 NAMES = {"codex": "Codex", "claude": "Claude"}
 COPILOT = "copilot"
+# Why a worker's own process of an agent was ended (its backend's `ended`, Runtime.worker_lost):
+# it stopped answering mid-turn, or as the owner's Stop waited for it.
+FROZEN = "frozen"
+FROZEN_AT_STOP = "frozen at stop"
 # In the configuration, beside each agent's settings: the agent new workers use, and whether
 # the Router chooses one for each new worker (Settings → Agents & models, off unless chosen).
 NEW_WORKERS = "new_workers"

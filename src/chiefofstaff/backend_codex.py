@@ -58,7 +58,7 @@ from uuid import uuid4
 from copilot.generated.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
 from copilot.tools import ToolInvocation
 
-from . import codex_check
+from . import agents, codex_check
 from .backend import (
     ATTACHED,
     Capabilities,
@@ -75,6 +75,7 @@ from .backend import (
 from .envelope import inert, wrap
 from .machine import kill_process_tree
 from .policy import GITHUB_MCP, github_server
+from .processes import kill_now
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,25 @@ STOP_GRACE = 5.0
 # How long a worker's process whose settings changed has for its turn to end (it was just
 # stopped) before it ends anyway.
 RETIRE_SECONDS = 15.0
+# A worker's app-server that stops answering (alive, answering nothing: a hang), noticed as
+# Copilot's is (backend.CopilotBackend.watch): looked at each PROBE_EVERY seconds; a request
+# unanswered for PROBE_AFTER, or a turn it said nothing of for PROBE_IDLE, has it asked whether
+# it answers at all (PING, twice, PROBE_TIMEOUT each). When it does not, it is ended (froze) and
+# its worker goes on in a new one (Runtime.worker_lost). The owner's Stop asks it too, and waits
+# INTERRUPT_SECONDS.
+PROBE_EVERY = float(os.environ.get("CHIEFOFSTAFF_CODEX_PROBE_EVERY", "2"))
+PROBE_AFTER = 15.0
+PROBE_IDLE = 30.0
+PROBE_TIMEOUT = 5.0
+INTERRUPT_SECONDS = 3.0
+PING = "configRequirements/read"
+# Requests that may keep Codex busy a while before it answers anything else (a long thread
+# loaded): never what has it asked.
+UNHURRIED = frozenset({PING, "thread/start", "thread/resume"})
+# How a process found not to answer was ended (CodexBackend.frozen, its worker's `why`).
+FROZEN = agents.FROZEN
+FROZEN_AT_STOP = agents.FROZEN_AT_STOP
+FROZE = "Codex stopped answering."
 # What a thread's settings must read back as (thread/start and thread/resume answers).
 APPROVAL_POLICY = "untrusted"
 REVIEWER = "user"
@@ -930,6 +950,12 @@ class CodexBackend:
         self.opening = 0
         # Ending as its worker's settings changed (CodexAgent.retire): it opens no thread.
         self.retiring: asyncio.Future | None = None
+        # Whether it still answers (keep_answering): when it last said anything, when each
+        # request still unanswered was sent (by id), and, once it was found not to answer, how
+        # (FROZEN mid-turn, FROZEN_AT_STOP as the owner's Stop waited for it).
+        self.heard = time.monotonic()
+        self.sent_at: dict[int, float] = {}
+        self.frozen = ""
 
     # The process
 
@@ -940,7 +966,7 @@ class CodexBackend:
             # Started again once its process ended (Chief of Staff starts a new one for each
             # worker; tests start one again): a process of its own, ended by its own stop.
             self.stopping = self.by_itself = self.told_end = False
-            self.ending, self.sessions = None, {}
+            self.ending, self.sessions, self.frozen = None, {}, ""
         folder = self.folder or Path.home()
         await asyncio.to_thread(folder.mkdir, mode=0o700, parents=True, exist_ok=True)
         read, write = os.pipe()
@@ -994,6 +1020,8 @@ class CodexBackend:
         except BaseException:
             await self.stop()
             raise
+        if self.owner is not None:
+            self.tasks.add(asyncio.ensure_future(self.keep_answering()))
 
     async def check_requirements(self):
         """An administrator's requirements may forbid what Chief of Staff's checks rely on."""
@@ -1095,6 +1123,8 @@ class CodexBackend:
         method that takes none."""
         if self.reader is not None and self.reader.done():
             raise ConnectionResetError("Codex stopped.")
+        if self.frozen:
+            raise ConnectionResetError(FROZE)
         self.ids += 1
         future = asyncio.get_running_loop().create_future()
         self.pending[self.ids] = future
@@ -1104,6 +1134,8 @@ class CodexBackend:
         except BaseException:
             self.pending.pop(self.ids, None)
             raise
+        if method not in UNHURRIED:
+            self.sent_at[self.ids] = time.monotonic()
         return future
 
     async def request(self, method: str, params: dict | None) -> dict:
@@ -1136,12 +1168,14 @@ class CodexBackend:
             if not future.done():
                 future.set_exception(error)
         self.pending.clear()
+        self.sent_at.clear()
 
     async def read(self):
         if not (self.process and self.process.stdout):
             return
         try:
             async for line in self.process.stdout:
+                self.heard = time.monotonic()
                 try:
                     message = json.loads(line)
                 except ValueError:
@@ -1159,6 +1193,70 @@ class CodexBackend:
                 self.by_itself = True  # What is left of it ends (its supervisor ends its tree).
                 self.tasks.add(asyncio.ensure_future(self.stop()))
             self.ended()
+
+    async def keep_answering(self):
+        """A worker's process that stops answering is noticed: a request it leaves unanswered,
+        or a turn it says nothing of, for a while, and it is asked (PING) whether it answers
+        at all; twice not, it is ended (froze). One quiet in a long command answers."""
+        while self.alive() and not self.stopping and not self.frozen:
+            await asyncio.sleep(PROBE_EVERY)
+            if not self.alive() or self.stopping or self.frozen:
+                return
+            now = time.monotonic()
+            waited = now - min(self.sent_at.values(), default=now)
+            busy = any(not session.idle() for session in list(self.sessions.values()))
+            if waited < PROBE_AFTER and not (busy and now - self.heard >= PROBE_IDLE):
+                continue
+            if await self.answers() or await self.answers():
+                continue
+            await self.froze(FROZEN)
+
+    async def answers(self, seconds: float | None = None) -> bool:
+        """Whether it answers anything now (PING, in PROBE_TIMEOUT seconds); an error answers
+        too. False once it stopped."""
+        try:
+            future = self.send_request(PING, None)
+        except (OSError, RuntimeError):
+            return False
+        key = self.ids
+        try:
+            await asyncio.wait_for(asyncio.shield(future), seconds or PROBE_TIMEOUT)
+        except TimeoutError:
+            self.pending.pop(key, None)
+            return False
+        except Exception:
+            return self.alive()
+        return True
+
+    async def froze(self, how: str):
+        """It does not answer: ended at once (its supervisor and all it runs, killed: a hung
+        process may ignore anything gentler), what waited for it failing now; its worker is
+        told (CodexAgent.process_ended) once its output has closed."""
+        if self.frozen or self.stopping or not self.alive():
+            return
+        self.frozen = how
+        logger.warning("A worker's Codex process stopped answering (%s): it is ended.", how)
+        self.fail_pending(ConnectionResetError(FROZE))
+        tree = await asyncio.to_thread(self.processes)
+        await asyncio.to_thread(kill_now, tree)
+        if self.reader and not self.reader.done() and self.reader is not asyncio.current_task():
+            # Its end told (read's own end) before this returns: what comes next (the owner's
+            # next message) finds its worker let go of.
+            await asyncio.wait({self.reader}, timeout=STOP_GRACE)
+
+    async def interrupt(self, thread: str, turn: str):
+        """A turn stopped (turn/interrupt): waited for as any request, Codex asked meanwhile
+        whether it answers at all (PING); when it answers neither in INTERRUPT_SECONDS, it is
+        ended (froze), and the turn with it."""
+        future = self.send_request("turn/interrupt", {"threadId": thread, "turnId": turn})
+        if self.owner is not None:
+            answering = asyncio.ensure_future(self.answers(INTERRUPT_SECONDS))
+            done, _ = await asyncio.wait({future}, timeout=INTERRUPT_SECONDS)
+            if not done and not await answering:
+                await self.froze(FROZEN_AT_STOP)
+                return
+            answering.cancel()
+        await self.answer("turn/interrupt", future)
 
     async def watch(self, process: asyncio.subprocess.Process):
         """Its supervisor ended by itself (killed): Codex, left without it, is ended with it.
@@ -1200,6 +1298,8 @@ class CodexBackend:
         if method is None:
             key = message.get("id")
             future = self.pending.pop(key, None) if isinstance(key, int) else None
+            if isinstance(key, int):
+                self.sent_at.pop(key, None)
             if future and not future.done():
                 future.set_result(message)
             return
@@ -2158,7 +2258,7 @@ class CodexAgent:
         self.retired = {p for p in self.retired if not (p.ending and p.ending.done())}
         self.retired.add(process)
         if self.ended:
-            why = process.refusal or ("crash" if by_itself else "")
+            why = process.refusal or process.frozen or ("crash" if by_itself else "")
             try:
                 self.ended(worker, process.epoch, why)
             except Exception:
@@ -2628,6 +2728,12 @@ class CodexSession:
         if self.turn or self.starting:
             self.hiding, self.unshown = True, ""
             self.stopped_at = time.monotonic()
+        backend = self.backend
+        # Its turn/start unanswered yet: a process that answers nothing is ended, and its turn.
+        starting = self.starting and not self.turn and backend.owner is not None
+        if starting and not await backend.answers(INTERRUPT_SECONDS):
+            await backend.froze(FROZEN_AT_STOP)
+            return
         for _ in range(500):
             if not self.starting:
                 break
@@ -2635,14 +2741,10 @@ class CodexSession:
         for child, turn in list(self.child_turns.items()):
             if turn:
                 with suppress(Exception):
-                    await self.backend.request(
-                        "turn/interrupt", {"threadId": child, "turnId": turn}
-                    )
+                    await self.backend.interrupt(child, turn)
         if self.turn:
             with suppress(Exception):
-                await self.backend.request(
-                    "turn/interrupt", {"threadId": self.session_id, "turnId": self.turn}
-                )
+                await self.backend.interrupt(self.session_id, self.turn)
 
     async def disconnect(self) -> None:
         """Its events stop; the thread stays resumable. While something of it runs (a turn, a

@@ -36,6 +36,20 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   given up after three minutes is not the end: it is tried again by itself, waiting longer each
   time, and *Retry* tries at once; a worker's *Stop: don't go on* (**⋯**) lets it rest, what it was given waiting
   for its next message.
+- **A Codex or Claude Code that stops answering is started again.** On 0.1.60, the Router on Codex
+  whose app-server hung mid-turn (alive, answering nothing) showed *Thinking…* for ever; *Stop*
+  answered only after a minute, your next message stayed *Thinking…* for over four, and Codex
+  was never started again (Claude Code hung the same way, with *Stop* waiting 30 seconds). A
+  turn its agent says nothing of for a while, or a request it leaves unanswered, now has it asked
+  whether it answers at all; when it doesn't, its process is ended and started again, its chat
+  says *Codex stopped answering; restarting it…*, and the turn goes on, as Copilot's do since
+  0.1.59. *Stop* on a hung agent acts within seconds, and your next message starts it again and
+  is answered. An agent quiet in a long command still answers, and is left alone.
+- **A damaged database is said, not shown as a traceback.** Chief of Staff's start on a
+  database that is damaged, held by another program or not writable ended with a Python
+  traceback; it now ends with one line naming the file, what is wrong and what to do (restore it
+  from a backup or move it aside; close the program holding it). A database emptied to 0 bytes in
+  a folder of earlier runs is said the same way, never started as a new, empty Chief of Staff.
 - **Stopping is shorter with several agents on.** Each agent's processes end before Chief of
   Staff does, all together (one agent after another before).
 - **Update and restart waits a little, and says for what.** *Restarting after the Router's turn
