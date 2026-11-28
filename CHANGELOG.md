@@ -202,9 +202,14 @@ A new README, a short guide and the full reference; the demo runs every agent.
   where they did. On PyPI the README's pictures now show, from the version's own tag.
 - **The demo runs on Copilot, Codex and Claude.** `chiefofstaff --demo` has scripted Codex and
   Claude too, ready as if signed in: you ask Codex and Claude for two of the three tasks, the
-  login fix tells the rate limiting what it changed, and every agent's chip shows. A share link
-  made in the demo is sealed as for real, but no gist is made: nothing leaves your machine, as the
-  demo says (before, it made a secret gist on the account signed in to `gh`).
+  login fix tells the rate limiting what it changed, and every agent's chip shows; Settings →
+  Agents & models shows them ready, scripted for the demo (not "Not installed").
+- **Nothing leaves your machine in the demo, as it says.** It ran your `gh`: it read who is
+  signed in, the demo PR's comments on GitHub, even an account's token, and a share link made a
+  secret gist on your account. Its GitHub is now its own, and it runs none of your tools (only
+  `git` in its own project). A share link made in the demo says it is the demo's, and opens in
+  it, pasted on Home. After you sent Maya's reply, the sidebar no longer says "Slack: could not
+  convert string to float".
 - `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
 
 A share link no longer carries a token cut short, nor leaves its gist behind when a stop cuts it

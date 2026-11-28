@@ -14920,6 +14920,22 @@ async def settings_not_installed(runtime, browser):
         assert await rows(page) == ["agent-copilot", "agent-codex"], await rows(page)
         await page.keyboard.press("Escape")
         await context.close()
+        # Not installed with no command known (QA U7: "Install it with this command", and no
+        # command): it says so without one.
+        await agents_saved(runtime, {"claude": {"enabled": True}})
+        unknown = {key: value for key, value in claude.items() if key != "fix"}
+        context, page, errors, _, _ = await settings_page(browser)
+        await look_routes(page, look | {"agents": [codex, unknown | {"enabled": True}]})
+        section = await open_agents(page)
+        await unfold_agent(section, "claude")
+        await expect(section.locator("#agent-claude .setup-note")).to_have_text(
+            re.compile(r"isn't installed on this computer, so its work waits\. Install it, or "
+                       r"turn off Use\.$")
+        )  # fmt: skip
+        await expect(section.locator("#agent-claude .setup-details")).to_be_hidden()
+        assert not errors, errors
+        await page.keyboard.press("Escape")
+        await context.close()
     finally:
         runtime.found_cache = (float("-inf"), [])
         await agents_saved(runtime, {"claude": {"enabled": False}})

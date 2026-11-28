@@ -12,6 +12,10 @@ const LEFT_OUT = "Not shared: the worker's conversation, the changes themselves,
 const CANT_RECALL = "What people have already seen, copied or opened in their own Chief of Staff can't be taken back.";
 const REVOKE_ASK = "Revoke this link? It stops working at once, for everyone. What people have already seen, copied or opened in their own Chief stays with them.";
 const DAYS = { 1: "in 1 day", 7: "in 7 days", 30: "in 30 days" };
+// The demo (`demo` in what the server says): a link is sealed as for real, but nothing is
+// uploaded, so it opens only in that demo, pasted on Home.
+const DEMO_KEPT = "Demo: nothing is uploaded, so the link opens only in this demo, pasted on Home.";
+const DEMO_REAL = "In your own Chief of Staff, the card goes encrypted into a secret gist of yours, and the link opens in any browser.";
 // Share… on a report its card has a newer result than: the card is shared as it is now.
 const OLDER_REPORT = "This shares the card as it is now: its latest result.";
 
@@ -143,7 +147,9 @@ function preview(task, data, decisions = {}, choice = {}) {
     "div",
     { class: "share-options" },
     el("label", {}, el("span", { text: "Link expires" }), days),
-    account ? el("label", {}, el("span", { text: "Kept encrypted in a secret gist of" }), account) : el("span", { class: "as" }, "Kept encrypted in a secret gist of ", el("strong", { text: `@${login}` }), "'s"),
+    data.demo
+      ? el("span", { class: "as", text: DEMO_KEPT })
+      : account ? el("label", {}, el("span", { text: "Kept encrypted in a secret gist of" }), account) : el("span", { class: "as" }, "Kept encrypted in a secret gist of ", el("strong", { text: `@${login}` }), "'s"),
   );
   const blocked = el(
     "div",
@@ -157,7 +163,7 @@ function preview(task, data, decisions = {}, choice = {}) {
   const cancel = el("button", { type: "button", class: "secondary", text: "Cancel", onclick: () => node.close() });
   const footer = signedIn ? el("footer", {}, download, el("span", { class: "spacer" }), why, cancel, create) : el("footer", {}, el("span", { class: "spacer" }), why, cancel, download);
   const scrolled = document.querySelector("dialog.share-dialog .share-preview")?.scrollTop || 0;
-  const header = head(`Share “${card.title}”`, "Anyone with the link can see this card, exactly as below, until it expires.");
+  const header = head(`Share “${card.title}”`, data.demo ? "Exactly what its link shows, as below." : "Anyone with the link can see this card, exactly as below, until it expires.");
   if (data.older_report) header.append(el("p", { class: "hint share-older", role: "note", text: OLDER_REPORT }));
   const node = dialog(header, flags, holder, leftOut, signedIn ? options : blocked, errorLine(), footer);
   holder.scrollTop = scrolled;
@@ -193,13 +199,17 @@ function created(task, made, copied) {
   const copy = el("button", { type: "button", class: "secondary", text: copied ? "Copied" : "Copy", onclick: async () => (copy.textContent = (await copyText(made.link)) ? "Copied" : "Copy") });
   const captain = duck("done");
   const until = el("strong", { text: dayTime(made.expires_at) });
+  const said = made.demo
+    ? ["A demo link: nothing was uploaded, so it opens only in this demo. Paste it on Home to see “", task.title, "” as others would, until "]
+    : [`Anyone with this link can see “${task.title}” until `];
   dialog(
-    el("div", { class: "share-done" }, captain, head("Link ready", copied ? "Copied. " : "", `Anyone with this link can see “${task.title}” until `, until, ".")),
+    el("div", { class: "share-done" }, captain, head("Link ready", copied ? "Copied. " : "", ...said, until, ".")),
     el("div", { class: "share-link" }, input, copy),
     el("ul", { class: "share-facts" },
       el("li", { text: "Turn it off any time: Share… on this card, or Settings → You → Shared links. It stops working at once." }),
-      el("li", { text: CANT_RECALL }),
-      el("li", { text: "It ends by itself when it expires; Chief of Staff then deletes the gist." })),
+      ...(made.demo
+        ? [el("li", { text: DEMO_REAL })]
+        : [el("li", { text: CANT_RECALL }), el("li", { text: "It ends by itself when it expires; Chief of Staff then deletes the gist." })])),
     el("footer", {}, el("button", { type: "submit", text: "Done", autofocus: true })),
   );
   document.querySelector("dialog.share-dialog button[autofocus]")?.focus();
@@ -318,7 +328,7 @@ export async function renderSharedLinks() {
       "div",
       { class: "shared-links-section" },
       el("h3", { id: "shared-links", text: "Shared links" }),
-      el("p", { class: "hint", text: "Cards you shared. Anyone with a link can see its card until it expires; Revoke turns it off at once and deletes its gist. What people already saw stays with them." }),
+      el("p", { class: "hint", text: rows.some((row) => row.demo) ? `Cards you shared in the demo: their links open only here, pasted on Home, until they expire; Revoke turns one off at once. ${DEMO_REAL}` : "Cards you shared. Anyone with a link can see its card until it expires; Revoke turns it off at once and deletes its gist. What people already saw stays with them." }),
       list,
       live ? el("p", { class: "hint", text: "An earlier version of Chief of Staff can't revoke these. Revoke them first if you plan to go back." }) : null,
     ),
@@ -329,7 +339,7 @@ function sharedRow(row, confirming = false, error = "") {
   const gist = row.gist_url ? el("a", { href: row.gist_url, target: "_blank", rel: "noopener noreferrer", class: "link", text: "Delete on GitHub" }) : null;
   if (row.state !== "live") {
     const ended = `${row.state === "revoked" ? "Revoked" : "Expired"} ${day(row.ended_at || row.expires_at)}`;
-    const failed = row.error ? `${ended} · couldn't delete its gist yet (${row.error})` : `${ended} · its gist is deleted`;
+    const failed = row.error ? `${ended} · couldn't delete its gist yet (${row.error})` : row.demo ? ended : `${ended} · its gist is deleted`;
     return el("li", { class: row.error ? "failed" : "off" }, text(el("small", { class: row.error ? "error" : "", text: failed })), row.error ? gist : null);
   }
   const node = el("li", { class: confirming ? "confirming" : row.error || error ? "failed" : "" });

@@ -297,6 +297,50 @@ async def run(scheme: str):
             await page.click("#settings-cancel")
             log("Settings → General → More: one switch line for other Copilot sessions")
 
+            # Settings → Agents & models: the demo's Codex and Claude, scripted and ready, never
+            # looked for on this computer (QA U7: "Not installed").
+            await page.click("#settings-button")
+            await page.click("#settings-tabs [data-tab=agents]")
+            agents_page = page.locator("#settings-page-agents")
+            for name in ("codex", "claude"):
+                await expect(page.locator(f"#agent-{name}-status")).to_have_text(
+                    "Ready", timeout=10000
+                )
+                await page.locator(f"#agent-{name} .agent-line .fold").click()
+                await expect(page.locator(f"#agent-{name} .about")).to_contain_text(
+                    "Scripted for the demo"
+                )
+            await expect(agents_page).not_to_contain_text("Not installed")
+            await expect(agents_page).not_to_contain_text("Can't run here")
+            await page.click("#settings-cancel")
+            log("Settings → Agents & models: the demo's Codex and Claude, ready and scripted")
+
+            # Share a result: the dialog says the link is the demo's, and the link opens here,
+            # pasted on Home (QA U6: a gist was promised, and the public viewer said revoked).
+            finished = "Compare feature-flag services finished"
+            line = page.locator("#timeline .event", has_text=finished).first
+            await line.get_by_role("button", name="Share…").click()
+            share = page.locator("dialog.share-dialog")
+            await expect(share).to_contain_text("nothing is uploaded")
+            await expect(share).not_to_contain_text("secret gist of @")
+            for keep in await share.get_by_role("button", name="Keep").all():
+                await keep.click()
+            await share.get_by_role("button", name="Create link").click()
+            await expect(share).to_contain_text("A demo link: nothing was uploaded")
+            await expect(share).not_to_contain_text("deletes the gist")
+            link = await share.locator(".share-link input").input_value()
+            await share.get_by_role("button", name="Done", exact=True).click()
+            await page.fill("#composer-input", link)
+            await page.press("#composer-input", "Enter")
+            await expect(page.locator("#timeline")).to_contain_text(
+                "Opened a card @you shared: Compare feature-flag services", timeout=10000
+            )
+            log("shared a result: a demo link, said so, that opens here pasted on Home")
+
+            # Long past the Slack reply, the watcher that follows Maya's DM reads it cleanly
+            # (QA U3: "Slack: could not convert string to float" for the rest of the demo).
+            await expect(page.locator("#status-line")).not_to_contain_text("Slack:")
+
             # Learn now: "Learning…" at once in the open dialog, then how it went.
             await page.click("#settings-button")
             await page.click("#settings-tabs [data-tab=you]")
