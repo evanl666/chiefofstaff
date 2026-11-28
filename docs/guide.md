@@ -437,7 +437,8 @@ firmly (the operating system, Chief of Staff, or only the agents' instructions),
 you, opens, changes or comments on an issue, writes to GitHub through `gh` (its commands that read
 run) or GitHub's MCP server, force-pushes or deletes a branch that isn't its own, or pushes to
 `main`/`master`. Chief of Staff checks every command and tool call of every worker and refuses
-these; the worker asks you or hands you a draft instead. It pushes its own branches and opens PRs.
+these, and any command line it can't read; the worker asks you or hands you a draft instead. It
+pushes its own branches and opens PRs.
 
 **Your voice needs your OK.** Slack replies and PR reviews go out only from a draft you approve
 (Chief of Staff refuses Slack's write tools; no agent is ever given your Slack token). The one
@@ -447,7 +448,7 @@ exception is the one you choose: a 🤖 reaction is your OK for the one reply to
 checkout can't write there; a test it runs there runs in a copy.
 
 **Ask first** (Settings → General; off by default) has workers ask before writes outside their
-folders, `sudo`, any force push, piping a download into a shell, and other risky commands. Off,
+folders, `sudo`, any force push, and other risky commands. Off,
 workers act without asking, as your own sessions of those agents do; the floor holds either way.
 Choose it per worker in its header's **⋯**. Workers that read Slack ask first unless you set
 otherwise for one.

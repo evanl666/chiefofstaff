@@ -1617,13 +1617,15 @@ view`, `gh repo view|clone`, `gh api` reads, …) and `gh pr create` from a bran
 any other gh command (`gh repo delete|edit`, `gh release create`, `gh secret set`, `gh pr
 edit`, an extension's or an alias's) is refused. Chief of Staff
 refuses it and the worker asks you, or hands you the text as a draft to approve. Its own
-branches it pushes to as it likes, and it opens PRs and reads anything; a push whose branch the
-command doesn't say plainly is refused too, saying so. The same for workers on Codex (whose
-ChatGPT apps are off for that reason) and Claude Code.
+branches it pushes to as it likes, and it opens PRs and reads anything. A push whose branch the
+command doesn't say plainly is refused too, saying so, and so is a line the check can't read: a
+command whose name the shell makes as it runs, code piped into a shell (a download too), git
+configuration that runs a command, or gh or git copied or renamed. The same for workers on Codex
+(whose ChatGPT apps are off for that reason) and Claude Code.
 
 **With *Ask first*** (yolo off), workers ask before risky commands: Chief of Staff also refuses,
-and the worker asks you: writes outside its folders, `sudo`, any force push, piping downloads
-into a shell, system-level destructive commands and `gh issue delete`. Workers that read Slack cannot fetch URLs, and their
+and the worker asks you: writes outside its folders, `sudo`, any force push, system-level
+destructive commands and `gh issue delete`. Workers that read Slack cannot fetch URLs, and their
 network reaches only GitHub when sandboxed. These checks read commands as text, which can't be
 fully parsed: the push and delete checks are a best effort (a push whose branch a command doesn't
 say plainly, a script fed to a shell on a line that pushes, and a command line too long or

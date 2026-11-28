@@ -36,7 +36,7 @@ makes a mistake.
 | Workers that read Slack reach only GitHub hosts over the network, and not localhost. Other workers may use localhost (servers their tests start, their build daemon) and so reach your local services; the tokens of your Gradle daemons and Jupyter servers are unreadable to them, and Unix sockets (Docker's) stay closed | **OS sandbox** | Sandbox is on |
 | The Router, the Slack session, the Watchdog and the helpers that only read what they are given (learner, checker) have no shell, file or web tools | **Copilot** (session tool allowlist); on Codex or Claude, **that agent** with its own tools, servers, hooks and plugins off, read back as each session opens (see below) | Always, on every agent |
 | Slack messages are sent only after you approve a draft | **Chief of Staff** (Slack write tools are refused; only the app sends) | Always for the Slack tools; no agent is ever given your Slack token: Slack's read tools are Chief of Staff's own, which call Slack with the token it holds |
-| No worker comments on, reviews, merges or closes a PR, opens, changes, comments on or closes an issue, writes to GitHub through `gh` (a worker's `gh` runs only gh's commands that read, `gh api` reads, and `gh pr create` from a branch of its own; any other, `gh repo delete`, `gh release`, `gh secret set`, an extension's or an alias's, is refused) or GitHub's MCP server, force-pushes, deletes or rewrites a branch that isn't its own (`--delete`, `:branch`, `--prune`, `--mirror`, push options), or pushes to `main`/`master`: PR reviews and replies go out only from a draft you approve | **Chief of Staff** (the floor: a check on each command and MCP call of every worker, before its mode is looked at, with quotes and backslashes in commands' names read through, and names in any case (macOS runs `GIT` as git); on Codex, ChatGPT's apps are off and GitHub's MCP servers made to ask) | Always, yolo or not, on Copilot, Codex and Claude Code. It reads commands as text, which can't be fully parsed: the push check is a best effort, not a sandbox, and an agent determined to evade it can (protect your default branch on the server, too). What a command does through another program (`curl` to GitHub's API with a token, a script), or a Codex rule of yours that lets a command run unasked, is not read |
+| No worker comments on, reviews, merges or closes a PR, opens, changes, comments on or closes an issue, writes to GitHub through `gh` (a worker's `gh` runs only gh's commands that read, `gh api` reads, and `gh pr create` from a branch of its own; any other, `gh repo delete`, `gh release`, `gh secret set`, an extension's or an alias's, is refused) or GitHub's MCP server, force-pushes, deletes or rewrites a branch that isn't its own (`--delete`, `:branch`, `--prune`, `--mirror`, push options), or pushes to `main`/`master`: PR reviews and replies go out only from a draft you approve | **Chief of Staff** (the floor: a check on each command and MCP call of every worker, before its mode is looked at, with quotes and backslashes in commands' names read through, and names in any case (macOS runs `GIT` as git); on Codex, ChatGPT's apps are off and GitHub's MCP servers made to ask) | Always, yolo or not, on Copilot, Codex and Claude Code. It reads commands as text, which can't be fully parsed: a line it can't read is refused, but the check is a best effort, not a sandbox, and an agent determined to evade it can (protect your default branch on the server, too). What a command does through another program (`curl` to GitHub's API with a token, a script), or a Codex rule of yours that lets a command run unasked, is not read |
 | No force push at all, no recursive delete of home or root, no `sudo`, no `curl \| sh` | **Chief of Staff** (permission check on each command) | Yolo is off for the worker (on by default, except for workers that read Slack). These checks read commands as text, which can't be fully parsed: they are a best effort, not a sandbox |
 | A worker does not write outside its folders with Copilot's file-edit tool | **Chief of Staff** (permission check) and Copilot (best effort) | Yolo is off for the worker |
 | The connector (watches, notifications when you are away) only looks, and messages nobody but you | **The model**, guided by instructions; it runs as a worker that reads Slack (permission checks on, Slack writes refused; sandboxed on Copilot and Claude, not on Codex: see below) | As far as the model follows its instructions. It can use every MCP server of the agent it runs on, including ones that can send: give it a way to reach you that can message only you if you can |
@@ -452,22 +452,11 @@ the checks you approved run.
 
 - Pattern checks on shell commands are guardrails, not isolation. Unless you turn the sandbox on,
   workers that do not read Slack run as your own agent sessions do: with your access.
-- The push check reads a command line as text; code the line only makes or keeps elsewhere is
-  not read: a `-c` script built by a substitution or from input (`bash -c "$(…)"`,
-  `while read l; do bash -c "$l"; done`), code in `trap '…'`, a script the line writes to a file
-  and then runs (`… > s.sh && bash s.sh`), other interpreters (`python3 -c`, `perl -e`,
-  `node -e`), and a script fed to a shell on a line that says neither push nor the name of an
-  alias your git configuration has that pushes (`base64 -d | bash`, GNU `parallel` with no
-  command). Nor is configuration that sends a branch the line names to
-  another one (`git push origin feat` with `push.default=upstream`, or a
-  `refs/heads/feat:refs/heads/main` push refspec), git configuration a line writes with a program
-  that isn't a shell's redirection or a known writer (`python3 -c …`), or an alias only another
-  repository has, run in a folder the line names by a variable (`cd "$D" && git p …`).
-  Protect your default branch on the server too.
-- The gh check reads gh's words where a line or inline code says them plainly (`gh repo
-  delete`, `["gh", "repo", "delete"]`); gh named by code the line builds at run time
-  (`"g" + "h"`), a script file it runs (`bash s.sh`, `make`, `npm run`), or another program
-  that calls GitHub's API with your token is not read.
+- The floor (the table above) reads each command as it is written, and refuses a line it can't
+  read. It is still a check on text, not isolation: what a script file or another program does
+  is not read, and a model set on getting around it may find a way. The OS sandbox is the
+  boundary for files and the network (a sandboxed worker's `git` and `gh` still reach GitHub as
+  you); protect your default branch on GitHub too.
 - Unsandboxed commands run as you: they can reach whatever your account can, including
   keychain items that do not ask for a password.
 - The sandbox does not confine Copilot's built-in file edits as strictly as shell commands

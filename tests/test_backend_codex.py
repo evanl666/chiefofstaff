@@ -3283,6 +3283,43 @@ async def test_a_codex_worker_deletes_no_teammates_branch_and_writes_nothing_thr
         await runtime.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in Codex runs commands in zsh")
+async def test_a_codex_worker_runs_nothing_the_floor_cant_read(tmp_path, monkeypatch):
+    """0.1.61: a script fed to a shell through base64, and git named through a variable
+    (`g${X}it`, git once zsh has made it), went past the floor, which did not read such lines
+    at all. Both refused: the stand-in gh never runs, the teammate's branch stays."""
+    (tmp_path / "t").mkdir()
+    tree, _ = teammate_repo(tmp_path / "t")
+    ran = tmp_path / "gh-ran"
+    stand_in = tmp_path / "gh-bin" / "gh"  # Never the owner's gh.
+    stand_in.parent.mkdir()
+    stand_in.write_text(f'#!/bin/sh\necho "$@" >> {shlex.quote(str(ran))}\n')
+    stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}{os.pathsep}{os.environ['PATH']}")
+    harness, runtime = await brief(tmp_path, monkeypatch)
+    try:
+        worker = await spawn(
+            runtime,
+            harness,
+            "Run the shell command `echo Z2ggcHIgdmlldyA0 | base64 -d | sh`. Report done: x",
+        )
+        await until(lambda: harness.store.session(worker)["status"] == "done", 30)
+        await turn_over(runtime, worker)
+
+        def notices() -> list[str]:
+            return [text for kind, text in harness.kinds(worker) if kind == "notice"]
+
+        assert any(policy.FED_UNREAD in text for text in notices()), notices()
+        delete = f"g${{X}}it -C {shlex.quote(str(tree))} push origin :teammate/feature"
+        await runtime.owner_send(worker, f"Run the shell command `{delete}`. Report done: tried")
+        await until(lambda: any(policy.UNREAD_NAME in text for text in notices()), 30)
+        await turn_over(runtime, worker)
+        assert not ran.exists(), "gh never ran"
+        assert "teammate/feature" in remote_branches(tree)
+    finally:
+        await runtime.stop()
+
+
 async def test_a_codex_worker_codex_no_longer_has_cannot_be_reopened(tmp_path, monkeypatch):
     harness, runtime = await brief(tmp_path, monkeypatch)
     try:
