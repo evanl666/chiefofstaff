@@ -12,11 +12,13 @@ import collections
 import contextvars
 import fnmatch
 import functools
+import hashlib
 import itertools
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -886,6 +888,71 @@ def shell_words(text: str) -> list[str]:
         array = assignment and index < size and text[index] == "(" and text[index - 1] == "="
         words.append(made_word(word, at, assignment and not array, splits, quoted))
     return words
+
+
+def marked(text: str) -> str:
+    """A line with each `${…}` and `$'…'` outside quotes put as one piece of a word (`${\x02}`,
+    `$\x02`: a variable's, as made_up reads it): what is in them (a `|`, a quote) splits
+    nothing, as in bash (shell_words reads as shlex, which knows neither)."""
+    if "${" not in text and "$'" not in text:
+        return text
+    out: list[str] = []
+    at, size = 0, len(text)
+    while at < size:
+        char = text[at]
+        if char in "'\"":
+            end = at + 1
+            while end < size and text[end] != char:
+                end += 2 if char == '"' and text[end] == "\\" else 1
+            out.append(text[at : end + 1])
+            at = end + 1
+        elif char == "\\":
+            out.append(text[at : at + 2])
+            at += 2
+        elif char == "$" and text[at + 1 : at + 2] in {"{", "'"}:
+            try:
+                end = expansion_end(text, at)
+            except ValueError:
+                out.append(text[at:])
+                break
+            out.append("${\x02}" if text[at + 1] == "{" else "$\x02")
+            at = end
+        else:
+            out.append(char)
+            at += 1
+    return "".join(out)
+
+
+def expansion_end(text: str, start: int) -> int:
+    """Where `${…}` (its braces nested, its quotes read) or `$'…'` (backslashes escaping, `\'`
+    too) that starts at `start` ends. ValueError where it doesn't."""
+    if text[start + 1] == "'":
+        at = start + 2
+        while at < len(text):
+            if text[at] == "\\":
+                at += 2
+            elif text[at] == "'":
+                return at + 1
+            else:
+                at += 1
+        raise ValueError("No closing quotation")
+    depth, at = 0, start + 1
+    while at < len(text):
+        char = text[at]
+        if char == "\\":
+            at += 2
+            continue
+        if char in "'\"":
+            closing = text.find(char, at + 1)
+            if closing < 0:
+                raise ValueError("No closing quotation")
+            at = closing + 1
+            continue
+        depth += {"{": 1, "}": -1}.get(char, 0)
+        at += 1
+        if depth == 0:
+            return at
+    raise ValueError("No closing brace")
 
 
 def shell_commands(text: str) -> tuple[list[tuple[str, list[str]]], list[str]] | None:
@@ -5858,6 +5925,537 @@ def gh_refusal(command: str, own: frozenset[str], depth: int = 0) -> str | None:
     return None
 
 
+# What the floor can't read (0.1.61), refused for every worker whatever the line names: a
+# command whose name the shell makes as it runs (`g${X}it`, `$'\x67'it`, `{git,}`, a glob), gh or
+# git copied, linked, or found under another name (by its file), a command on a PATH the line
+# makes that can't be read, a shell fed code (a pipe, a heredoc, a process substitution), and
+# git configuration that runs a command (hooks, a `!` alias, a pager, an ssh command…).
+UNREAD_NAME = (
+    "a command whose name the shell makes as it runs (an expansion, a quote or a glob in it): "
+    "name the program plainly"
+)
+GH_COPIED = "copying or linking gh or git (run them by their own names)"
+GH_RENAMED = "git under another name (run it as git)"
+UNREAD_PATH = "a command on a PATH the line makes, which the floor can't read (run it by its path)"
+FED_UNREAD = (
+    "a shell fed code the floor can't read (from a pipe, a heredoc or a substitution): run the "
+    "commands themselves, or a script file"
+)
+GIT_RUNS = "git configuration that runs a command ({key}): what it runs can't be read"
+# What ends a case's branch: the next words are its next patterns.
+CASE_ENDS = frozenset({";;", ";&", ";;&"})
+# A command's name that is a variable's value only (`$PY`, `${PY}`).
+VARIABLE_NAME = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# A name's part the shell makes into another word: a brace expansion, a glob.
+MADE_BRACES = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
+MADE_GLOB = re.compile(r"[*?]|\[.+\]")
+# The word after one of these is a command a program runs (`uv run X`, `find … -exec X`).
+RUN_WORDS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "run", "exec", "x", "dlx"})
+RUN_FIRST = frozenset({"npx", "bunx", "pnpx"})
+# Words after which a name made up is git's or gh's, wherever it stands (`… $G push`).
+COMMAND_WORDS = GH_GROUPS | {"push", "send-pack", "subtree", "update-ref", "config", "-c"}
+# Programs that only print or search text, and those that only show what they are piped.
+TEXT_ONLY = frozenset({"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack"})
+TEXT_SINKS = frozenset({
+    "head", "tail", "less", "more", "wc", "sort", "uniq", "cut", "grep", "egrep", "fgrep", "rg",
+    "cat", "jq", "column", "fold", "fmt", "nl",
+})  # fmt: skip
+# Programs that copy or link a file, and what looks up where gh or git is.
+TOOL_COPIERS = frozenset({"cp", "ln", "install", "mv", "rsync", "ditto", "scp", "dd", "tar", "cpio",
+                     "pax", "cat", "gcp", "gln", "ginstall", "gmv"})  # fmt: skip
+GH_LOOKUP = re.compile(
+    r"(?:\bcommand\s+-[vV]|\bwhich|\btype\s+-[a-zA-Z]+|\bwhereis|\bwhere|\brealpath|\breadlink"
+    r"(?:\s+-\w+)?|\bbrew\s+--prefix)\s+(?:-\S+\s+)*(?:gh|git)\b"
+)
+# A shell's names, for a first look before feeds_shell reads a line.
+FED_NAMED = re.compile(
+    r"\b(?:" + "|".join(sorted(FED_SHELLS)) + r"|source)\b|<\(|=\(|/dev/(?:stdin|fd)"
+)
+# bash's builtins and keywords: never looked up on the PATH.
+BUILTINS = frozenset({
+    ".", ":", "[", "[[", "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command",
+    "compgen", "complete", "continue", "declare", "dirs", "disown", "echo", "enable", "eval",
+    "exec", "exit", "export", "false", "fc", "fg", "getopts", "hash", "help", "history", "jobs",
+    "kill", "let", "local", "logout", "popd", "printf", "pushd", "pwd", "read", "readonly",
+    "return", "set", "shift", "shopt", "source", "suspend", "test", "times", "trap", "true",
+    "type", "typeset", "ulimit", "umask", "unalias", "unset", "wait", *KEYWORDS,
+})  # fmt: skip
+# Where git runs a command, or code of a file, from its configuration or its variables.
+GIT_RUN_KEYS = re.compile(
+    r"(?:core\.(?:pager|editor|sshcommand|askpass|gitproxy|fsmonitor)|pager\..+|"
+    r"sequence\.editor|diff\.external|diff\..+\.(?:command|textconv)|"
+    r"(?:diff|merge)tool\..+\.(?:cmd|path)|merge\..+\.driver|filter\..+\.(?:clean|smudge|"
+    r"process)|credential\.(?:.+\.)?helper|gpg\.(?:.+\.)?program|sendemail\.(?:tocmd|cccmd|"
+    r"smtpserver)|browser\..+\.(?:cmd|path)|web\.browser|man\..+\.(?:cmd|path)|"
+    r"remote\..+\.(?:uploadpack|receivepack)|uploadpack\.packobjectshook|alias\..+|"
+    r"submodule\..+\.update)"
+)
+GIT_FILE_KEYS = re.compile(
+    r"core\.hookspath|include\.path|includeif\..+\.path|init\.templatedir|protocol\.(?:ext\.)?allow"
+)
+GIT_RUN_VARIABLES = frozenset({"GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "PAGER", "GIT_EDITOR",
+                               "EDITOR", "VISUAL", "GIT_SEQUENCE_EDITOR", "GIT_EXTERNAL_DIFF",
+                               "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND"})  # fmt: skip
+GIT_FILE_VARIABLES = frozenset({"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_CONFIG_GLOBAL",
+                                "GIT_CONFIG_SYSTEM", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+                                "GIT_CONFIG_COUNT"})  # fmt: skip
+# What git may run of its configuration: one of these programs, given plain words.
+GIT_PLAIN_RUNS = frozenset({"cat", "less", "more", "most", "head", "tail", "true", "false", ":",
+                            "vi", "vim", "nvim", "nano", "emacs", "code", "subl", "ssh", "delta",
+                            "diff-so-fancy", "bat", "sed", "ed"})  # fmt: skip
+GIT_HELPERS = frozenset({"", "store", "cache", "osxkeychain", "manager", "manager-core",
+                         "libsecret", "wincred"})  # fmt: skip
+GIT_CONFIG_VALUED = frozenset({"-f", "--file", "--blob", "--type", "-t", "--default",
+                               "--comment", "--value"})  # fmt: skip
+GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list",
+                              "-l", "--unset", "--unset-all", "--rename-section",
+                              "--remove-section", "--get-color", "--get-colorbool"})  # fmt: skip
+GIT_CONFIG_COMMANDS = frozenset({"list", "get", "unset", "rename-section", "remove-section"})
+
+
+def made_up(name: str) -> bool:
+    """Whether the shell makes a command's name (past its folder: `$VENV/bin/python` is read)
+    out of what it is given: a variable, a substitution, `$'…'`, a brace expansion, a glob."""
+    base = name.rsplit("/", 1)[-1]
+    if base in {"[", "[["}:
+        return False
+    return bool(UNSETTLED.search(base) or MADE_BRACES.search(base) or MADE_GLOB.search(base))
+
+
+@functools.lru_cache(maxsize=64)
+def line_commands(command: str) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    """Each simple command a line runs, in order: its words, and what it runs past `env`,
+    `nice`, `xargs`… (unwrapped); and those it runs in turn (`sh -c`, `eval`, `$(…)`),
+    MOST_NESTED deep (TooComplexError past that). A part that does not parse (an unclosed
+    quote: the shell runs none of it) has none."""
+    found: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+    def walk(text: str, depth: int) -> None:
+        if depth > MOST_NESTED:
+            raise TooComplexError
+        parsed = shell_commands(marked(text))
+        if parsed is None:
+            return
+        commands, inside = parsed
+        patterns = False
+        for joiner, words in commands:
+            # (A case's patterns, `;; *)`, `a|b)`: what the commands after `)` run is read.)
+            patterns = joiner in CASE_ENDS or (patterns and joiner == "|")
+            if patterns:
+                continue
+            patterns = words[:1] == ["case"]
+            rest, xargs = unwrapped(words)
+            found.append((tuple(words), tuple(rest)))
+            _, script = code_of(rest, False, xargs)
+            for inner in [*([] if script is None else [script]), *inner_scripts(words)]:
+                walk(inner, depth + 1)
+        for body in inside:
+            walk(body, depth + 1)
+
+    walk(command, 0)
+    return tuple(found)
+
+
+def names_unread(commands: Iterable[tuple[tuple[str, ...], tuple[str, ...]]]) -> bool:
+    """Whether a command's name, or a command a program runs (`uv run X`, `find -exec X`, a
+    word git's or gh's command follows), is one the shell makes (made_up); but a variable the
+    line set before to a plain name, not git's or gh's (`PY=.venv/bin/python; $PY -m x`)."""
+    known: dict[str, str] = {}
+    for words, rest in commands:
+        if not rest or program_of(rest[0]) in {"export", "declare", "typeset", "readonly"}:
+            known |= assigned(words if not rest else rest[1:])
+            continue
+        if made_up(rest[0]):
+            named = VARIABLE_NAME.fullmatch(rest[0])
+            value = known.get(named.group(1), "") if named else ""
+            if not value or made_up(value) or program_of(value) in {"gh", "git"}:
+                return True
+        program = program_of(rest[0])
+        if program in TEXT_ONLY or program in {"gh", "git"}:
+            continue  # (gh's and git's own words are read as theirs.)
+        for at, word in enumerate(rest[1:], 1):
+            before = rest[at - 1]
+            runs = before in RUN_WORDS or (at == 1 and program in RUN_FIRST)
+            follows = at + 1 < len(rest) and rest[at + 1] in COMMAND_WORDS and before[:1] != "-"
+            if (runs or follows) and made_up(word):
+                return True
+    return False
+
+
+def path_folders(value: str, cwd: str) -> list[str] | None:
+    """The folders a PATH a line gives holds, as the shell reads it there ($PATH, $HOME, $PWD
+    and `~` put in); None when another variable or a substitution is in it."""
+    current = os.environ.get("PATH", "")
+    home = str(Path.home())
+    for name, put in (("PATH", current), ("HOME", home), ("PWD", cwd)):
+        value = value.replace("${" + name + "}", put).replace("$" + name, put)
+    if UNSETTLED.search(value):
+        return None
+    folders = []
+    for folder in value.split(os.pathsep):
+        folder = home + folder[1:] if folder.startswith("~") else folder
+        folders.append(str(Path(cwd) / folder) if folder else cwd)
+    return folders
+
+
+def assigned(words: Iterable[str]) -> dict[str, str]:
+    """The variables assignments among these words set (`A=b`, `env A=b`, `export A=b`)."""
+    found = {}
+    for word in words:
+        if isinstance(word, Assignment) or ASSIGNMENT.match(word):
+            name, _, value = word.partition("=")
+            found[name.rstrip("+")] = value
+    return found
+
+
+@functools.lru_cache(maxsize=4)
+def installed_tools(path: str) -> tuple[tuple[str, str, tuple[int, int], int], ...]:
+    """gh and git as a PATH finds them: each one's name, real file, file id and size. Not one
+    another name in its folder runs too (macOS's /usr/bin/git: one stub of Xcode's tools for
+    git, python3, make…, which runs the tool its name says: under another, not git)."""
+    found = []
+    for folder in path.split(os.pathsep):
+        for tool in ("gh", "git"):
+            place = Path(folder or ".") / tool
+            try:
+                status = place.stat()
+            except OSError:
+                continue
+            if stat.S_ISREG(status.st_mode) and not shared_stub(place, tool, status):
+                identity = (status.st_dev, status.st_ino)
+                found.append((tool, os.path.realpath(place), identity, status.st_size))
+    return tuple(found)
+
+
+def shared_stub(place: Path, tool: str, status: os.stat_result) -> bool:
+    """Whether another name in a tool's folder (not one of its own, `git-…`) is the same file,
+    or a copy of it."""
+    identity = (status.st_dev, status.st_ino)
+    try:
+        siblings = list(place.parent.iterdir())
+    except OSError:
+        return False
+    for sibling in siblings:
+        if sibling.name == tool or sibling.name.startswith(f"{tool}-"):
+            continue
+        try:
+            other = sibling.stat()
+        except OSError:
+            continue
+        if (other.st_dev, other.st_ino) == identity:
+            return True
+        if stat.S_ISREG(other.st_mode) and other.st_size == status.st_size:
+            mine = file_digest(str(place), identity, status.st_size, status.st_mtime_ns)
+            theirs = (other.st_dev, other.st_ino)
+            if mine == file_digest(str(sibling), theirs, other.st_size, other.st_mtime_ns):
+                return True
+    return False
+
+
+@functools.lru_cache(maxsize=16)
+def file_digest(place: str, identity: tuple[int, int], size: int, changed: int) -> str:
+    """A file's content's sha256 (once per file as it is: its id, size and change time)."""
+    digest = hashlib.sha256()
+    with Path(place).open("rb") as file:
+        for chunk in iter(lambda: file.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tool_of(place: str) -> str | None:
+    """gh or git, when a file is the one a PATH finds (by its real file, its file id, or a copy
+    of it); None otherwise."""
+    try:
+        status = Path(place).stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(status.st_mode):
+        return None
+    real, identity = os.path.realpath(place), (status.st_dev, status.st_ino)
+    for tool, tool_real, tool_identity, size in installed_tools(os.environ.get("PATH", "")):
+        if real == tool_real or identity == tool_identity:
+            return tool
+        if size == status.st_size and size:
+            changed = Path(tool_real).stat().st_mtime_ns
+            mine = file_digest(real, identity, size, status.st_mtime_ns)
+            if mine == file_digest(tool_real, tool_identity, size, changed):
+                return tool
+    return None
+
+
+def found_as(name: str, cwd: str, folders: list[str] | None) -> str | None:
+    """Where the shell finds a command's name: its path (from `cwd`), or a folder of the PATH
+    (`folders`: the line's; else this process's)."""
+    if "/" in name:
+        return str(Path(cwd) / Path(name).expanduser())
+    path = os.pathsep.join(folders) if folders is not None else os.environ.get("PATH", "")
+    return shutil.which(name, path=path)
+
+
+def gh_copied(commands: Iterable[tuple[tuple[str, ...], tuple[str, ...]]], line: str,
+              cwd: str) -> bool:  # fmt: skip
+    """Whether a line copies or links gh or git (a path that is theirs, or what a lookup of
+    them makes: `cp "$(command -v gh)" ./g`)."""
+    looked_up = bool(GH_LOOKUP.search(line))
+    for _, rest in commands:
+        if not rest or program_of(rest[0]) not in TOOL_COPIERS:
+            continue
+        for word in rest[1:]:
+            if word.startswith("-") and len(word) > 1:
+                continue
+            word = word.partition("=")[2] if word[:3] in {"if=", "of="} else word
+            if UNSETTLED.search(word):
+                if looked_up or program_of(word) in {"gh", "git"}:
+                    return True
+                continue
+            if program_of(word) in {"gh", "git"} and word.startswith(("/", "~")):
+                return True
+            if tool_of(str(Path(cwd) / Path(word).expanduser())):
+                return True
+    return False
+
+
+def renamed_or_unfound(
+    commands: Iterable[tuple[tuple[str, ...], tuple[str, ...]]], cwd: str, own: frozenset[str]
+) -> str | None:
+    """gh or git found under another name (a link, a copy: tool_of), read as such (gh's words
+    by gh_command; git's refused); and a command on a PATH the line gives that the floor can't
+    read (a variable in it), or that isn't found there in a folder of the line's own."""
+    folders: list[str] | None = None
+    for words, rest in commands:
+        given = assigned(words[: len(words) - len(rest)])
+        if not rest or program_of(rest[0]) in {"export", "declare", "typeset", "readonly"}:
+            given |= assigned(rest[1:])
+            if "PATH" in given:
+                folders = path_folders(given["PATH"], cwd)
+                if folders is None:
+                    return UNREAD_PATH
+            continue
+        here = folders
+        if "PATH" in given:
+            here = path_folders(given["PATH"], cwd)
+            if here is None:
+                return UNREAD_PATH
+        name = rest[0]
+        if made_up(name) or (name in BUILTINS and "/" not in name):
+            continue
+        if program_of(name) in {"gh", "git"}:
+            continue  # (Read as gh and git are.)
+        place = found_as(name, cwd, here)
+        if place is None:
+            system = os.environ.get("PATH", "").split(os.pathsep)
+            if here is not None and any(folder not in system for folder in here):
+                return UNREAD_PATH
+            continue
+        tool = tool_of(place)
+        if tool == "gh" and (reason := gh_command(list(rest[1:]), own)):
+            return reason
+        if tool == "git":
+            return GH_RENAMED
+    return None
+
+
+def fed_scripts(line: str) -> list[str] | None:
+    """What a line feeds a shell as code (feeds_shell): [] when nothing, or only a plain file
+    (`cat setup.sh | sh`, as `sh setup.sh` is: what a file holds is not read here); a heredoc's
+    body when that is all it is fed (`bash <<'EOF'`, `cat <<'EOF' | sh`: read as the lines the
+    shell runs); None when anything else (a pipe from another program, a substitution…)."""
+    if not FED_NAMED.search(squashed(line)) or not feeds_shell(line):
+        return []
+    parsed = shell_commands(line)
+    _, bodies = heredocs(line)
+    if parsed is None or parsed[1] or len(parsed[0]) > 2:
+        return None
+    first = parsed[0][0][1]
+    joiner, second = parsed[0][1] if len(parsed[0]) == 2 else ("", [])
+    piped = joiner == "|" and first[:1] == ["cat"]
+    shell = second if piped else first
+    if not shell or program_of(shell[0]) not in FED_SHELLS or (len(parsed[0]) == 2 and not piped):
+        return None
+    if not all(word[:1] == "-" and "c" not in word for word in shell[1:]):
+        return None  # (Only its options, none `-c`: its code is what it is fed.)
+    files = first[1:] if piped else []
+    if not bodies and files and all(PLAIN_NAME.fullmatch(word) for word in files):
+        return [] if not any(word[:1] == "-" or FED_DEVICE.match(word) for word in files) else None
+    return [bodies[0][0]] if len(bodies) == 1 and not files else None
+
+
+def git_setting(key: str, value: str | None) -> str | None:
+    """Why a worker may not set this git configuration: one that runs a command (GIT_RUN_KEYS)
+    but one of GIT_PLAIN_RUNS given plain words (harmless_run), a `!` alias, or code from a file
+    (GIT_FILE_KEYS); None when it may. `value` None: not known (`--config-env`)."""
+    name = key.lower()
+    if UNSETTLED.search(name):
+        return GIT_RUNS.format(key=key)
+    if GIT_FILE_KEYS.fullmatch(name):
+        if (value or "").strip() in {"/dev/null", "never"}:
+            return None
+        return GIT_RUNS.format(key=key)
+    if not GIT_RUN_KEYS.fullmatch(name):
+        return None
+    if value is None:
+        return GIT_RUNS.format(key=key)
+    plain = value.strip()
+    if name.startswith(("alias.", "submodule.")):
+        return GIT_RUNS.format(key=key) if plain.startswith("!") else None
+    if name.startswith("credential."):
+        return None if plain.split(" ", 1)[0] in GIT_HELPERS else GIT_RUNS.format(key=key)
+    if (name == "core.fsmonitor" or name.startswith("pager.")) and plain.lower() in TRUE | FALSE:
+        return None
+    return None if harmless_run(plain) else GIT_RUNS.format(key=key)
+
+
+def harmless_run(value: str) -> bool:
+    """A command git may run of its configuration: one of GIT_PLAIN_RUNS, its words plain (no
+    variable, substitution, separator or redirection; naming neither git nor gh)."""
+    if UNSETTLED.search(value) or any(mark in value for mark in ";&|<>\n"):
+        return False
+    try:
+        words = shell_words(value)
+    except (ValueError, TooComplexError):
+        return False
+    if not words or GH_NAMED.search(value) or re.search(r"\bgit\b", value, re.IGNORECASE):
+        return False
+    return program_of(words[0]) in GIT_PLAIN_RUNS
+
+
+def git_runs(commands: Iterable[tuple[tuple[str, ...], tuple[str, ...]]]) -> str | None:
+    """Git configuration a line sets that runs a command (git_setting): by `git config`, `-c`,
+    `--config-env`, or git's variables (GIT_RUN_VARIABLES: but a harmless_run; GIT_FILE_VARIABLES:
+    but /dev/null), set for git or exported before it."""
+    exported: dict[str, str] = {}
+    for words, rest in commands:
+        given = assigned(words[: len(words) - len(rest)])
+        if not rest or program_of(rest[0]) in {"export", "declare", "typeset", "readonly"}:
+            exported |= given | (assigned(rest[1:]) if rest else {})
+            continue
+        if program_of(rest[0]) != "git":
+            continue
+        for name, value in (exported | given).items():
+            if name in GIT_RUN_VARIABLES and not harmless_run(value):
+                return GIT_RUNS.format(key=name)
+            if name in GIT_FILE_VARIABLES and value.strip() != "/dev/null":
+                return GIT_RUNS.format(key=name)
+            if name.startswith("GIT_CONFIG_KEY_"):
+                return GIT_RUNS.format(key=name)
+        at, command = 1, None
+        while at < len(rest):
+            word = rest[at]
+            at += 1
+            if word == "-c" and at < len(rest):
+                key, given_value, value = rest[at].partition("=")
+                at += 1
+                if reason := git_setting(key, value if given_value else "true"):
+                    return reason
+            elif word.startswith("--config-env"):
+                setting = word.partition("=")[2] or (rest[at] if at < len(rest) else "")
+                at += not word.partition("=")[2]
+                if reason := git_setting(setting.partition("=")[0], None):
+                    return reason
+            elif word in GIT_VALUED:
+                at += 1
+            elif not word.startswith("-"):
+                command = word
+                break
+        if command == "config" and (reason := git_config_sets(list(rest[at:]))):
+            return reason
+    return None
+
+
+def git_config_sets(words: list[str]) -> str | None:
+    """Why `git config <words>` may not run: it sets what git_setting refuses, or opens git's
+    configuration in an editor."""
+    positional, options, at = [], set(), 0
+    while at < len(words):
+        word = words[at]
+        at += 1
+        if word.startswith("-") and len(word) > 1 and not positional[1:]:
+            name = word.partition("=")[0]
+            options.add(name)
+            at += name in GIT_CONFIG_VALUED and "=" not in word
+            continue
+        positional.append(word)
+    if options & {"-e", "--edit"} or positional[:1] == ["edit"]:
+        return GIT_RUNS.format(key="git config --edit")
+    if positional[:1] == ["set"]:
+        positional = positional[1:]
+    elif (positional[:1] and positional[0] in GIT_CONFIG_COMMANDS) or options & GIT_CONFIG_READS:
+        return None
+    if len(positional) < 2:
+        return None
+    return git_setting(positional[0], positional[1])
+
+
+def spoken(command: str) -> str:
+    """A line's words but those of a command that only prints or searches text (TEXT_ONLY) whose
+    output is shown, or piped to one that only shows it (TEXT_SINKS): for the floor's checks of
+    a line's words (`grep "gh pr merge"` says nothing); written to a file or fed on, they count.
+    The line itself where it does not parse."""
+    unheredoc, bodies = heredocs(command)
+    plain, inside = without_substitutions(without_comments(unheredoc).replace("\\\n", ""))
+    try:
+        tokens = shell_words(plain)
+    except (ValueError, TooComplexError):
+        return command
+    segments: list[tuple[list[str], str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if isinstance(token, Separator):
+            segments.append((current, token))
+            current = []
+        else:
+            current.append(token)
+    segments.append((current, ""))
+    kept: list[str] = []
+    for index, (words, after) in enumerate(segments):
+        name = program_of(command_name(redirection_free(words))[0]) if words else ""
+        piped = "|" in after.replace("||", "")
+        sink = ""
+        if (
+            piped
+            and index + 1 < len(segments)
+            and (fed := redirection_free(segments[index + 1][0]))
+        ):
+            sink = program_of(command_name(fed)[0])
+        if name in TEXT_ONLY and not writes_file(words) and (not piped or sink in TEXT_SINKS):
+            continue
+        kept += words
+    return " ".join([*kept, *inside, *(body for body, _ in bodies)])
+
+
+def writes_file(words: list[str]) -> bool:
+    """Whether a simple command's redirections write a file (`> x.sh`; not `2>&1`, /dev/null)."""
+    for at, word in enumerate(words):
+        if not isinstance(word, Redirecting) or ">" not in word[word.at :]:
+            continue
+        operator = word[word.at :]
+        target = operator.lstrip("&0123456789>|") or (words[at + 1] if at + 1 < len(words) else "")
+        if operator.lstrip("0123456789").startswith(">&") or target.startswith("&"):
+            continue
+        if target not in {"/dev/null", "/dev/stderr", "/dev/stdout"}:
+            return True
+    return False
+
+
+def floor_unread(command: str, cwd: str, own: frozenset[str]) -> str | None:
+    """What the floor can't read in a line (the block above), whatever it names."""
+    if len(command) > MOST_LINE:
+        return TOO_LONG
+    try:
+        commands = line_commands(command)
+    except TooComplexError:
+        return TOO_COMPLEX
+    if names_unread(commands):
+        return UNREAD_NAME
+    if fed_scripts(command) is None:
+        return FED_UNREAD
+    if gh_copied(commands, squashed(command), cwd):
+        return GH_COPIED
+    if reason := renamed_or_unfound(commands, cwd, own):
+        return reason
+    return git_runs(commands)
+
+
 def floor_denial(
     row: dict, request: Any, own: Iterable[str] = (), servers: dict | None = None
 ) -> str | None:
@@ -5878,17 +6476,34 @@ def floor_denial(
     if kind != "shell":
         return None
     command = getattr(request, "full_command_text", "") or ""
-    # (Read unquoted too: the shell runs `"g"it` and `g\h` as git and gh.)
-    if not FLOOR_WORDS.search(command) and not FLOOR_WORDS.search(squashed(command)):
-        return None
     try:
-        reason = floor_shell(command, row["cwd"] or "", frozenset(own), request)
+        reason = floor_line(command, row["cwd"] or "", frozenset(own), request)
     except Exception as exc:  # Any failure to check refuses, saying so.
         reason = f"{NOT_CHECKED} ({type(exc).__name__})"
     if not reason:
         return None
     tail = FLOOR_ROUTE if reason in {GH_API_WRITE, DEFAULT_PUSH, GH_FOREIGN_HEAD} else FLOOR_ASK
     return f"Denied: {reason}. {tail}"
+
+
+def floor_line(
+    command: str, cwd: str, own: frozenset[str], request: Any, depth: int = 0
+) -> str | None:
+    """The floor's reading of a command line: what it can't read (floor_unread), what it says
+    of git and gh (floor_shell), and the lines a heredoc feeds a shell, read as lines of their
+    own (MOST_NESTED deep)."""
+    if depth > MOST_NESTED:
+        return TOO_COMPLEX
+    if reason := floor_unread(command, cwd, own):
+        return reason
+    # (Read unquoted too: the shell runs `"g"it` and `g\h` as git and gh.)
+    named = FLOOR_WORDS.search(command) or FLOOR_WORDS.search(squashed(command))
+    if named and (reason := floor_shell(command, cwd, own, request)):
+        return reason
+    for script in fed_scripts(command) or []:
+        if reason := floor_line(script, cwd, own, request, depth + 1):
+            return reason
+    return None
 
 
 def floor_needs_git(request: Any) -> bool:
@@ -5905,12 +6520,13 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
     if len(command) > MOST_LINE:
         return TOO_LONG
     unquoted = squashed(command)
+    said = spoken(command)  # (What only prints or searches text says nothing here.)
     if GH_WORD.search(command) or GH_WORD.search(unquoted):
-        if found := GH_PR_SPEAKS.search(command):
+        if found := GH_PR_SPEAKS.search(said):
             return f"`gh pr {found.group(1)}` speaks as the owner on GitHub"
-        if found := GH_ISSUE_CHANGES.search(command):
+        if found := GH_ISSUE_CHANGES.search(said):
             return f"`gh issue {found.group(1)}` speaks as the owner on GitHub"
-        if gh_api_writes(command):
+        if gh_api_writes(said):
             return GH_API_WRITE
         if reason := gh_refusal(command, own):
             return reason
@@ -5926,9 +6542,10 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
         if pushes_default(command, cwd):
             return DEFAULT_PUSH
         found = judged(command, cwd)
-        if forced_elsewhere(command, cwd, own, found=found):
+        if forced_elsewhere(command, cwd, own, says=lambda _: floor_force(said), found=found):
             return "a force push to a branch that is not one of yours"
-        if forced_elsewhere(command, cwd, own, lambda push: push.rewrites, floor_rewrite, found):
+        rewrites, rewrite_said = (lambda push: push.rewrites), (lambda _: floor_rewrite(said))
+        if forced_elsewhere(command, cwd, own, rewrites, rewrite_said, found):
             return REWRITE
         if pushes_unknown(command, cwd):
             return UNREADABLE_PUSH
