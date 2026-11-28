@@ -1650,9 +1650,10 @@ class Runtime:
             )
         self.publish_state()
         # What was chosen for Copilot goes back to it (what failed there while it could not run
-        # is past); what waited for it starts.
+        # is past, but a limit not reset yet); what waited for it starts.
         for role in agents.ROLES:
-            self.clear_role_holds(role, COPILOT_AGENT)
+            if not self.hold_lasts(role, COPILOT_AGENT):
+                self.clear_role_holds(role, COPILOT_AGENT)
         await self.place_roles()
         self.background(self.workers.pump())
         self.background(self.workers.refresh_elsewhere())
@@ -2607,6 +2608,13 @@ class Runtime:
             if isinstance(held, dict) and held and held.get("agent", agent) == agent:
                 return held
         return {}
+
+    def hold_lasts(self, role: str, agent: str) -> bool:
+        """Whether a role's wait for that agent outlasts the agent seen able to run again: its
+        plan's limit (or its lost session) waits for its time, as roles_check has it; only a
+        start that failed (signed out, not installed) is over then (QA 0.1.61 R2)."""
+        held = self.role_held(role, agent)
+        return held.get("kind", "start") != "start" and time.time() < float(held.get("until") or 0)
 
     def clear_role_holds(self, role: str, agent: str = ""):
         """A role's waits for its agents (for `agent` only, when named) over: tried now."""
@@ -6796,6 +6804,8 @@ class Runtime:
             row = self.role_row(role)
             if row is None or (self.agent(row["id"]) == name and not self.role_wait(role)):
                 continue
+            if self.hold_lasts(role, name):
+                continue  # (Its limit resets later: where it runs meanwhile, it stays.)
             self.clear_role_holds(role, name)
             try:
                 await self.place_role(role)

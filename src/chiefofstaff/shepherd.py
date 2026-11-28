@@ -651,6 +651,9 @@ class Shepherd(Keeping, Steps):
 
     def steps_here(self) -> str:
         """Whether steps can run on this computer, in a line (Settings)."""
+        if self.runtime.backend is None:
+            # Chief of Staff on another agent (Copilot off or unable to run): not a sandbox.
+            return "Fixes are prepared in Copilot workers, and Copilot isn't running here."
         if not (self.runtime.sandbox_host and self.runtime.backend
                 and self.runtime.backend.capabilities.sandbox):  # fmt: skip
             return "This computer has no sandbox, so Chief of Staff can't prepare fixes here."

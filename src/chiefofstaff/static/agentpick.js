@@ -22,8 +22,9 @@ export function agentsSaid(names = agentsOn()) {
   const said = names.map(agentName);
   return said.length > 1 ? `${said.slice(0, -1).join(", ")} and ${said.at(-1)}` : said[0] || "Copilot";
 }
-// Copilot the only agent on: what waits for it names it (else Chief of Staff, whichever runs it).
-export const copilotAlone = () => !agentsOn().some((name) => name !== "copilot");
+// Copilot the only agent on, and what Chief of Staff waits for: what waits names it. Not on a
+// first start with none ready, whose card offers any agent (Copilot is on by default then).
+export const waitsForCopilot = () => !state.snapshot?.runtime?.setup && !agentsOn().some((name) => name !== "copilot");
 export const statuses = () => state.snapshot?.agents_status || [];
 export const statusOf = (name) => statuses().find((found) => found.name === name);
 export const ready = (status) => status?.status === "ready";

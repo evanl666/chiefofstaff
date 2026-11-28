@@ -56,6 +56,9 @@ again once it is back, and it says it is reconnecting meanwhile, never that it i
   ends…* (or a worker's): two minutes at most; a turn still running then goes on after the
   restart, as above. A worker waiting for your answer to its question is not waited for (its
   question stays). It waited for every turn to end, however long.
+- **A restart no longer moves the Router onto an agent whose limit is used up.** It stays where
+  it runs until that limit resets (it used to switch there and back, two fresh Router sessions,
+  at each restart).
 
 Chief of Staff runs for you what it used to ask you to run in a terminal: Copilot's install and
 sign-in, an agent's update, the sandbox's certificate, an MCP server's sign-in, and its own update
@@ -129,6 +132,15 @@ Home shows the Router's chat at once, and the page reads less and says it right.
   middle, before punctuation, in any case, it now counts as picked: the message says *On Claude*,
   and two (`@codex @claude`) compare them. A worker whose name starts like an agent's (*Codex
   migration*) is still that worker, and one turned off says so, with your words back in the box.
+- **A first start offers any agent, and what waits says so.** With no agent ready, the message box
+  and Other sessions say *once Chief of Staff has started*, not *once Copilot is connected*.
+- **With Copilot off, Keep my PRs moving says it needs Copilot** (fixes and replies are prepared
+  in Copilot workers), and its line no longer blames a missing sandbox.
+- **Usage counts what your agents used**: with Copilot off, the sidebar and Usage show Codex's
+  or Claude's tokens, not Copilot's credits; with Copilot on, other agents' tokens show beside.
+- **A long note from the Router, or a long question, reads whole**: its start, then *Show more*
+  (it was cut at 240 px in a box that didn't look scrollable). The Profile row in *Your OK* has
+  its ⋯ (*Discard*), as every row does.
 
 Decision cards: a card you answered another way leaves, one choice is one card, and two
 choices are never one.

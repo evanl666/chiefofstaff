@@ -1648,8 +1648,9 @@ workers' model, so nothing changes until you change it. Copilot's row below (unf
 has the *Limit per worker (credits)*. A session's **⋯** (top right; on Home, the Router's) switches
 its model, effort and context window (where the model has a long-context tier). The Router may
 choose a stronger or cheaper model or effort for one task.
-**Usage** (the chart icon, bottom left, with today's credits) totals credits by session, task,
-model and role for any date range; every task shows its own credits (hover its time). Premium
+**Usage** (the chart icon, bottom left, with what was used today: Copilot's credits while
+Copilot is on, other agents' tokens beside) totals credits by session, task, model and role for
+any date range; every task shows its own credits (hover its time). Premium
 requests are counted as Copilot counts them: one for each message a session is sent, at its
 model's multiplier, not for the calls the model makes on its own after it. The totals also show
 compactions (Copilot summing up a long conversation) and how many tokens were fresh, read from
