@@ -90,7 +90,7 @@ WORDS = {
         "through": "Sees it through",
         "through_how": "PRs to merged · CI and reviews · check-backs · Watchdog",
         "learns": "Learns you",
-        "learns_how": "how you write · habits you approve · checks from fixed mistakes",
+        "learns_how": "how you write · habits you keep · checks from fixed mistakes",
     },
     ".zh-CN": {
         "to_you": "找上你的事",
@@ -113,7 +113,7 @@ WORDS = {
         "through": "跟到底",
         "through_how": "PR 直到合并 · CI 和 review · 定时回看 · Watchdog",
         "learns": "越来越像你",
-        "learns_how": "你的写法 · 你认可的习惯 · 从修好的错误里学到的检查",
+        "learns_how": "你的写法 · 你留下的习惯 · 从修好的错误里学到的检查",
     },
 }
 

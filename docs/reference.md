@@ -1557,7 +1557,8 @@ Every minute a cheap check (no model) looks at each working worker: no activity 
 the same step repeated, the same instructions for 45 minutes, or a turn that ended without a
 report. Activity is what its session does, not only what its chat shows: a model call is work
 while it is open, a command while its output still grows, and a worker waiting for another
-worker it works with is not stopped. A flagged worker is reviewed by the Watchdog session, which
+worker it works with is not stopped. So a model call that stays open without a word is never
+"no activity": it is looked at once the same instructions reach 45 minutes. A flagged worker is reviewed by the Watchdog session, which
 is told what the worker is at (*in a turn since 12:37 (model call since 12:37)*) and its latest
 reports, and decides: on track, nudge (into the worker's current turn, also one at work on a
 follow-up of finished work), interrupt a hung step and nudge, or escalate to the Router. A
