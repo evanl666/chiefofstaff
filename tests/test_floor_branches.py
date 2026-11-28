@@ -122,6 +122,26 @@ def test_each_way_to_delete_or_rewrite_anothers_branch_is_refused(tmp_path, comm
 @pytest.mark.parametrize(
     "command",
     [
+        "GIT push origin --delete teammate/feature",
+        "Git push --force origin HEAD:teammate/feature",
+        "GIT push origin HEAD:main",
+        "/usr/bin/GIT push origin HEAD:main",
+        "GH repo delete acme/api --yes",
+        "Gh pr comment 7 --body hi",
+        "gh.exe repo delete acme/api --yes",
+        "git.exe push origin --delete teammate/feature",
+    ],
+)
+def test_git_or_gh_named_in_capitals_is_read_as_git_or_gh(tmp_path, command):
+    """macOS's file system ignores case: `GIT` runs git and `GH` runs gh, which the floor read
+    as other programs (on 0.1.60 too: `GIT push origin HEAD:main` went through)."""
+    tree, own = teammate_repo(tmp_path)
+    assert floor(tree, own, command), f"allowed: {command}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "git push origin --delete chief/notes-1a2b3c",
         "git push origin :chief/notes-1a2b3c",
         "git push -u origin chief/notes-1a2b3c",

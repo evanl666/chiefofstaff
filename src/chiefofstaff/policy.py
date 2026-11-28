@@ -190,6 +190,20 @@ WRAPPERS = frozenset({"command", "builtin", "time", "exec"})
 PLAIN_NAME = re.compile(r"[A-Za-z0-9_./+:@%,~-]+|\[\[?")
 
 
+# Windows' endings of a program's name (`gh.exe`): program_of.
+PROGRAM_ENDINGS = (".exe", ".cmd", ".bat", ".com")
+
+
+def program_of(word: str) -> str:
+    """The program a command's name runs, as the system finds it: past its folder, in lower
+    case (macOS's file system ignores case: `GIT` runs git), without a Windows ending."""
+    name = word.rsplit("/", 1)[-1]
+    if "\\" in name:
+        name = name.rsplit("\\", 1)[-1]
+    name = name.lower()
+    return name.rsplit(".", 1)[0] if name.endswith(PROGRAM_ENDINGS) else name
+
+
 def command_name(words: list[str]) -> tuple[str, int]:
     """The name a simple command runs (past reserved words and assignments before it; past
     `command`, `builtin`, `exec`, and `time` first, and their options), and where its
@@ -2439,7 +2453,7 @@ def read_command(words: list[str], index: int, line: Line) -> str:
             continue
         if line.tally.zsh and word.startswith("=") and len(word) > 1:
             word = word[1:]  # (zsh's `=git`: git's path.)
-        program = word.rsplit("/", 1)[-1]
+        program = program_of(word)
         if program == "git":
             here = {**line.env, **local} if local else line.env
             if line.env_unsure:  # git's own variables, maybe set: what it does, not known.
@@ -5612,7 +5626,8 @@ GIT_TEXT_SHORT = "mSG"
 # gh as code names it: past quotes, brackets and commas (GH_CODE_MARKS), up to where its
 # command ends.
 GH_CODE_MARKS = re.compile(r"[\"'\[\],{}]")
-GH_IN_CODE = re.compile(r"(?<![\w.-])gh\s+([^;&|()<>\n`]*)")
+GH_IN_CODE = re.compile(r"(?<![\w.-])gh(?:\.exe)?\s+([^;&|()<>\n`]*)", re.IGNORECASE)
+GH_NAMED = re.compile(r"\bgh\b", re.IGNORECASE)
 GH_API_READS = frozenset({"GET", "HEAD"})
 
 
@@ -5755,11 +5770,11 @@ def gh_inside(words: list[str], own: frozenset[str]) -> str | None:
     (`python3 -c "os.system('gh …')"`, `node -e`, `perl -e`, awk's `system()`, a list of
     words: `["gh", "repo", …]`), as far as its text says it plainly."""
     for at, word in enumerate(words[1:-1], 1):
-        runs = word.rsplit("/", 1)[-1] == "gh" and words[at + 1] in GH_GROUPS
+        runs = program_of(word) == "gh" and words[at + 1] in GH_GROUPS
         if runs and (reason := gh_command(words[at + 1 :], own)):
             return reason
     for word in words[1:]:
-        if not GH_WORD.search(word):
+        if not GH_NAMED.search(word):
             continue
         for found in GH_IN_CODE.finditer(GH_CODE_MARKS.sub(" ", word)):
             said = found.group(1).split()
@@ -5821,7 +5836,7 @@ def gh_refusal(command: str, own: frozenset[str], depth: int = 0) -> str | None:
         rest, xargs = unwrapped(words)
         if not rest:
             continue
-        name = rest[0].rsplit("/", 1)[-1]
+        name = program_of(rest[0])
         if name == "gh":
             if reason := gh_command(rest[1:], own):
                 return reason

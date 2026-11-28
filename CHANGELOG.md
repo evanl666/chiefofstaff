@@ -27,8 +27,10 @@ worker's `gh` only reads.
   `git rebase -x`, `git -c core.pager=…`, or inline code (`python3 -c`, `node -e`, awk's
   `system()`). `gh api`'s options are read as gh reads them (`-fname=x` is a field, so a
   POST), and a GraphQL query taken from a file or a variable counts as a write.
-- **A command named in quotes is checked too.** `"g"it push …` or `g\h repo delete` skipped
-  the floor's check altogether. Quotes and backslashes are now read through.
+- **git or gh named in quotes or in capitals is checked too.** `"g"it push …`, `g\h repo
+  delete` and `GIT push origin HEAD:main` skipped the floor's check altogether. macOS's file
+  system ignores case, so `GIT` runs git there; a force push or a push to `main` went through
+  that way too. Quotes and backslashes are now read through, and names are read in any case.
 
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
