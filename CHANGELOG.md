@@ -7,6 +7,26 @@ your agents, and itself, from the page; Home shows the Router's chat at once and
 under half its size; and a new README, a short guide and the full reference, with a demo that
 runs every agent.
 
+Workers keep to the floor the README promises: none deletes a branch that isn't its own, and a
+worker's `gh` only reads.
+
+- **No worker deletes or rewrites a branch that isn't its own.** The floor read only force
+  pushes: a worker's `git push origin --delete teammate/feature` went through, as you, and the
+  teammate's branch was gone from the remote. A deletion (`--delete`, `:branch`), `--prune`,
+  `--mirror` and push options are now refused for every worker, yolo or not, on Copilot, Codex
+  and Claude Code, unless every branch they reach is the worker's own; it still pushes,
+  force-pushes and deletes its own `chief/…` branches. `--prune` is refused even then (it
+  deletes what the command doesn't name), and so is deleting a tag.
+- **A worker's `gh` only reads.** `gh repo delete`, `gh release create`, `gh secret set`,
+  `gh pr edit` and gh's other commands that write went through, though the same writes through
+  `gh api` were refused. Now only gh's commands that read run (`gh pr view`, `gh pr checks`,
+  `gh run view`, `gh repo clone`, `gh api` reads, …), and `gh pr create` from a branch of the
+  worker's own; any other gh command, an extension's or an alias's too, is refused and the
+  worker asks you. That includes `gh pr edit` and `gh pr ready` on its own PR, and
+  `gh auth token`.
+- **A command named in quotes is checked too.** `"g"it push …` or `g\h repo delete` skipped
+  the floor's check altogether. Quotes and backslashes are now read through.
+
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
 
