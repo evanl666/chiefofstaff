@@ -216,3 +216,108 @@ def test_the_reviewers_examples():
         assert_gone(f"{name}=value0123456789", ["value0123456789"])
     assert_gone('password = "a quoted secret"', ["a quoted secret"])
     assert_gone('"password": "json-secret-1"', ["json-secret-1"])
+
+
+# U9 (QA 0.1.61): a value cut short, as a text that holds it is cut (a title to its length, a
+# command at 200 with …, a result at a share's 40,000), is flagged all the same, in every field
+# of the card; and a share's own cuts never cut through one. Nothing of it is left after Remove.
+
+GH = "gh" + "p_" + "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78"
+LINK = "postgres://app:" + "S3cretPass" + "@db.example.com/app"
+CUT_SHORT = [
+    GH[:31],
+    "github" + "_pat_" + "11ABCDEFG0123",
+    KEY_ID[:12],
+    "AIza" + "SyA1234567",
+    "xo" + "xp-" + "1234567890-ab",
+    "sk" + "_live_" + "abcdef",
+    "np" + "m_" + "abcdefghij",
+    "sk-" + "ant-api03-" + "abcdefgh",
+    "sk-" + "proj-" + "abcdefgh",
+    "eyJ" + "hbGciOiJIUzI1NiJ9." + "eyJzdW",
+    "Bearer " + "abcdefghijkl",
+    LINK[:19],
+    'password = "correct hor',
+    "maya.chen@exam",
+]
+CUTS = ["", "\u2026", "...", f"\n\n{sharing.CUT_NOTE}"]
+PR_URL = "https://github.com/acme/api/pull/7"
+FIELDS = {
+    "Title": lambda text: {"title": text},
+    "Result": lambda text: {"result": text},
+    "Done when": lambda text: {"criteria": [{"text": text, "state": "verified", "check": text}]},
+    "Checks": lambda text: {"checks": [{"label": "tests", "command": text, "outcome": "passed"}]},
+    "Warnings": lambda text: {"flags": [text]},
+    "PR": lambda text: {"prs": [{"label": "acme/api#7", "title": text, "url": PR_URL}]},
+}
+
+
+def everything(shared: dict) -> str:
+    return "\n".join(text for _, text, _ in sharing.strings(shared))
+
+
+@pytest.mark.parametrize("piece", CUT_SHORT)
+def test_a_value_cut_short_is_flagged_in_every_field(piece):
+    for where, put in FIELDS.items():
+        for cut in CUTS:
+            shared = {**card(""), **put(f"Checked the staging API with {piece}{cut}")}
+            hits = sharing.scan(shared)
+            assert [hit["where"] for hit in hits] == [[where]], (where, cut, hits)
+            left = sharing.apply(shared, hits, {hit["id"]: "remove" for hit in hits})
+            assert piece not in everything(left), (where, cut, everything(left))
+            assert "Checked the staging API with [removed]" in everything(left), (where, cut)
+
+
+def test_qas_own_title():
+    shared = {**card(""), "title": "Check the staging API: token ghp_Ab12Cd34Ef56Gh78Ij90Kl12Mn3"}
+    [hit] = sharing.scan(shared)
+    assert hit["label"] == "a GitHub token" and hit["where"] == ["Title"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Tokens begin with ghp_ and hold 36 characters more.",
+        "Set npm_config_registry before npm ci.",
+        "It reads sk-learn style names and AKIA prefixes.",
+        "Keys start with AKIA\u2026",
+        "Use the Bearer scheme\u2026",
+        "Cut short as it was written\u2026",
+    ],
+)
+def test_words_about_tokens_are_no_hit_even_at_a_cut(text):
+    for put in FIELDS.values():
+        assert sharing.scan({**card(""), **put(text)}) == [], text
+
+
+def view(**fields) -> dict:
+    return {"title": "Task", "status": "review", "result": "", "receipts": {}, **fields}
+
+
+@pytest.mark.parametrize("value", [GH, LINK, "xo" + "xp-" + "1234567890-abcdefghijklmnop"])
+def test_a_shares_own_cuts_never_cut_through_a_value(value):
+    title = "a " * 145 + value
+    pr = {"label": "acme/api#7", "url": "https://github.com/acme/api/pull/7"}
+    shared = sharing.snapshot(
+        view(
+            title=title,
+            result="c" * (sharing.RESULT_CHARS - 11) + " " + value + " and on",
+            receipts={"prs": [{**pr, "title": "b " * 95 + value}]},
+        )
+    )
+    assert shared["title"] == ("a " * 145).rstrip()
+    assert shared["prs"][0]["title"] == ("b " * 95).rstrip()
+    assert shared["result"] == "c" * (sharing.RESULT_CHARS - 11) + f"\n\n{sharing.CUT_NOTE}"
+    assert value[:8] not in everything(shared)
+    # Not through one, it cuts where it did.
+    shared = sharing.snapshot(view(title="a " * 200 + value, result="d" * 50_000))
+    assert shared["title"] == ("a " * 200)[: sharing.TITLE_CHARS].rstrip()
+    assert shared["result"] == "d" * sharing.RESULT_CHARS + f"\n\n{sharing.CUT_NOTE}"
+
+
+def test_a_shares_cut_at_a_line_never_cuts_through_a_key():
+    key = block("RSA ", 4)
+    result = "e" * (sharing.RESULT_CHARS - 150) + "\n" + key
+    shared = sharing.snapshot(view(result=result))
+    assert shared["result"] == "e" * (sharing.RESULT_CHARS - 150) + f"\n\n{sharing.CUT_NOTE}"
+    assert not any(line in shared["result"] for line in key.splitlines())

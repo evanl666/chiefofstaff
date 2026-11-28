@@ -1,6 +1,7 @@
 """GitHub review requests on explicitly connected repositories, through the gh CLI."""
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -268,8 +269,20 @@ def body(item: dict) -> str:
 logger = logging.getLogger(__name__)
 
 
-async def gh(*arguments: str, payload: dict | None = None, token: str = "") -> str:
-    """`token`: act as that signed-in account instead of gh's active one."""
+def end(process: asyncio.subprocess.Process):
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            process.kill()
+
+
+async def gh(
+    *arguments: str,
+    payload: dict | None = None,
+    token: str = "",
+    running: set[asyncio.subprocess.Process] | None = None,
+) -> str:
+    """`token`: act as that signed-in account instead of gh's active one. `running`: where the
+    call's process is, while it runs (GitHubSource.stop ends what is left of them)."""
     executable = shutil.which("gh")
     if not executable:
         raise RuntimeError(
@@ -287,15 +300,25 @@ async def gh(*arguments: str, payload: dict | None = None, token: str = "") -> s
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    if running is not None:
+        running.add(process)
     try:
         async with asyncio.timeout(30):
             stdout, stderr = await process.communicate(
                 json.dumps(payload).encode() if payload is not None else None
             )
     except TimeoutError as exc:
-        process.kill()
+        end(process)
         await process.wait()
         raise RuntimeError("GitHub request timed out.") from exc
+    except BaseException:
+        # Cut short (Chief of Staff stops): the request ends with it, never left running to
+        # finish later (R3: a share's POST that made its gist after the next start had looked).
+        end(process)
+        raise
+    finally:
+        if running is not None:
+            running.discard(process)
     if process.returncode:
         raise GitHubError(
             "GitHub request failed: " + stderr.decode(errors="replace")[:1500],
@@ -604,7 +627,11 @@ class GitHubSource:
     def __init__(self, store: Store, host: SourceHost, *, gh_command=gh):
         self.store = store
         self.host = host
-        self.raw = gh_command
+        # gh's calls under way (the real gh's): ended by stop, as Chief of Staff stops.
+        self.running: set[asyncio.subprocess.Process] = set()
+        self.raw: Callable[..., Awaitable[str]] = (
+            functools.partial(gh, running=self.running) if gh_command is gh else gh_command
+        )
         # Every call goes through the account that can see the repository it is about.
         self.gh = self.routed
         # Never read yet (not 0: the monotonic clock starts at boot, so 0 can be "just now").
@@ -626,6 +653,9 @@ class GitHubSource:
         if self.job:
             self.job.cancel()
             await asyncio.gather(self.job, return_exceptions=True)
+        # A call still under way (a share's POST, say) ends with Chief of Staff.
+        for process in list(self.running):
+            end(process)
 
     def wake(self):
         self.changed.set()

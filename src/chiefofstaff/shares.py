@@ -39,6 +39,12 @@ LINKS_A_MINUTE = 10
 LINKS_AN_HOUR = 60
 # A gist that could not be deleted is tried again this often (seconds).
 RETRY_SECONDS = 3600
+# A create a stop (or no answer) cut short is looked for on GitHub until a look ran: again this
+# often while GitHub can't be reached, and once more this long after it began, for a gh call
+# that outlived the stop (a SIGKILL) and made its gist after the first look (seconds; R3).
+CREATE_RETRY = 300
+CREATE_SETTLE = 600
+NOT_LOOKED = "Not looked for on GitHub yet: "
 # Ended links stay listed in Settings → You this long.
 LISTED_DAYS = 7
 # The longest a timer sleeps before looking again (a clock that jumps, a machine asleep).
@@ -133,6 +139,8 @@ class Shares:
         self.made = False
         self.locks: dict[str, asyncio.Lock] = {}
         self.clock = lambda: datetime.now(UTC)
+        # Links being made in this run (the timer's look for creates cut short leaves them be).
+        self.making: set[str] = set()
         self.copies_made = False
         # GitHub's API as an import reads it (tests answer from fixtures).
         self.transport: httpx.AsyncBaseTransport | None = None
@@ -205,10 +213,11 @@ class Shares:
         result was cut)."""
         view = self.runtime.task_actions.view(task)
         ended = self.store.value("SELECT max(ended_at) FROM runs WHERE task_id=?", (task["id"],))
-        raw = sharing.snapshot(view, ended or task.get("ended_at") or task["updated_at"])
+        found = environment()
+        raw = sharing.snapshot(view, ended or task.get("ended_at") or task["updated_at"], found)
         cut = raw["result"].endswith(sharing.CUT_NOTE)
         card, shortened = sharing.shorten(raw, self.roots(task))
-        hits = sharing.scan(card, environment())
+        hits = sharing.scan(card, found)
         return card, shortened, hits, sharing.digest(card, hits), cut
 
     async def preview(self, task_id: str, message_id: int | None = None) -> dict:
@@ -298,8 +307,9 @@ class Shares:
 
     def file(self, task_id: str, decisions: Mapping[str, str], digest: str) -> dict:
         """The card for Download HTML file: no gist, no gh, nothing to revoke."""
-        task, card = self.checked(task_id, decisions, digest)
-        return {"card": card, "name": slug(task["title"])}
+        _, card = self.checked(task_id, decisions, digest)
+        # Named for the card as shared: the task's own title may hold what was removed (U9).
+        return {"card": card, "name": slug(card["title"])}
 
     # Create a link.
 
@@ -342,6 +352,7 @@ class Shares:
             )
             blob, key = sharing.seal(payload, account_id)
             share_id = f"sh_{secrets.token_hex(4)}"
+            self.making.add(share_id)
             # Written before GitHub is asked: a stop mid-create is reconciled at the next start.
             self.store.execute(
                 "INSERT INTO shares(id, task_id, title, login, account_id, digest, created_at, "
@@ -381,6 +392,8 @@ class Shares:
                     raise RuntimeError("GitHub did not say which gist it made.")
             except Exception as exc:
                 raise await self.failed_create(share_id, chosen, token, exc) from exc
+            finally:
+                self.making.discard(share_id)
             link = sharing.make_link(gist_id, key, stamp(until))
             self.update(share_id, gist_id=gist_id, link=link, state="live")
             self.store.set("share:account", chosen)
@@ -405,12 +418,16 @@ class Shares:
         """The gist wasn't made, or may have been (no answer): found by its share id and
         deleted, so nothing is left that Chief doesn't know of. What to tell the owner."""
         text = str(exc)
-        self.update(share_id, state="failed", ended_at=stamp(self.clock()), error=text[:300])
+        self.update(share_id, error=text[:300])
         if "timed out" in text or not isinstance(exc, GitHubError):
-            with suppress(Exception):
-                await self.reconcile(share_id, token)
+            # It may have been made: looked for now, and again until a look ran (R3).
+            self.making.discard(share_id)
+            await self.settle_create(self.row(share_id), token)
+            self.arm()
             if "timed out" in text:
                 return ValueError(NO_ANSWER)
+        else:
+            self.update(share_id, state="failed", ended_at=stamp(self.clock()))
         if isinstance(exc, GitHubError):
             said = f"{text} {answered(exc).get('message', '')}"
             if RATE_LIMITED.search(said):
@@ -421,6 +438,38 @@ class Shares:
                     "try again, or download the card as a file."
                 )
         return ValueError(f"GitHub didn't make the link, so nothing was shared: {text[:200]}")
+
+    async def settle_create(self, row: dict, token: str = ""):
+        """A create a stop or a lost answer cut short (state 'creating'): its gist, if GitHub
+        made one, found by its share id and deleted. Failed once a look ran and no gh call of it
+        can still make one; until then it is looked for again (next_look)."""
+        now = self.clock()
+        try:
+            if not token:
+                token, _ = await self.github.bound_user(row["login"])
+            found = await self.reconcile(row["id"], token)
+        except Exception as exc:
+            self.update(row["id"], error=f"{NOT_LOOKED}{exc}"[:300], tried_at=stamp(now))
+            return
+        settled = when(row["created_at"]) + timedelta(seconds=CREATE_SETTLE)
+        if found or now >= settled:
+            self.update(row["id"], state="failed", ended_at=stamp(now), tried_at=stamp(now))
+        else:
+            self.update(row["id"], error="", tried_at=stamp(now))
+
+    def next_look(self, row: dict) -> datetime:
+        """When a create cut short is looked for (again): at once if never; CREATE_RETRY after
+        a look GitHub didn't answer; else once more CREATE_SETTLE after it began."""
+        if not row["tried_at"]:
+            return when(row["created_at"])
+        if (row["error"] or "").startswith(NOT_LOOKED):
+            return when(row["tried_at"]) + timedelta(seconds=CREATE_RETRY)
+        return when(row["created_at"]) + timedelta(seconds=CREATE_SETTLE)
+
+    def cut_short(self) -> list[dict]:
+        """Creates cut short (none of this run's, still being made)."""
+        rows = self.store.all("SELECT * FROM shares WHERE state='creating'")
+        return [row for row in rows if row["id"] not in self.making]
 
     async def reconcile(self, share_id: str, token: str) -> bool:
         """A create that may have gone through: the account's newest gists are read, and one
@@ -522,18 +571,17 @@ class Shares:
         short is reconciled, and the timer is set while a link is live. Nothing without one."""
         if not self.exists():
             return
-        for row in self.store.all("SELECT * FROM shares WHERE state='creating'"):
-            with suppress(Exception):
-                token, _ = await self.github.bound_user(row["login"])
-                await self.reconcile(row["id"], token)
-            self.update(row["id"], state="failed", ended_at=stamp(self.clock()))
         await self.sweep(retry_all=True)
         self.arm()
 
     async def sweep(self, retry_all: bool = False):
         """Links past their expiry: their gists deleted (expired). A gist that couldn't be
-        deleted is tried again an hour later (at start, at once)."""
+        deleted is tried again an hour later (at start, at once). A create cut short is looked
+        for (settle_create) when its next look is due (at start, at once)."""
         now = self.clock()
+        for row in self.cut_short():
+            if retry_all or self.next_look(row) <= now:
+                await self.settle_create(row)
         due = self.store.all(
             "SELECT * FROM shares WHERE state='live' AND expires_at<=?", (stamp(now),)
         )
@@ -571,6 +619,7 @@ class Shares:
         )
         if retry:
             moments.append(when(retry) + timedelta(seconds=RETRY_SECONDS))
+        moments += [self.next_look(row) for row in self.cut_short()]
         return min(moments) if moments else None
 
     def arm(self):

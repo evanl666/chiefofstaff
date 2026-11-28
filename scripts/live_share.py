@@ -16,6 +16,8 @@ unless the bound account is that one. Chief of Staff's own code makes, opens and
   S8  Share… on a report in a chat (0.1.60): from a report its card has a newer result than,
       the card as it is now (said so; not from its latest report or its line on Home); its
       link opens in the viewer with that latest result, and Revoke deletes its gist.
+  S9  A title cut through a token (U9, 0.1.61): the token's start in the title is flagged with
+      the whole one in its result; removed, the viewer shows neither, and Revoke deletes it.
   At the end, no gist this run made is left (each is deleted in `finally` too).
 
     uv run --extra dev --with playwright python scripts/live_share.py
@@ -133,11 +135,18 @@ async def share(harness: Harness, title: str) -> dict:
 
 
 async def gist_status(gist_id: str) -> int:
+    """Whether the gist is there (200) or gone (404), asked as the test account: the script's
+    own checks never spend GitHub's 60 unauthenticated reads an hour for this computer, which
+    the viewer and an import use (S5 asks every few seconds; a run left them none: "limited")."""
     async with httpx.AsyncClient(timeout=15) as client:
         answer = await client.get(
             f"https://api.github.com/gists/{gist_id}",
             params={"_": str(time.time_ns())},
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "chiefofstaff-live"},
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "chiefofstaff-live",
+                "Authorization": f"Bearer {TOKEN}",
+            },
         )
     return answer.status_code
 
@@ -321,6 +330,31 @@ async def scenario(guard: Guard, base: str, page):
     await shares.revoke(made["share"]["id"])
     report_gist = sharing.parse_link(made["link"])["gist_id"]
     check(await gist_status(report_gist) == 404, "revoked: its gist is gone")
+
+    print("S9 a title cut through a token")
+    # A Chief of its own (the owner's has as many workers at work as it starts by now).
+    cutter = await chief("cut", guard)
+    shares = cutter.runtime.shares
+    token = "gh" + "p_" + "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78"
+    asked = f"Check the staging API: token {token} at http://10.0.4.17:8080/health"
+    task = await finished_task(cutter, title=asked[:60], result=f"Checked it with {token}.")
+    preview = await shares.preview(task["id"])
+    check(
+        sorted(where for hit in preview["hits"] for where in hit["where"]) == ["Result", "Title"],
+        "the token's start in the title is flagged, with the whole one in its result",
+    )
+    decisions = {hit["id"]: "remove" for hit in preview["hits"]}
+    made = await shares.create(task["id"], decisions, preview["digest"], 1, ACCOUNT)
+    state = await viewer_state(page, base, made["link"])
+    shown = await page.locator("main").inner_text()
+    check(
+        state == "card" and "ghp_" not in shown and "token [removed]" in shown,
+        f"the viewer shows neither, removed (state {state})",
+    )
+    await page.screenshot(path=SHOTS / "live-viewer-cut-title-1440-light.png", full_page=True)
+    await shares.revoke(made["share"]["id"])
+    cut_gist = sharing.parse_link(made["link"])["gist_id"]
+    check(await gist_status(cut_gist) == 404, "revoked: its gist is gone")
 
 
 async def main() -> int:

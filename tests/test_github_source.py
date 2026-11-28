@@ -1,4 +1,5 @@
 import json
+import sys
 from datetime import datetime
 
 import pytest
@@ -1013,3 +1014,76 @@ async def test_ci_github_never_started_is_no_failure_for_a_worker_to_fix(tmp_pat
     await source.poll_once()
     assert not any("CI on" in text for _, _, text in host.deliveries[seen:]), "nothing to fix"
     assert len(state["annotations_read"]) == 2, "each check run read once"
+
+
+# R3 (QA 0.1.61): a gh call under way when Chief of Staff stops ends with it, never left
+# running (a share's POST that finished after the next start had looked made a gist no one knew).
+
+
+def stand_in_gh(tmp_path, monkeypatch):
+    """A gh on the PATH that says its pid and never answers."""
+    import os
+    import stat
+
+    folder = tmp_path / "bin"
+    folder.mkdir()
+    script = folder / "gh"
+    pid = tmp_path / "gh.pid"
+    script.write_text(f"#!/bin/sh\necho $$ > '{pid}'\nexec sleep 300\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+    return pid
+
+
+async def gone(pid_file) -> bool:
+    import asyncio
+    import os
+
+    pid = int(pid_file.read_text())
+    for _ in range(100):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.05)
+    os.kill(pid, 9)  # (This test's own stand-in, by its pid.)
+    return False
+
+
+async def started(pid_file):
+    import asyncio
+
+    for _ in range(200):
+        if pid_file.exists() and pid_file.read_text().strip():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the stand-in gh never started")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX stand-in gh")
+async def test_a_gh_call_cut_short_ends_its_process(tmp_path, monkeypatch):
+    import asyncio
+
+    from chiefofstaff.sources.github import gh
+
+    pid = stand_in_gh(tmp_path, monkeypatch)
+    call = asyncio.ensure_future(gh("api", "gists", "--method", "POST", payload={}))
+    await started(pid)
+    call.cancel()  # Its task cut short (a stop).
+    await asyncio.gather(call, return_exceptions=True)
+    assert await gone(pid), "gh left running"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX stand-in gh")
+async def test_a_gh_call_under_way_ends_when_github_stops(tmp_path, monkeypatch):
+    import asyncio
+
+    pid = stand_in_gh(tmp_path, monkeypatch)
+    store = Store(tmp_path / "s.db")
+    source = GitHubSource(store, Host(store))
+    call = asyncio.ensure_future(source.raw("api", "gists", "--method", "POST", payload={}))
+    await started(pid)
+    await source.stop()  # Chief of Staff stops (Runtime.stop: each source's stop).
+    assert await gone(pid), "gh left running"
+    with pytest.raises(RuntimeError, match="GitHub request"):
+        await call

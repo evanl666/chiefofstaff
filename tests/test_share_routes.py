@@ -2,14 +2,15 @@
 link (a secret gist of the owner's bound account, the card sealed to its id), the list in
 Settings → You, Revoke, the HTML file's card, and what GitHub or gh can refuse."""
 
+import asyncio
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import FakeClient, FakeSlackMcp, FakeTokens, Harness
 from fastapi.testclient import TestClient
 from share_world import NO_SCOPE, SLOW, TIMED_OUT, FakeGitHub, finished_task
-from test_share_remove import KEY_ID, KEY_SECRET, block
+from test_share_remove import GH, KEY_ID, KEY_SECRET, block
 
 from chiefofstaff import sharing
 from chiefofstaff.runtime import Runtime
@@ -177,6 +178,29 @@ async def test_share_from_a_report_in_a_chat_says_when_the_card_has_a_newer_resu
         assert (await world.shares.preview(task["id"], message))["older_report"] is False
 
 
+async def test_a_title_cut_through_a_token_is_flagged_and_out_of_the_file_and_the_link(world):
+    # U9 (QA 0.1.61): the demo's Router names a task by the first 60 characters of what was
+    # asked, cutting through the token in it; the token whole is in its result.
+    asked = f"Check the staging API: token {GH} at http://10.0.4.17:8080/health"
+    task = await finished_task(world, title=asked[:60], result=f"Checked it with {GH}.")
+    preview = await world.shares.preview(task["id"])
+    assert sorted((hit["where"][0], hit["label"]) for hit in preview["hits"]) == [
+        ("Result", "a GitHub token"),
+        ("Title", "a GitHub token"),
+    ]
+    decisions = decide(preview)
+    filed = world.shares.file(task["id"], decisions, preview["digest"])
+    made = await world.shares.create(task["id"], decisions, preview["digest"], 7, "jordan")
+    [gist] = world.fake.gists.values()
+    blob, link = gist["files"]["share.txt"]["content"], sharing.parse_link(made["link"])
+    sealed = sharing.open_payload(blob, link["key"], 4242001)["card"]
+    for shared in (filed["card"], sealed):
+        assert shared["title"] == "Check the staging API: token [removed]"
+        assert "ghp_" not in "\n".join(text for _, text, _ in sharing.strings(shared))
+    # The HTML file's name is the card's title as shared, not the task's own.
+    assert filed["name"] == "check-the-staging-api-token-removed.html"
+
+
 async def test_only_a_finished_card_can_be_shared(world):
     task = await finished_task(world)
     world.runtime.tasks.move(task["id"], "running")
@@ -237,6 +261,105 @@ async def test_a_create_cut_short_by_a_stop_is_reconciled_at_the_next_start(worl
     await world.shares.resume()
     assert list(world.fake.gists) == [keep], "only the one it made, nothing of the owner's"
     assert world.shares.row("sh_0badf00d")["state"] == "failed"
+
+
+OFFLINE = RuntimeError("GitHub request failed: error connecting to api.github.com")
+
+
+def held_create(world, gate: asyncio.Event):
+    """gh as a stop finds it: the gist made on GitHub, its answer not back yet."""
+    real = world.fake.__call__
+
+    async def held(*arguments, **options):
+        answer = await real(*arguments, **options)
+        if list(arguments[:2]) == ["api", "gists"] and "POST" in arguments:
+            await gate.wait()
+        return answer
+
+    return held
+
+
+async def test_a_create_cut_short_is_reconciled_once_github_answers_again(world):
+    # R3 (QA 0.1.61): GitHub unreachable at the next start, the row was failed whatever the
+    # reconcile did, and the gist made before the stop was never looked for again.
+    task = await finished_task(world)
+    preview = await world.shares.preview(task["id"])
+    gate = asyncio.Event()
+    world.runtime.github.raw = held_create(world, gate)
+    making = asyncio.ensure_future(
+        world.shares.create(task["id"], decide(preview), preview["digest"], 1, "jordan")
+    )
+    for _ in range(500):
+        if world.fake.gists:
+            break
+        await asyncio.sleep(0.01)
+    # While it is made, the timer's look leaves it alone.
+    await world.shares.sweep(retry_all=True)
+    assert len(world.fake.gists) == 1
+    making.cancel()  # The stop.
+    await asyncio.gather(making, return_exceptions=True)
+    [row] = world.store.all("SELECT * FROM shares")
+    assert row["state"] == "creating"
+
+    async def unreachable(*arguments, **options):
+        raise OFFLINE
+
+    world.runtime.github.raw = unreachable
+    world.shares.making.clear()  # The next start: none of its own under way.
+    await world.shares.resume()
+    assert world.shares.row(row["id"])["state"] == "creating", "not looked for yet: kept"
+    assert world.shares.next_wake() is not None and world.shares.timer is not None
+    world.runtime.github.raw = world.fake
+    await world.shares.resume()
+    assert world.fake.gists == {}, "found once GitHub answers, and deleted"
+    assert world.shares.row(row["id"])["state"] == "failed"
+
+
+async def test_a_gist_made_after_the_start_looked_is_found_by_a_later_look(world):
+    # R3: a gh POST under way as Chief of Staff was killed (SIGKILL) can still make its gist
+    # after the next start has looked: looked for again until CREATE_SETTLE after it began.
+    from chiefofstaff import shares as shares_module
+
+    task = await finished_task(world)
+    world.shares.table()
+    began = world.shares.clock().replace(microsecond=0)
+    world.store.execute(
+        "INSERT INTO shares(id, task_id, title, login, created_at, expires_at, state) "
+        "VALUES('sh_0ddba11a', ?, 't', 'jordan', ?, '2026-12-31T00:00:00Z', 'creating')",
+        (task["id"], shares_module.stamp(began)),
+    )
+    await world.shares.resume()
+    assert world.shares.row("sh_0ddba11a")["state"] == "creating", "nothing yet: looked again"
+    world.fake.made("jordan", 4242001, "x", "Chief of Staff share sh_0ddba11a · encrypted")
+    wake = world.shares.next_wake()
+    assert wake == began + timedelta(seconds=shares_module.CREATE_SETTLE)
+    world.shares.clock = lambda: wake
+    await world.shares.sweep()
+    assert world.fake.gists == {} and world.shares.row("sh_0ddba11a")["state"] == "failed"
+
+
+async def test_no_answer_and_github_gone_for_the_look_is_looked_for_again(world):
+    # R3, in the same run: a create with no answer whose own look can't reach GitHub.
+    task = await finished_task(world)
+    preview = await world.shares.preview(task["id"])
+    world.fake.create_fault, world.fake.created_anyway = TIMED_OUT, True
+    real = world.fake.__call__
+
+    async def lists_offline(*arguments, **options):
+        if list(arguments[:2]) == ["api", "gists?per_page=30"]:
+            raise OFFLINE
+        return await real(*arguments, **options)
+
+    world.runtime.github.raw = lists_offline
+    with pytest.raises(ValueError, match="GitHub didn't answer, so nothing was shared"):
+        await world.shares.create(task["id"], decide(preview), preview["digest"], 7, "jordan")
+    [row] = world.store.all("SELECT * FROM shares")
+    assert row["state"] == "creating" and len(world.fake.gists) == 1
+    assert world.shares.timer is not None, "a look again is waited for"
+    world.runtime.github.raw = world.fake
+    world.shares.clock = lambda: datetime.now(UTC) + timedelta(hours=2)
+    await world.shares.sweep()
+    assert world.fake.gists == {} and world.shares.row(row["id"])["state"] == "failed"
 
 
 async def test_chiefs_own_limit_per_account(world, monkeypatch):

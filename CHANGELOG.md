@@ -207,6 +207,23 @@ A new README, a short guide and the full reference; the demo runs every agent.
   demo says (before, it made a secret gist on the account signed in to `gh`).
 - `chiefofstaff --help` says it runs Copilot, Codex and Claude Code, not only Copilot.
 
+A share link no longer carries a token cut short, nor leaves its gist behind when a stop cuts it
+short.
+
+- **A value cut short where its text was cut is marked too.** A task's title is cut to its length (a
+  command on a card at 200 characters), so a token pasted near its end was left in part, too short
+  to be recognised: that part went out in the link, and in the downloaded file's name, though every
+  value marked was removed. Now a known token's start up to where its text was cut (`ghp_`, `xoxp-`,
+  `sk-`, `AKIA`…) is marked however short, and so are a link's password and a quoted value cut
+  before their end; a share never cuts a title, a PR's title or a result through a value; and the
+  HTML file is named for the card as shared.
+- **A link cut short by a stop no longer leaves its gist on GitHub.** A link being made as Chief of
+  Staff stopped is looked for at the next start by its share id, and its gist deleted; when GitHub
+  couldn't be reached then, the link was given up and its gist stayed on your account for ever. Now
+  it is looked for again every few minutes until GitHub answers (and once more ten minutes after it
+  began, for a request that outlived the stop), and the request to GitHub under way ends with Chief
+  of Staff instead of running on after it.
+
 ## 0.1.60 (2026-11-26)
 
 Chief of Staff runs on any coding agent, Copilot or not, every one of its own sessions too; one
