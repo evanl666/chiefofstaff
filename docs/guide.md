@@ -434,10 +434,10 @@ firmly (the operating system, Chief of Staff, or only the agents' instructions),
 [SECURITY.md](../SECURITY.md). In short:
 
 **The floor, always, on every agent.** No worker comments on, reviews, merges or closes a PR as
-you, opens, changes or comments on an issue, writes through `gh api` or GitHub's MCP server,
-force-pushes a branch that isn't its own, or pushes to `main`/`master`. Chief of Staff checks
-every command and tool call of every worker and refuses these; the worker asks you or hands you a
-draft instead. It pushes its own branches and opens PRs.
+you, opens, changes or comments on an issue, writes to GitHub through `gh` (its commands that read
+run) or GitHub's MCP server, force-pushes or deletes a branch that isn't its own, or pushes to
+`main`/`master`. Chief of Staff checks every command and tool call of every worker and refuses
+these; the worker asks you or hands you a draft instead. It pushes its own branches and opens PRs.
 
 **Your voice needs your OK.** Slack replies and PR reviews go out only from a draft you approve
 (Chief of Staff refuses Slack's write tools; no agent is ever given your Slack token). The one

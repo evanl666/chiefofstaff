@@ -37,6 +37,8 @@ DEFAULT_BRANCHES = frozenset({"main", "master"})
 # `git push` options whose value is the next word; and those that push every branch.
 PUSH_VALUED = frozenset({"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
 PUSH_ALL = frozenset({"--all", "--mirror", "--branches"})
+# A push's options that delete branches or hand the remote options of its own (Push.rewrites).
+PUSH_REWRITES = frozenset({"--delete", "--prune", "--mirror", "--push-option"})
 # The commands that push: an alias whose text names one may push.
 PUSHING = ("push", "send-pack", "subtree")
 # git's own commands (its builtins but the newest): git runs no alias of one of their names; a
@@ -87,6 +89,11 @@ SEPARATORS = ";&|()`\n"
 # tried once for each stretch of a line up to a separator (floor_force, floor_default).
 FLOOR_FORCE = re.compile(r"\bgit\s+push\b[^;&|\n]*(\s--force(-with-lease)?\b|\s-f\b|\s\+\S)")
 FLOOR_DEFAULT = re.compile(r"\bgit\s+push\b[^;&|\n]*[\s:](main|master)(\s|$)")
+# A push's words that delete or prune branches, mirror, or hand push options (Push.rewrites).
+FLOOR_REWRITE = re.compile(
+    r"\bgit\s+push\b[^;&|\n]*(\s--delete\b|\s-[a-z]*d[a-z]*\b|\s\+?:[^\s:]|\s--prune\b"
+    r"|\s--mirror\b|\s-[a-z]*o|\s--push-option)"
+)
 GIT_PUSH_WORDS = re.compile(r"\bgit\s+push\b")
 FLOOR_ENDS = re.compile(r"[;&|\n]")
 # A loose `git … push`, for text the shell would not parse (an unclosed quote): its words.
@@ -181,6 +188,20 @@ EVALUATORS = frozenset({".", "source", "eval", "trap", "alias", "fc", "bind", "c
 WRAPPERS = frozenset({"command", "builtin", "time", "exec"})
 # A command's name that is plain text (no variable, substitution, glob or quote in it).
 PLAIN_NAME = re.compile(r"[A-Za-z0-9_./+:@%,~-]+|\[\[?")
+
+
+# Windows' endings of a program's name (`gh.exe`): program_of.
+PROGRAM_ENDINGS = (".exe", ".cmd", ".bat", ".com")
+
+
+def program_of(word: str) -> str:
+    """The program a command's name runs, as the system finds it: past its folder, in lower
+    case (macOS's file system ignores case: `GIT` runs git), without a Windows ending."""
+    name = word.rsplit("/", 1)[-1]
+    if "\\" in name:
+        name = name.rsplit("\\", 1)[-1]
+    name = name.lower()
+    return name.rsplit(".", 1)[0] if name.endswith(PROGRAM_ENDINGS) else name
 
 
 def command_name(words: list[str]) -> tuple[str, int]:
@@ -303,6 +324,9 @@ class Push:
     switch before it may have gone elsewhere too (`bare_also`)."""
 
     forced: bool = False
+    # It deletes a branch (`--delete`, `-d`, `:branch`), may delete others (`--prune`, `--mirror`)
+    # or carries push options (`-o`): as a forced one, only a worker's own branches may be so.
+    rewrites: bool = False
     branches: set[str] | None = field(default_factory=set)  # None: every branch.
     # (At most MOST_BRANCHES of them; past those, only main and master: what is judged.)
     bare_in: str | None = None  # The folder a bare push runs in.
@@ -334,7 +358,7 @@ class Push:
 
     def key(self) -> tuple:
         branches = None if self.branches is None else frozenset(self.branches)
-        return (self.forced, branches, self.bare_in, self.bare_new, self.bare_also,
+        return (self.forced, self.rewrites, branches, self.bare_in, self.bare_new, self.bare_also,
                 self.unknown, self.made_up, self.nested, self.current, self.configured,
                 self.mapped, self.mode, self.bare_check, self.alt_new, self.alt_also,
                 self.alt_unknown, self.upstreams_set, self.anonymous, self.alias,
@@ -1404,11 +1428,16 @@ def push_of(git: Git) -> Push | None:
             tags = tags or name == "--tags"
             if name in PUSH_ALL:
                 push.branches = None
+            if name in PUSH_REWRITES:
+                push.rewrites = True
+                if name in {"--prune", "--mirror"}:
+                    push.branches = None  # Whatever the remote has that this side has not.
             valued = name in PUSH_VALUED and "=" not in word
             continue
         if word.startswith("-") and len(word) > 1:
             for at, letter in enumerate(word[1:], 1):
                 if letter == "o":  # `-o <option>`, or `-o<option>`: the rest is its value.
+                    push.rewrites = True
                     valued = at == len(word) - 1
                     break
                 push.forced = push.forced or letter == "f"
@@ -1416,6 +1445,7 @@ def push_of(git: Git) -> Push | None:
                 dry = dry or letter == "n"
             continue
         positional.append(word)
+    push.rewrites = push.rewrites or deleting or "push.pushoption" in git.config
     refspecs, every, unknown, push.mode = git_config_pushes(git.config)
     push.unknown = unknown
     if positional and isinstance(positional[0], Splitting) and UNSETTLED.search(positional[0]):
@@ -1426,6 +1456,7 @@ def push_of(git: Git) -> Push | None:
     # variable that holds it, names no branch of its own).
     heads = read_refspecs(push, [*positional[1:], *refspecs], git)
     if dry:
+        push.rewrites = False
         return push  # It updates nothing.
     configured = len(positional) <= 1 and not tags
     if deleting or refspecs:
@@ -1460,6 +1491,8 @@ def read_refspecs(push: Push, words: list[str], git: Git) -> bool:
         if spec == ":":
             push.branches = None  # Every branch of the same name on both sides (as `--all`).
             continue
+        if spec.startswith(":"):
+            push.rewrites = True  # Nothing pushed to it: it is deleted.
         target = destination(spec)
         whole = one_substitution(spec)
         named = pushed_branch(target) if MADE_UP in target else ""
@@ -1534,6 +1567,7 @@ def send_pack(git: Git) -> Push:
             push.forced = push.forced or name.startswith("--force") or name == "-f"
             if name in {"--all", "--mirror"}:
                 push.branches = None
+            push.rewrites = push.rewrites or name in {"--mirror", "--push-option"}
             dry = dry or name in {"--dry-run", "-n"}
             push.unknown = push.unknown or name == "--stdin"
             valued = name in SEND_PACK_VALUED and "=" not in word
@@ -2419,7 +2453,7 @@ def read_command(words: list[str], index: int, line: Line) -> str:
             continue
         if line.tally.zsh and word.startswith("=") and len(word) > 1:
             word = word[1:]  # (zsh's `=git`: git's path.)
-        program = word.rsplit("/", 1)[-1]
+        program = program_of(word)
         if program == "git":
             here = {**line.env, **local} if local else line.env
             if line.env_unsure:  # git's own variables, maybe set: what it does, not known.
@@ -3251,6 +3285,10 @@ def once_a_stretch(
 
 def floor_force(command: str) -> bool:
     return once_a_stretch(FLOOR_FORCE, command)
+
+
+def floor_rewrite(command: str) -> bool:
+    return once_a_stretch(FLOOR_REWRITE, squashed(command), GIT_PUSH_WORDS)
 
 
 def floor_default(command: str) -> bool:
@@ -5495,6 +5533,10 @@ GH_API_WRITE = (
     "writing to GitHub through gh api (with -f/-F fields gh sends a POST: to read, add -X GET)"
 )
 DEFAULT_PUSH = "a push to the default branch"
+REWRITE = (
+    "deleting or rewriting a branch that is not one of yours (a deletion, `--prune`, `--mirror` "
+    "or push options)"
+)
 GH_PR_SPEAKS = re.compile(r"\bgh\s+pr\s+(merge|review|comment|close)\b")
 GH_ISSUE_CHANGES = re.compile(r"\bgh\s+issue\s+(create|new|edit|comment|close)\b")
 # Only a line that names git or gh is read further: the rest costs one search.
@@ -5511,6 +5553,309 @@ def github_server(name: str, config: Any) -> bool:
         return False
     parts = [config.get("command"), config.get("url"), *(config.get("args") or [])]
     return any(isinstance(part, str) and GITHUB_NAMED.search(part) for part in parts)
+
+
+# gh's commands a worker may run: those that only read (or work on this machine only: a clone,
+# a checkout, a download), by command group; None: any of the group's. Any other is refused, a
+# new command of gh's too, as are an extension's and an alias's (an allowlist, not a list of
+# writes). `gh pr create` opens a PR from a branch of the worker's own (gh_pr_create); `gh api`
+# reads only (gh_api_refusal).
+GH_READS: dict[str, frozenset[str] | None] = {
+    "search": None, "browse": None, "help": None, "completion": None, "status": frozenset(),
+    "version": frozenset(),
+    "pr": frozenset({"view", "list", "status", "checks", "diff", "checkout"}),
+    "issue": frozenset({"view", "list", "status"}),
+    "run": frozenset({"view", "list", "watch", "download"}),
+    "workflow": frozenset({"view", "list"}),
+    "repo": frozenset({"view", "list", "clone", "set-default"}),
+    "release": frozenset({"view", "list", "download", "verify", "verify-asset"}),
+    "secret": frozenset({"list"}), "variable": frozenset({"list", "get"}),
+    "label": frozenset({"list"}), "ruleset": frozenset({"list", "view", "check"}),
+    "gist": frozenset({"view", "list", "clone"}), "cache": frozenset({"list"}),
+    "auth": frozenset({"status"}), "config": frozenset({"get", "list"}),
+    "alias": frozenset({"list"}), "extension": frozenset({"list", "search", "browse"}),
+    "codespace": frozenset({"list", "view"}), "org": frozenset({"list"}),
+    "project": frozenset({"view", "list", "item-list", "field-list"}),
+    "attestation": frozenset({"verify", "download", "trusted-root"}),
+    "agent-task": frozenset({"list", "view"}), "gpg-key": frozenset({"list"}),
+    "ssh-key": frozenset({"list"}),
+}  # fmt: skip
+GH_NESTED_READS = {
+    ("repo", "deploy-key"): frozenset({"list"}),
+    ("repo", "autolink"): frozenset({"list", "view"}),
+    ("repo", "gitignore"): frozenset({"list", "view"}),
+    ("repo", "license"): frozenset({"list", "view"}),
+}
+# gh's own command groups: a word `gh` followed by one, wherever it stands in a command (`uv run
+# gh …`, `find … -exec gh …`), runs gh; one of the programs that only print or search text
+# (`echo`, `grep`) does not.
+GH_GROUPS = frozenset({*GH_READS, "api", "copilot", "preview", "accessibility"})
+GH_TEXT = frozenset({
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail", "less",
+    "more", "wc", "sort", "uniq", "cut", "diff", "ls", "stat", "which", "whereis", "type", "man",
+    "tldr", "basename", "dirname", "realpath", "readlink", "brew", "apt", "apt-get", "jq", "yq",
+    "git",
+})  # fmt: skip
+# gh's options that take no value: before its command they take none from the words after
+# them (any other does, as cobra reads them).
+GH_FLAGS = frozenset({"-h", "--help", "--version"})
+GH_HELP = frozenset({"-h", "--help"})
+GH_HEAD = frozenset({"-H", "--head"})
+GH_FOREIGN_HEAD = "a pull request from a branch that is not one of yours"
+GH_UNCHECKED = (
+    "a line that runs gh in a way that can't be checked (run gh's command directly, any "
+    "variable in it quoted)"
+)
+# `gh api`'s options that take a value (the rest take none).
+GH_API_VALUED = frozenset({"-X", "--method", "-f", "--raw-field", "-F", "--field", "--input",
+                           "-H", "--header", "-q", "--jq", "-t", "--template", "--hostname",
+                           "-p", "--preview", "--cache"})  # fmt: skip
+GH_API_FIELDS = frozenset({"-f", "--raw-field", "-F", "--field"})
+GH_API_SWITCHES = "i"  # (`-i`, --include: its one switch of a letter.)
+# A GraphQL query read plainly: it starts as one (a mutation in it would be another operation,
+# which runs only as operationName names it); none of the shell's substitutions in it.
+GH_QUERY_START = re.compile(r"\s*(?:query\b|\{)")
+GH_QUERY_SUBSTITUTED = re.compile(r"\$[({]|[`\x00]")
+# git's options whose value is text, not a command (a message; what log searches for): not
+# read for gh, nor are `git grep`'s words. The rest are (what `-c`, `rebase -x`, `submodule
+# foreach` or `bisect run` give git to run).
+GIT_TEXT_LONG = frozenset(
+    {"--message", "--grep", "--author", "--committer", "--format", "--pretty"}
+)
+GIT_TEXT_SHORT = "mSG"
+# gh as code names it: past quotes, brackets and commas (GH_CODE_MARKS), up to where its
+# command ends.
+GH_CODE_MARKS = re.compile(r"[\"'\[\],{}]")
+GH_IN_CODE = re.compile(r"(?<![\w.-])gh(?:\.exe)?\s+([^;&|()<>\n`]*)", re.IGNORECASE)
+GH_NAMED = re.compile(r"\bgh\b", re.IGNORECASE)
+GH_API_READS = frozenset({"GET", "HEAD"})
+
+
+def gh_path(words: list[str]) -> tuple[list[str], list[str]]:
+    """gh's command (its group, its command, and a nested group's command: GH_NESTED_READS), as
+    cobra finds it past options (one met before the command is whole takes the word after it,
+    unless it is one of GH_FLAGS or has `=`); and the words after it."""
+    path: list[str] = []
+    at = 0
+    while at < len(words):
+        word = words[at]
+        at += 1
+        if word == "--":
+            break
+        if word.startswith("-") and len(word) > 1:
+            if "=" not in word and word not in GH_FLAGS:
+                at += 1  # (`gh -R o/r pr view`, `gh pr -R o/r view`.)
+            continue
+        path.append(word)
+        if path == ["api"] or len(path) == 3:  # (`gh api`'s endpoint: a word it is given.)
+            break
+        if len(path) == 2 and tuple(path) not in GH_NESTED_READS:
+            break
+    return path, words[at:]
+
+
+def gh_command(words: list[str], own: frozenset[str]) -> str | None:
+    """Why a worker may not run gh with these words (what follows `gh`), None when it may."""
+    path, rest = gh_path(words)
+    before = words[: len(words) - len(rest)]
+    if any(UNSETTLED.search(word) for word in path) or any(
+        isinstance(word, Splitting) for word in before
+    ):
+        return GH_UNCHECKED  # (Its command in a variable or a substitution, or maybe so.)
+    if not path:
+        return None  # gh's help, its version.
+    group = path[0]
+    if path[:2] in (["api"], ["pr", "create"]) and any(isinstance(w, Splitting) for w in rest):
+        return GH_UNCHECKED  # (`gh api $A`: `-X DELETE` in it, maybe; `--head` in a PR's.)
+    if group == "api":
+        return gh_api_refusal(rest)
+    if group not in GH_READS:
+        return f"`gh {group}` is not one of gh's commands that only read"
+    reads = GH_READS[group]
+    if reads is None or len(path) == 1:
+        return None  # (A group alone shows its help.)
+    command = path[1]
+    if group == "pr" and command == "create":
+        return gh_pr_create(words, own)
+    if (group, command) in GH_NESTED_READS:
+        if len(path) == 2 or path[2] in GH_NESTED_READS[(group, command)]:
+            return None
+        command = f"{command} {path[2]}"
+    elif command in reads:
+        return None
+    if rest and all(word in GH_HELP for word in rest):
+        return None  # (Its help only.)
+    return f"`gh {group} {command}` may write to GitHub as the owner (a worker's gh only reads)"
+
+
+def gh_pr_create(words: list[str], own: frozenset[str]) -> str | None:
+    """`gh pr create` opens a PR from the worker's current branch, or from the one `--head`
+    names: only one of its own."""
+    heads = []
+    for at, word in enumerate(words):
+        name, _, value = word.partition("=")
+        if name in GH_HEAD and value:
+            heads.append(value)
+        elif word.startswith("-H") and len(word) > 2 and not word.startswith("--"):
+            heads.append(word[2:])
+        elif word in GH_HEAD and at + 1 < len(words):
+            heads.append(words[at + 1])
+    for head in heads:
+        branch = head.rsplit(":", 1)[-1]
+        if UNSETTLED.search(branch) or branch not in own:
+            return GH_FOREIGN_HEAD
+    return None
+
+
+def gh_api_refusal(words: list[str]) -> str | None:
+    """`gh api` reads only: a GET (or HEAD) it is told, or one it sends of itself (no field,
+    no body); GraphQL, a query it is given in its words (no mutation, none read from a file or
+    a variable). Options as gh reads them: `-XPOST`, `-fname=x`, `-if name=x`, `--field=x`."""
+    method, endpoint, fields, body = "", "", [], False
+    at = 0
+    while at < len(words):
+        word = words[at]
+        at += 1
+        if word == "--":
+            endpoint = endpoint or (words[at] if at < len(words) else "")
+            break
+        if not word.startswith("-") or len(word) == 1:
+            endpoint = endpoint or word
+            continue
+        if word.startswith("--"):
+            name, equals, value = word.partition("=")
+        else:
+            letters = word[1:].lstrip(GH_API_SWITCHES)
+            if not letters:
+                continue
+            name, value = f"-{letters[0]}", letters[1:].removeprefix("=")
+            equals = "=" if letters[1:] else ""
+        if name in GH_API_VALUED and not equals:
+            value = words[at] if at < len(words) else ""
+            at += 1
+        if name in {"-X", "--method"}:
+            method = value
+        elif name in GH_API_FIELDS:
+            fields.append(value)
+        elif name == "--input":
+            body = True
+    if method:
+        return None if method.upper() in GH_API_READS else GH_API_WRITE
+    if endpoint.strip("/") == "graphql":
+        named = any(field.partition("=")[0] == "operationName" for field in fields)
+        for field in fields:  # (The query's variables can't make it a mutation.)
+            key, given, value = field.partition("=")
+            if not given or UNSETTLED.search(key):
+                return GH_API_WRITE
+            if key == "query" and (
+                value.startswith("@")
+                or "mutation" in value.lower()
+                or (
+                    UNSETTLED.search(value)  # ($name: a GraphQL variable, or the shell's.)
+                    and (
+                        named
+                        or GH_QUERY_SUBSTITUTED.search(value)
+                        or not GH_QUERY_START.match(value)
+                    )
+                )
+            ):
+                return GH_API_WRITE
+        return GH_API_WRITE if body else None
+    return GH_API_WRITE if fields or body else None
+
+
+def gh_inside(words: list[str], own: frozenset[str]) -> str | None:
+    """gh run by a command it follows in a simple command's words (`uv run gh …`, `find … -exec
+    gh …`): a word `gh` followed by one of gh's groups; and gh in code a word gives a program
+    (`python3 -c "os.system('gh …')"`, `node -e`, `perl -e`, awk's `system()`, a list of
+    words: `["gh", "repo", …]`), as far as its text says it plainly."""
+    for at, word in enumerate(words[1:-1], 1):
+        runs = program_of(word) == "gh" and words[at + 1] in GH_GROUPS
+        if runs and (reason := gh_command(words[at + 1 :], own)):
+            return reason
+    for word in words[1:]:
+        if not GH_NAMED.search(word):
+            continue
+        for found in GH_IN_CODE.finditer(GH_CODE_MARKS.sub(" ", word)):
+            said = found.group(1).split()
+            path, _ = gh_path(said)
+            if path and path[0] in GH_GROUPS and (reason := gh_command(said, own)):
+                return reason
+    return None
+
+
+def git_code_words(words: list[str]) -> list[str]:
+    """git's words that may hold a command it runs: all but its name, `git grep`'s, and the
+    text of a message or of what log searches for (GIT_TEXT_LONG, GIT_TEXT_SHORT)."""
+    kept: list[str] = []
+    at, command = 1, None
+    while at < len(words):
+        word = words[at]
+        at += 1
+        if command is None and word in GIT_VALUED:
+            kept += words[at : at + 1]  # (`-c core.pager=…`: its value.)
+            at += 1
+            continue
+        if command is None and not word.startswith("-"):
+            command = word
+            if command == "grep":
+                break
+            continue
+        if word.startswith("--"):
+            name, equals, _ = word.partition("=")
+            if name in GIT_TEXT_LONG:
+                at += not equals
+                continue
+        elif word.startswith("-") and len(word) > 1:
+            letters = word[1:]
+            text = next((i for i, letter in enumerate(letters) if letter in GIT_TEXT_SHORT), None)
+            if text is not None:
+                at += text == len(letters) - 1  # (`-am <message>`; `-m<message>`.)
+                continue
+        kept.append(word)
+    return kept
+
+
+def gh_refusal(command: str, own: frozenset[str], depth: int = 0) -> str | None:
+    """Why a line that names gh may not run (gh_command), read as the shell splits it: each
+    simple command that runs gh (past `env`, `nice`, `xargs`…; one whose words run gh after
+    them, as `uv run gh …`), and what it runs in turn (`sh -c`, `eval`, substitutions). A line
+    that can't be read, or makes up the name of a command gh's words follow (`$G repo …`), or
+    feeds a shell a script, is refused."""
+    if depth > MOST_NESTED:
+        return TOO_COMPLEX
+    try:
+        parsed = shell_commands(command)
+    except TooComplexError:
+        return TOO_COMPLEX
+    if parsed is None:
+        return GH_UNCHECKED
+    commands, inside = parsed
+    unquoted = squashed(command)
+    for _, words in commands:
+        rest, xargs = unwrapped(words)
+        if not rest:
+            continue
+        name = program_of(rest[0])
+        if name == "gh":
+            if reason := gh_command(rest[1:], own):
+                return reason
+        elif UNSETTLED.search(rest[0]) and rest[1:2] and rest[1] in GH_GROUPS:
+            return GH_UNCHECKED  # (`$G repo delete`, `$(echo gh) repo delete`.)
+        elif name == "git" and (reason := gh_inside(["git", *git_code_words(rest)], own)):
+            return reason  # (`git rebase -x 'gh …'`, `git -c core.pager='gh …' log`.)
+        elif name not in GH_TEXT and (reason := gh_inside(rest, own)):
+            return reason
+        _, script = code_of(rest, False, xargs)
+        for text in [*([] if script is None else [script]), *inner_scripts(words)]:
+            if reason := gh_refusal(text, own, depth + 1):
+                return reason
+    for body in inside:
+        if reason := gh_refusal(body, own, depth + 1):
+            return reason
+    if depth == 0 and (ALIASING.search(unquoted) or feeds_shell(command)):
+        return GH_UNCHECKED  # (An alias it makes, a script it feeds a shell: not read here.)
+    return None
 
 
 def floor_denial(
@@ -5533,7 +5878,8 @@ def floor_denial(
     if kind != "shell":
         return None
     command = getattr(request, "full_command_text", "") or ""
-    if not FLOOR_WORDS.search(command):
+    # (Read unquoted too: the shell runs `"g"it` and `g\h` as git and gh.)
+    if not FLOOR_WORDS.search(command) and not FLOOR_WORDS.search(squashed(command)):
         return None
     try:
         reason = floor_shell(command, row["cwd"] or "", frozenset(own), request)
@@ -5541,7 +5887,7 @@ def floor_denial(
         reason = f"{NOT_CHECKED} ({type(exc).__name__})"
     if not reason:
         return None
-    tail = FLOOR_ROUTE if reason in {GH_API_WRITE, DEFAULT_PUSH} else FLOOR_ASK
+    tail = FLOOR_ROUTE if reason in {GH_API_WRITE, DEFAULT_PUSH, GH_FOREIGN_HEAD} else FLOOR_ASK
     return f"Denied: {reason}. {tail}"
 
 
@@ -5549,7 +5895,7 @@ def floor_needs_git(request: Any) -> bool:
     """Whether the floor's check of this request may ask git (a push's branch, an alias): such a
     check runs aside, never holding up the rest (Events.floor)."""
     command = getattr(request, "full_command_text", "") or ""
-    if getattr(request, "kind", "") != "shell" or not re.search(r"\bgit\b", command):
+    if getattr(request, "kind", "") != "shell" or not re.search(r"\bgit\b", squashed(command)):
         return False
     return may_push(command) or may_alias(squashed(command))
 
@@ -5558,14 +5904,17 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
     """The floor's reading of a command line (floor_denial)."""
     if len(command) > MOST_LINE:
         return TOO_LONG
-    if GH_WORD.search(command):
+    unquoted = squashed(command)
+    if GH_WORD.search(command) or GH_WORD.search(unquoted):
         if found := GH_PR_SPEAKS.search(command):
             return f"`gh pr {found.group(1)}` speaks as the owner on GitHub"
         if found := GH_ISSUE_CHANGES.search(command):
             return f"`gh issue {found.group(1)}` speaks as the owner on GitHub"
         if gh_api_writes(command):
             return GH_API_WRITE
-    if not re.search(r"\bgit\b", command):
+        if reason := gh_refusal(command, own):
+            return reason
+    if not re.search(r"\bgit\b", command) and not re.search(r"\bgit\b", unquoted):
         return None
     answers, settings, checked = ANSWERS.set({}), SETTINGS.set({}), CHECKED.set({})
     shell = SHELL.set(str(getattr(request, "shell", "") or ""))
@@ -5576,8 +5925,11 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
             return FED_SCRIPT
         if pushes_default(command, cwd):
             return DEFAULT_PUSH
-        if forced_elsewhere(command, cwd, own):
+        found = judged(command, cwd)
+        if forced_elsewhere(command, cwd, own, found=found):
             return "a force push to a branch that is not one of yours"
+        if forced_elsewhere(command, cwd, own, lambda push: push.rewrites, floor_rewrite, found):
+            return REWRITE
         if pushes_unknown(command, cwd):
             return UNREADABLE_PUSH
     finally:
@@ -5588,14 +5940,23 @@ def floor_shell(command: str, cwd: str, own: frozenset[str], request: Any) -> st
     return None
 
 
-def forced_elsewhere(command: str, cwd: str, own: frozenset[str]) -> bool:
-    """Whether a line force-pushes (`--force`, `-f`, `--force-with-lease`, `+refspec`) a branch
-    that is not one of `own`, or one it can't tell (as its words say: v0.1.42's rule, when no
-    push read from the line forces)."""
-    found = judged(command, cwd)
-    forced = [push for push in found if push.forced]
+def forced_elsewhere(
+    command: str,
+    cwd: str,
+    own: frozenset[str],
+    does: Callable[[Push], bool] = lambda push: push.forced,
+    says: Callable[[str], bool] = lambda command: floor_force(command),
+    found: list[Push] | None = None,
+) -> bool:
+    """Whether a line force-pushes (`--force`, `-f`, `--force-with-lease`, `+refspec`), or does
+    what `does` says of a push (Push.rewrites: deletes, prunes, mirrors, hands push options), to
+    a branch that is not one of `own`, or one it can't tell (as its words say, `says`:
+    v0.1.42's rule, when no push read from the line does so). `found`: the line's pushes, when
+    judged already."""
+    found = judged(command, cwd) if found is None else found
+    forced = [push for push in found if does(push)]
     if not forced:
-        return floor_force(command) and not found
+        return says(command) and not found
     checked = checked_branches(found)
     for push in forced:
         if push.unknown or push.anonymous or push.branches is None:

@@ -7,6 +7,31 @@ your agents, and itself, from the page; Home shows the Router's chat at once and
 under half its size; and a new README, a short guide and the full reference, with a demo that
 runs every agent.
 
+Workers keep to the floor the README promises: none deletes a branch that isn't its own, and a
+worker's `gh` only reads.
+
+- **No worker deletes or rewrites a branch that isn't its own.** The floor read only force
+  pushes: a worker's `git push origin --delete teammate/feature` went through, as you, and the
+  teammate's branch was gone from the remote. A deletion (`--delete`, `:branch`), `--prune`,
+  `--mirror` and push options are now refused for every worker, yolo or not, on Copilot, Codex
+  and Claude Code, unless every branch they reach is the worker's own; it still pushes,
+  force-pushes and deletes its own `chief/…` branches. `--prune` is refused even then (it
+  deletes what the command doesn't name), and so is deleting a tag.
+- **A worker's `gh` only reads.** `gh repo delete`, `gh release create`, `gh secret set`,
+  `gh pr edit` and gh's other commands that write went through, though the same writes through
+  `gh api` were refused. Now only gh's commands that read run (`gh pr view`, `gh pr checks`,
+  `gh run view`, `gh repo clone`, `gh api` reads, …), and `gh pr create` from a branch of the
+  worker's own; any other gh command, an extension's or an alias's too, is refused and the
+  worker asks you. That includes `gh pr edit` and `gh pr ready` on its own PR, and
+  `gh auth token`. gh run another way is read the same: through `sh -c`, `xargs`, `uv run`,
+  `git rebase -x`, `git -c core.pager=…`, or inline code (`python3 -c`, `node -e`, awk's
+  `system()`). `gh api`'s options are read as gh reads them (`-fname=x` is a field, so a
+  POST), and a GraphQL query taken from a file or a variable counts as a write.
+- **git or gh named in quotes or in capitals is checked too.** `"g"it push …`, `g\h repo
+  delete` and `GIT push origin HEAD:main` skipped the floor's check altogether. macOS's file
+  system ignores case, so `GIT` runs git there; a force push or a push to `main` went through
+  that way too. Quotes and backslashes are now read through, and names are read in any case.
+
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
 

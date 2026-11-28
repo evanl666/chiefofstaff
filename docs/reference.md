@@ -1609,8 +1609,13 @@ just below.
 
 **Whatever the mode**, no worker does these as you on its own: comment on, review, merge or
 close a PR (`gh pr comment|review|merge|close`), open, change, comment on or close an issue
-(`gh issue create|edit|comment|close`), write through `gh api` or GitHub's MCP server, force-push
-a branch that isn't its own (`--force-with-lease` too), or push to `main`/`master`. Chief of Staff
+(`gh issue create|edit|comment|close`), write through `gh api`, gh's other commands or GitHub's
+MCP server, force-push, delete or rewrite a branch that isn't its own (`--force-with-lease`,
+`--delete`, `:branch`, `--prune`, `--mirror` and push options too), or push to `main`/`master`.
+A worker's `gh` runs only gh's commands that read (`gh pr view|list|checks|diff`, `gh run
+view`, `gh repo view|clone`, `gh api` reads, …) and `gh pr create` from a branch of its own;
+any other gh command (`gh repo delete|edit`, `gh release create`, `gh secret set`, `gh pr
+edit`, an extension's or an alias's) is refused. Chief of Staff
 refuses it and the worker asks you, or hands you the text as a draft to approve. Its own
 branches it pushes to as it likes, and it opens PRs and reads anything; a push whose branch the
 command doesn't say plainly is refused too, saying so. The same for workers on Codex (whose

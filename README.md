@@ -60,7 +60,7 @@ No `uv`? `pipx run chiefofstaff --demo` works too. The browser opens by itself.
    result comes with receipts: the tests, commits and diff it saw, not just what the agent says.
 6. **Never acts as you without your OK.** It drafts Slack replies and PR reviews in your voice and
    sends them only when you say so. No worker can comment, review, merge or close on GitHub as
-   you, push to `main`, or force-push someone else's branch.
+   you, push to `main`, or force-push or delete someone else's branch.
 7. **Share in one link.** A finished result becomes an encrypted link that expires, opened in
    any browser; whatever looks private is flagged for you to remove first.
 8. **The basics.** Copilot CLI, Codex CLI and Claude Code, mixed per task on the subscriptions you
@@ -104,9 +104,9 @@ delivers each message with who sent it, so a Slack message can't pass itself off
 
 | On its own | Only with your OK | Never: no worker can, in any mode |
 | --- | --- | --- |
-| Works in its own folder and git worktree; your checkouts stay untouched | Sends a Slack reply or posts a PR review in your name | Comment on, review, merge or close a PR as you, or write to issues |
+| Works in its own folder and git worktree; your checkouts stay untouched | Sends a Slack reply or posts a PR review in your name | Comment on, review, merge or close a PR as you, write to issues, or write anything else through `gh` |
 | Runs tests and builds; pushes its own `chief/…` branches and opens PRs | Merges a PR (one click on its card) | Push to `main` or `master` |
-| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check or your profile it learned, or a habit you said fewer than three times | Force-push a branch that isn't its own |
+| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check or your profile it learned, or a habit you said fewer than three times | Force-push or delete a branch that isn't its own |
 | Asks you instead of guessing | With *Ask first* on: writes outside its folders, `sudo`, any force push | Get your Slack token (no agent ever does) |
 
 Everything runs on your machine; your data stays in your data folder. No account, no telemetry:
