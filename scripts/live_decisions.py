@@ -599,7 +599,7 @@ async def d10_a_done_report_with_an_ask_is_held(run: Run):
 
 async def d11_an_answer_in_the_router_chat_answers_the_card(run: Run):
     app = run.app
-    title = "Tie Breaker"
+    title = "Tie Rule In Chat"  # Not D1's worker
     await run.say(
         f"Start a worker titled '{title}' (no project). Tell it, word for word: Use "
         "ask_decision to ask me which tie-break rule to add, with two options, 'Rule A' and "
