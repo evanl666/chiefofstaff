@@ -24,6 +24,7 @@ import re
 import unicodedata
 from collections.abc import Sequence
 from contextlib import suppress
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -323,18 +324,29 @@ class Ledger:
         exclude: str = "",
         options: Sequence[str] = (),
         names: frozenset[str] = frozenset(),
+        session_id: str = "",
     ) -> list[dict]:
         """The subjects an ask is about, best first: {subject, level, joins}. `options`: the
         choices it gives; `names`: words it may use only to say whom it is about (the Router's
-        note names the worker)."""
+        note names the worker); `session_id`: the worker asking."""
         found = []
         mine = option_words(options) | names
+        waits = self.waits_with(session_id) if anchor.startswith("req:") else set()
         for subject in self.candidates():
             if subject["id"] == exclude:
                 continue
             values = mine | self.values(subject)
             levels = [likeness(text, said, values) for said in self.texts(subject)]
             level, score = max(levels, key=lambda pair: (pair[0] == SAME, pair[1]))
+            if (
+                level == POSSIBLY
+                and waits
+                and self.joins(subject, anchor)
+                and self.open_from(subject["id"], waits)
+            ):
+                # Two parts of a team each waiting for the other, both asking the owner: one
+                # choice, whatever words each found for it (QA 0.1.61 teamwork T11).
+                level = SAME
             if level:
                 found.append(
                     {
@@ -347,10 +359,37 @@ class Ledger:
         found.sort(key=lambda item: (not item["joins"], item["level"] != SAME, -item["score"]))
         return found
 
-    def same(self, text: str, anchor: str, options: Sequence[str] = ()) -> dict | None:
+    def same(
+        self, text: str, anchor: str, options: Sequence[str] = (), session_id: str = ""
+    ) -> dict | None:
         """The subject an ask from `anchor` joins by itself, if one."""
-        found = self.match(text, anchor, options=options)
+        found = self.match(text, anchor, options=options, session_id=session_id)
         return found[0]["subject"] if found and found[0]["joins"] else None
+
+    def waits_with(self, session_id: str) -> set[str]:
+        """The workers it asked (ask_session) that asked it too, since its task began: each
+        waits for the other, so what both ask the owner then is how to settle it."""
+        task = self.runtime.tasks.current(session_id) if session_id else None
+        if not task:
+            return set()
+        since = datetime.fromisoformat(task["created_at"]).timestamp()
+        rows = self.store.all(
+            "SELECT asker, target FROM questions WHERE asked>=? AND (asker=? OR target=?)",
+            (since, session_id, session_id),
+        )
+        asked = {row["target"] for row in rows if row["asker"] == session_id}
+        return asked & {row["asker"] for row in rows if row["target"] == session_id}
+
+    def open_from(self, subject: str, sessions: set[str]) -> bool:
+        """Whether one of these workers has an open ask on a subject."""
+        marks = ",".join("?" * len(sessions))
+        return bool(
+            self.store.one(
+                f"SELECT 1 FROM asks WHERE subject_id=? AND status='open' "  # noqa: S608
+                f"AND session_id IN ({marks})",
+                (subject, *sessions),
+            )
+        )
 
     def names(self) -> frozenset[str]:
         """The words of open workers' names and their tasks' titles."""
@@ -390,7 +429,7 @@ class Ledger:
             return {**found, "text": text, "options": chosen}
         anchor = self.anchor(session_id, task_id)
         if not subject and join:
-            subject = (self.same(text, anchor, options or ()) or {}).get("id", "")
+            subject = (self.same(text, anchor, options or (), session_id) or {}).get("id", "")
         stamp = now()
         if subject:
             self.store.execute(

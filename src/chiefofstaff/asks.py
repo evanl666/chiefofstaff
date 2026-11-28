@@ -954,7 +954,7 @@ class Asks:
         ledger = self.runtime.ledger
         linked = {d["id"] for d in self.runtime.decisions.for_task(task["id"])} if task else set()
         anchor = ledger.anchor(session_id, task["id"] if task else "")
-        for match in ledger.match(question, anchor, options=options):
+        for match in ledger.match(question, anchor, options=options, session_id=session_id):
             decision = ledger.decided(match["subject"]) if match["level"] == "same" else None
             if not decision or not (match["joins"] or decision["id"] in linked):
                 continue

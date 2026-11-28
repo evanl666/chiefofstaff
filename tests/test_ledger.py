@@ -737,3 +737,68 @@ async def test_q11_a_long_question_is_kept_whole_and_its_answer_in_the_decision(
                                   question="Which store for sessions?",
                                   options=[{"choice": "y" * 250}, {"choice": "Redis"}])  # fmt: skip
     assert long_option.result_type == "failure" and "a few words" in long_option.text_result_for_llm
+
+
+DEADLOCK_RIGHT = (
+    "Deadlock: both the Left and Right workers were told to wait for the other's number before "
+    "choosing, so neither can pick first. Please designate who picks first, or give the number "
+    "(left + right = 100)."
+)
+DEADLOCK_LEFT = (
+    "Deadlock: I asked the Right worker which number it will use for right_margin() and was told "
+    "not to choose first. It is asking me the same thing and has not given a number. I have not "
+    "chosen one."
+)
+
+
+RIGHT_WAYS = ["Left picks first", "Right picks first", "Router gives the numbers"]
+LEFT_WAYS = ["Let Right choose first", "Let Left choose first", "Owner specifies both numbers"]
+
+
+@pytest.mark.parametrize(
+    ("mutual", "tool"), [(True, "report"), (True, "ask_decision"), (False, "report")]
+)
+async def test_t11_two_parts_waiting_on_each_other_ask_the_owner_one_choice(harness, mutual, tool):
+    """QA 0.1.61 teamwork T11 (live, run B): two parts of one team, each told to let the other
+    choose first, asked each other, then each asked the owner how to break the tie, in its own
+    words and options: two items under Needs you for one choice. Each waiting for the other,
+    their asks are one: one item, one answer for both. Without that, words alone this far apart
+    are only possibly the same (QA 0.1.61 Q3)."""
+    runtime = await harness.connect()
+    left = await spawn(runtime, harness.router_id, "Add left_margin()")
+    right = await spawn(runtime, harness.router_id, "Add right_margin()", why_new="parallel")
+    one_request(harness, left, right)
+    if mutual:
+        await call_tool(runtime, "ask_session", right["session_id"], session_id=left["session_id"],
+                        question="Which number of pixels will left_margin() return?")  # fmt: skip
+        await call_tool(runtime, "ask_session", left["session_id"], session_id=right["session_id"],
+                        question="Which number of pixels will right_margin() return?")  # fmt: skip
+    for worker, said, ways in (
+        (right, DEADLOCK_RIGHT, RIGHT_WAYS),
+        (left, DEADLOCK_LEFT, LEFT_WAYS),
+    ):
+        if tool == "report":
+            await call_tool(runtime, "report", worker["session_id"], status="question",
+                            summary=said, options=ways)  # fmt: skip
+        else:
+            await call_tool(runtime, "ask_decision", worker["session_id"], question=said,
+                            options=[{"choice": way} for way in ways])  # fmt: skip
+    await settle(runtime)
+    if not mutual:
+        assert needs(runtime).count() == 2
+        return
+    assert needs(runtime).count() == 1, "one item for one choice"
+    answer = "Left uses 60 and Right uses 40."
+    if tool == "report":
+        [subject] = runtime.snapshot()["subjects"]
+        assert subject["asked_by"] == "asked by 2 workers"
+        [question] = runtime.asks.session_questions(left["session_id"])
+        await runtime.task_actions.answer_question(question["id"], answer)
+    else:
+        [card] = [d for d in harness.store.drafts() if d["kind"] == "decision"]
+        assert len(card["target"]["askers"]) == 2
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text=answer))
+    await settle(runtime)
+    assert not runtime.asks.session_questions(right["session_id"]), "its ask answered too"
+    assert "Left uses 60" in harness.session(right["session_id"]).sent[-1]
+    assert needs(runtime).count() == 0
