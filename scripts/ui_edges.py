@@ -15039,9 +15039,17 @@ async def settings_long_states(runtime, browser):
     log("settings: long and combined states: statuses and controls apart, 800 to 1440")
 
 
-# Where the page is scrolled to, and where each card under Needs you is in the window.
-PLACES = """() => [document.scrollingElement.scrollTop,
-  ...[...document.querySelectorAll("#needs .card")].map((c) => c.getBoundingClientRect().top)]"""
+# Where the page is scrolled to; where each thing under Needs you is in the window (top,
+# height), and which is the card titled so (`at`), with the height of its open Earlier reports.
+PLACES = """(title) => {
+  const items = [...document.querySelectorAll("#needs > .items > *")];
+  const titled = (item) => item.querySelector(":scope > .head .title")?.textContent === title;
+  const at = items.findIndex(titled);
+  const fold = items[at]?.querySelector(".report details.earlier-reports");
+  const box = (node) => node.getBoundingClientRect();
+  return { scroll: document.scrollingElement.scrollTop, at, fold: fold ? box(fold).height : 0,
+           items: items.map((item) => [box(item).top, box(item).height]) };
+}"""
 
 
 async def round_payload(runtime, browser, failures: list[str]):
@@ -15170,7 +15178,7 @@ async def round_payload(runtime, browser, failures: list[str]):
     await about.locator("summary").click()
     await expect(about).to_have_attribute("open", "")
     await expect(about.locator(".markdown")).not_to_contain_text("Option 79: measured")
-    where = await page.evaluate(PLACES)
+    where = await page.evaluate(PLACES, "Compare the queue options")
     # The state read again (an event): the whole asked for again, slowly this time.
     runtime.bus.publish("state")
     for _ in range(100):
@@ -15187,18 +15195,30 @@ async def round_payload(runtime, browser, failures: list[str]):
     await expect(shown.locator(".report > .body")).to_contain_text("Kafka fits best")
     await expect(about.locator(".markdown")).to_contain_text("Option 79: measured")
     await expect(about).to_have_attribute("open", "")
-    after = await page.evaluate(PLACES)
-    assert len(after) == len(where) and all(
-        abs(a - b) < 1 for a, b in zip(after, where, strict=True)
-    ), (
+    # Nothing jumped: the page did not scroll, nothing above the report (nor the report) moved,
+    # the report grew by just what came into its open Earlier reports, and what is under it was
+    # pushed down by that, no more. (A full run leaves older cards under it, newest first.)
+    after = await page.evaluate(PLACES, "Compare the queue options")
+    at = where["at"]
+    assert at >= 0 and after["at"] == at and len(after["items"]) == len(where["items"]), (
         where,
         after,
     )
+    assert abs(after["scroll"] - where["scroll"]) < 1, (where, after)
+    for (top, _), (moved, _) in zip(
+        where["items"][: at + 1], after["items"][: at + 1], strict=True
+    ):
+        assert abs(moved - top) < 1, (where, after)
+    grown = after["items"][at][1] - where["items"][at][1]
+    assert grown > 0 and abs(grown - (after["fold"] - where["fold"])) < 1, (where, after)
+    if len(where["items"]) > at + 1:
+        pushed = after["items"][at + 1][0] - where["items"][at + 1][0]
+        assert abs(pushed - grown) < 1, (where, after)
     assert not errors, errors
     await context.close()
     log(
         "opened before the whole came (its ask failed, then slow): a report, its earlier "
-        "reports and a draft's Result of stay open and get the whole, nothing moved"
+        "reports and a draft's Result of stay open and get the whole; nothing jumped"
     )
 
 
