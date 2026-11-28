@@ -863,6 +863,8 @@ SUMMARIES: OrderedDict[bytes, str] = OrderedDict()
 SUMMARIES_KEPT = 256
 # Tasks whose commands are kept read (TaskActions.task_commands): all forgotten past this many.
 COMMANDS_KEPT = 200
+# When a task's worker last changed code (TaskActions.touched), the latest this many times.
+EDITS_KEPT = 200
 
 
 def summarized(known: tuple, commands: list[dict], *args: Any, **kwargs: Any) -> dict:
@@ -1049,7 +1051,7 @@ class TaskActions:
         if kept and kept[0] == version:
             return kept
         found = self.store.all(
-            """SELECT c.command, c.kind, c.exit_code, c.ended_at FROM commands c
+            """SELECT c.command, c.kind, c.exit_code, c.started_at, c.ended_at FROM commands c
             JOIN runs r ON r.id=c.run_id WHERE r.task_id=? ORDER BY c.id""",
             (task_id,),
         )
@@ -1088,6 +1090,7 @@ class TaskActions:
             (str(self.store.directory), task["id"], version), commands, evidence,
             task["result"] or task["progress"], criteria, claims, earlier=earlier, since=since,
             said_changed=None if said is None else said == "1",
+            edits=json.loads(self.store.get(f"editsat:{task['id']}") or "[]"),
         )  # fmt: skip
         found["flags"] += failing
         if due:
@@ -1734,9 +1737,9 @@ class TaskActions:
                     "UPDATE commands SET run_id=? WHERE id=?", (run["id"], identifier)
                 )
             undo |= {"commands": ids}
-        touched = self.store.get(f"touched:{task['id']}")
-        if touched:
-            self.store.set(f"touched:{made['id']}", touched)
+        for key in ("touched", "editsat"):
+            if kept := self.store.get(f"{key}:{task['id']}"):
+                self.store.set(f"{key}:{made['id']}", kept)
         news = json.loads(self.store.get(f"news:{task['id']}") or "null")
         if news and news.get("at", "") >= latest["created_at"]:
             # News since the result that moves is about that work: it moves too (the moved
@@ -1891,6 +1894,11 @@ class TaskActions:
         merged = list(dict.fromkeys([*known, *added]))[-500:]
         if merged != known:
             self.store.set(f"touched:{task_id}", json.dumps(merged))
+        if any(receipts.code_edit(path) for path in added):
+            # When it changed code: a test run before then passed on other code, and a failing
+            # one before then and passing after was made to pass (receipts.summarize).
+            times = json.loads(self.store.get(f"editsat:{task_id}") or "[]")
+            self.store.set(f"editsat:{task_id}", json.dumps([*times, now()][-EDITS_KEPT:]))
 
     async def read_prs(
         self,
@@ -3918,7 +3926,7 @@ class TaskActions:
                 self.store.execute(
                     "UPDATE commands SET run_id=? WHERE id=?", (back["id"], identifier)
                 )
-        for key in ("taskbase", "taskend", "taskends", "touched"):
+        for key in ("taskbase", "taskend", "taskends", "touched", "editsat"):
             self.store.delete(f"{key}:{task_id}")
         self.store.execute("DELETE FROM runs WHERE task_id=?", (task_id,))
         self.store.execute("DELETE FROM tasks WHERE id=?", (task_id,))
@@ -4044,8 +4052,9 @@ class TaskActions:
                 "r ON r.id=c.run_id WHERE r.task_id=? AND c.started_at>=?)",
                 (run["id"], task["id"], since),
             )
-        if touched := self.store.get(f"touched:{task['id']}"):
-            self.store.set(f"touched:{made['id']}", touched)
+        for key in ("touched", "editsat"):
+            if kept := self.store.get(f"{key}:{task['id']}"):
+                self.store.set(f"{key}:{made['id']}", kept)
         if task["result"]:
             # Its PRs and links (the PR it opened in a checkout of its own, say): this work's.
             self.hand_over(task, made, report, since or self.run_began(task["id"]))

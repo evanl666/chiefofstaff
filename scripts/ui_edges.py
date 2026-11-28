@@ -37,6 +37,7 @@ from conftest import (  # noqa: E402
     settle,
 )
 
+from chiefofstaff import receipts  # noqa: E402
 from chiefofstaff.models import DraftDecision  # noqa: E402
 from chiefofstaff.runtime import Runtime  # noqa: E402
 from chiefofstaff.sources.slack import SlackSource  # noqa: E402
@@ -6364,7 +6365,8 @@ async def main():
                           round_answer_label, round_sidebar_flat,
                           round_composer, round_decision_steer, round_decision_ledger,
                           round_decision_fixes,
-                          round_ci_not_run, round_merge_ci_not_run, round_team_v4,
+                          round_ci_not_run, round_merge_ci_not_run, round_receipts_honest,
+                          round_team_v4,
                           round_share_from_report, round_long_report,
                           round_router_appears, round_agent_words, round_payload,
                           round_reconnecting, round_self_handle,
@@ -13461,6 +13463,93 @@ async def round_router_appears(runtime, browser, failures: list[str]):
         store.update_session(made, closed_at=datetime.now(UTC).isoformat())
         runtime.publish_state()
     log("router appears: Home shows its chat once there is one, no reload, nothing empty between")
+
+
+async def round_receipts_honest(runtime, browser, failures: list[str]):
+    """QA 0.1.61 T3 and its siblings: "✗→✓ tests" only for the same tests failing, then passing
+    after an edit of code; the suite passing after another test failed, nothing changed, is
+    "✓ tests"; a pass before the last edit of code says so (amber); a criterion backed by a run
+    of some of its tests only is not verified, and its tip says why. Light and dark, 1280 px."""
+    store = runtime.store
+    router = store.get("router_id")
+    checkout = {"path": "/work/acme/calc", "branch": "chief/fix", "commit": "abc1234def",
+                "files": 1, "insertions": 2, "deletions": 1, "commits": 1}  # fmt: skip
+
+    async def task_with(title: str, commands: list[tuple], edits: list[str], **extra):
+        made = await call_tool(runtime, "spawn_worker", router, title=title, instructions=title,
+                               why_new="test")  # fmt: skip
+        worker = json.loads(made.text_result_for_llm)["session_id"]
+        await settle(runtime)
+        task = runtime.tasks.current(worker)
+        run = store.one("SELECT id FROM runs WHERE task_id=?", (task["id"],))
+        for index, (command, code, at) in enumerate(commands):
+            stamp = f"2026-11-27T20:{at:02d}:00+00:00"
+            store.execute(
+                "INSERT INTO commands(session_id, run_id, call_id, command, kind, exit_code, "
+                "started_at, ended_at) VALUES (?,?,?,?,?,?,?,?)",
+                (worker, run["id"], f"r{index}", command, receipts.kind(command), code, stamp,
+                 stamp.replace(":00+", ":30+")),
+            )  # fmt: skip
+        store.set(f"editsat:{task['id']}", json.dumps(
+            [f"2026-11-27T20:{at:02d}:10+00:00" for at in edits]))  # fmt: skip
+        store.execute("UPDATE runs SET evidence=?, criteria=? WHERE id=?", (
+            json.dumps({"checkouts": [checkout], "prs": []}),
+            json.dumps(extra.get("claims", [])), run["id"]))  # fmt: skip
+        if extra.get("criteria"):
+            runtime.tasks.update(task["id"], acceptance=json.dumps(extra["criteria"]))
+        runtime.tasks.move(task["id"], "review", result=f"{title}: done.")
+        await settle(runtime)
+        return task
+
+    await task_with(
+        "Fix the calc rounding",
+        [("uv run pytest -q tests/test_calc.py", 1, 20), ("uv run pytest -q", 0, 25)],
+        [22],
+    )
+    await task_with("Check the calc suite", [
+        ("python3 -m unittest tests.test_missing_module", 1, 20),
+        ("python3 -m unittest discover -s tests", 0, 22)], [])  # fmt: skip
+    claim = {"criterion": "All tests pass", "result": "met",
+             "evidence": "`uv run pytest tests/test_calc.py -q` passes"}  # fmt: skip
+    await task_with("Tidy the calc module", [("uv run pytest tests/test_calc.py -q", 0, 20)],
+                    [23], criteria=["All tests pass"], claims=[claim])  # fmt: skip
+    shots = Path(os.environ.get("RECEIPTS_SHOTS", SHOTS / "receipts-honest"))
+    shots.mkdir(parents=True, exist_ok=True)
+    for scheme in ("light", "dark"):
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 1300}, color_scheme=scheme
+        )
+        page = await context.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
+        await page.goto(f"{BASE}/#token={TOKEN}")
+        await expect(page.locator(".home-item.selected")).to_be_visible(timeout=15000)
+        cards = {}
+        for title in ("Fix the calc rounding", "Check the calc suite", "Tidy the calc module"):
+            card = page.locator("#needs .card.task", has_text=title)
+            await expect(card).to_have_count(1, timeout=15000)
+            await card.get_by_role("button", name="View report").click()
+            cards[title] = card
+        fixed = cards["Fix the calc rounding"].locator(".chips .receipt", has_text="tests")
+        await expect(fixed).to_have_text("✗→✓ tests")
+        assert "Failed first, then passed after a change" in (
+            await fixed.get_attribute("data-tip") or ""
+        )
+        await expect(
+            cards["Check the calc suite"].locator(".chips .receipt", has_text="tests")
+        ).to_have_text("✓ tests")
+        stale = cards["Tidy the calc module"].locator(".chips .receipt", has_text="tests")
+        await expect(stale).to_have_text("✓ tests · before last edit")
+        await expect(stale).to_have_class(re.compile(r"\bwarn\b"))
+        criterion = cards["Tidy the calc module"].locator(".criteria li", has_text="All tests pass")
+        await expect(criterion.locator(".mark")).to_have_text("~")
+        tip = await criterion.get_attribute("data-tip") or await criterion.get_attribute("title")
+        assert "only some of the tests it speaks of" in (tip or ""), tip
+        for title, card in cards.items():
+            await card.screenshot(path=shots / f"{title.split()[0].lower()}-{scheme}.png")
+        assert not errors, errors
+        await context.close()
+    log("receipts: ✗→✓ only for the same tests fixed; a pass before the last edit says so")
 
 
 async def round_merge_ci_not_run(runtime, browser, failures: list[str]):

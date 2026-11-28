@@ -1449,12 +1449,15 @@ export function chips(task, phase) {
       return;
     }
     const mark = item.passed ? (item.failed_before ? "✗→✓" : "✓") : "✗";
-    const before = item.failed_before ? "\nFailed first, then passed" : "";
+    const before = item.failed_before ? "\nFailed first, then passed after a change" : "";
     const again = item.running ? "\nRunning again now" : "";
     // The PR's checks passed after this run failed here: CI has the newer word.
     const ci = !item.passed && item.ci_passing?.length;
     const why = ci ? `\nThe checks on ${item.ci_passing.join(", ")} pass now` : "";
-    items.push(el("span", { class: `receipt ${item.passed ? "pass" : ci ? "warn" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}${again}${why}`, text: `${mark} ${label}${ci ? " locally" : ""}${item.running ? " · running again" : ""}` }));
+    // Passed on the code as it was before its worker's last edit: not the code it delivers.
+    const stale = item.passed && item.before_edit;
+    const edited = stale ? "\nRun before its last edit of the code: not run on the code as it is" : "";
+    items.push(el("span", { class: `receipt ${stale ? "warn" : item.passed ? "pass" : ci ? "warn" : "fail"}`, title: `${item.command}\n(${plural(item.runs, "run")})${before}${edited}${again}${why}`, text: `${mark} ${label}${ci ? " locally" : ""}${stale ? " · before last edit" : ""}${item.running ? " · running again" : ""}` }));
   };
   // Its tests, when it ran them on its own work (its checkout); tests run elsewhere (someone's
   // source, to check a claim) are evidence in its report, not this.
@@ -1504,7 +1507,9 @@ function report(task) {
         "ul",
         { class: "criteria" },
         ...receipts.criteria.map((item) => {
-          const [kind, mark, help] = CRITERION[item.state] || CRITERION.not_checked;
+          const [kind, mark, said] = CRITERION[item.state] || CRITERION.not_checked;
+          // Met by its worker's word, and its check backed less: why it is not verified.
+          const help = item.partial ? "Reported met; its check ran only some of the tests it speaks of" : item.before_edit ? "Reported met; its check ran before the last edit of the code" : said;
           const how = item.command ? `\n${item.command}${item.exit_code ? ` (exit ${item.exit_code})` : ""}` : item.evidence ? `\n${item.evidence}` : "";
           // `code` in a criterion shows as code.
           const words = item.criterion.split("`").map((part, index) => (index % 2 ? el("code", { text: part }) : part));
