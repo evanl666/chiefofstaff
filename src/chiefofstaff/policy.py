@@ -1431,7 +1431,7 @@ def push_of(git: Git) -> Push | None:
                 dry = dry or letter == "n"
             continue
         positional.append(word)
-    push.rewrites = push.rewrites or deleting
+    push.rewrites = push.rewrites or deleting or "push.pushoption" in git.config
     refspecs, every, unknown, push.mode = git_config_pushes(git.config)
     push.unknown = unknown
     if positional and isinstance(positional[0], Splitting) and UNSETTLED.search(positional[0]):
@@ -5580,7 +5580,7 @@ GH_TEXT = frozenset({
     "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail", "less",
     "more", "wc", "sort", "uniq", "cut", "diff", "ls", "stat", "which", "whereis", "type", "man",
     "tldr", "basename", "dirname", "realpath", "readlink", "brew", "apt", "apt-get", "jq", "yq",
-    "sed", "awk", "git",
+    "git",
 })  # fmt: skip
 # gh's options that take no value: before its command they take none from the words after
 # them (any other does, as cobra reads them).
@@ -5588,12 +5588,31 @@ GH_FLAGS = frozenset({"-h", "--help", "--version"})
 GH_HELP = frozenset({"-h", "--help"})
 GH_HEAD = frozenset({"-H", "--head"})
 GH_FOREIGN_HEAD = "a pull request from a branch that is not one of yours"
-GH_UNCHECKED = "a line that runs gh in a way that can't be checked (run gh's command directly)"
+GH_UNCHECKED = (
+    "a line that runs gh in a way that can't be checked (run gh's command directly, any "
+    "variable in it quoted)"
+)
 # `gh api`'s options that take a value (the rest take none).
 GH_API_VALUED = frozenset({"-X", "--method", "-f", "--raw-field", "-F", "--field", "--input",
                            "-H", "--header", "-q", "--jq", "-t", "--template", "--hostname",
                            "-p", "--preview", "--cache"})  # fmt: skip
 GH_API_FIELDS = frozenset({"-f", "--raw-field", "-F", "--field"})
+GH_API_SWITCHES = "i"  # (`-i`, --include: its one switch of a letter.)
+# A GraphQL query read plainly: it starts as one (a mutation in it would be another operation,
+# which runs only as operationName names it); none of the shell's substitutions in it.
+GH_QUERY_START = re.compile(r"\s*(?:query\b|\{)")
+GH_QUERY_SUBSTITUTED = re.compile(r"\$[({]|[`\x00]")
+# git's options whose value is text, not a command (a message; what log searches for): not
+# read for gh, nor are `git grep`'s words. The rest are (what `-c`, `rebase -x`, `submodule
+# foreach` or `bisect run` give git to run).
+GIT_TEXT_LONG = frozenset(
+    {"--message", "--grep", "--author", "--committer", "--format", "--pretty"}
+)
+GIT_TEXT_SHORT = "mSG"
+# gh as code names it: past quotes, brackets and commas (GH_CODE_MARKS), up to where its
+# command ends.
+GH_CODE_MARKS = re.compile(r"[\"'\[\],{}]")
+GH_IN_CODE = re.compile(r"(?<![\w.-])gh\s+([^;&|()<>\n`]*)")
 GH_API_READS = frozenset({"GET", "HEAD"})
 
 
@@ -5613,21 +5632,28 @@ def gh_path(words: list[str]) -> tuple[list[str], list[str]]:
                 at += 1  # (`gh -R o/r pr view`, `gh pr -R o/r view`.)
             continue
         path.append(word)
-        if len(path) == 3 or (len(path) == 2 and tuple(path) not in GH_NESTED_READS):
+        if path == ["api"] or len(path) == 3:  # (`gh api`'s endpoint: a word it is given.)
+            break
+        if len(path) == 2 and tuple(path) not in GH_NESTED_READS:
             break
     return path, words[at:]
 
 
 def gh_command(words: list[str], own: frozenset[str]) -> str | None:
     """Why a worker may not run gh with these words (what follows `gh`), None when it may."""
-    if any(UNSETTLED.search(word) for word in words[:3]):
-        return GH_UNCHECKED  # (Its command in a variable or a substitution.)
     path, rest = gh_path(words)
+    before = words[: len(words) - len(rest)]
+    if any(UNSETTLED.search(word) for word in path) or any(
+        isinstance(word, Splitting) for word in before
+    ):
+        return GH_UNCHECKED  # (Its command in a variable or a substitution, or maybe so.)
     if not path:
         return None  # gh's help, its version.
     group = path[0]
+    if path[:2] in (["api"], ["pr", "create"]) and any(isinstance(w, Splitting) for w in rest):
+        return GH_UNCHECKED  # (`gh api $A`: `-X DELETE` in it, maybe; `--head` in a PR's.)
     if group == "api":
-        return gh_api_refusal(words[words.index("api") + 1 :])
+        return gh_api_refusal(rest)
     if group not in GH_READS:
         return f"`gh {group}` is not one of gh's commands that only read"
     reads = GH_READS[group]
@@ -5668,46 +5694,111 @@ def gh_pr_create(words: list[str], own: frozenset[str]) -> str | None:
 
 def gh_api_refusal(words: list[str]) -> str | None:
     """`gh api` reads only: a GET (or HEAD) it is told, or one it sends of itself (no field,
-    no body); GraphQL, a query it is given in its words (no mutation, none read from a file)."""
+    no body); GraphQL, a query it is given in its words (no mutation, none read from a file or
+    a variable). Options as gh reads them: `-XPOST`, `-fname=x`, `-if name=x`, `--field=x`."""
     method, endpoint, fields, body = "", "", [], False
     at = 0
     while at < len(words):
         word = words[at]
         at += 1
-        name, equals, value = word.partition("=")
-        if name.startswith("-X") and len(name) > 2 and not name.startswith("--"):
-            method = word[2:]
+        if word == "--":
+            endpoint = endpoint or (words[at] if at < len(words) else "")
+            break
+        if not word.startswith("-") or len(word) == 1:
+            endpoint = endpoint or word
             continue
-        if word.startswith("-") and len(word) > 1:
-            if name in GH_API_VALUED and not equals:
-                value = words[at] if at < len(words) else ""
-                at += 1
-            if name in {"-X", "--method"}:
-                method = value
-            elif name in GH_API_FIELDS:
-                fields.append(value)
-            elif name == "--input":
-                body = True
-            continue
-        endpoint = endpoint or word
+        if word.startswith("--"):
+            name, equals, value = word.partition("=")
+        else:
+            letters = word[1:].lstrip(GH_API_SWITCHES)
+            if not letters:
+                continue
+            name, value = f"-{letters[0]}", letters[1:].removeprefix("=")
+            equals = "=" if letters[1:] else ""
+        if name in GH_API_VALUED and not equals:
+            value = words[at] if at < len(words) else ""
+            at += 1
+        if name in {"-X", "--method"}:
+            method = value
+        elif name in GH_API_FIELDS:
+            fields.append(value)
+        elif name == "--input":
+            body = True
     if method:
         return None if method.upper() in GH_API_READS else GH_API_WRITE
     if endpoint.strip("/") == "graphql":
-        queries = [field.partition("=")[2] for field in fields if field.startswith("query=")]
-        if body or any(q.startswith("@") or "mutation" in q.lower() for q in queries):
-            return GH_API_WRITE
-        return None
+        named = any(field.partition("=")[0] == "operationName" for field in fields)
+        for field in fields:  # (The query's variables can't make it a mutation.)
+            key, given, value = field.partition("=")
+            if not given or UNSETTLED.search(key):
+                return GH_API_WRITE
+            if key == "query" and (
+                value.startswith("@")
+                or "mutation" in value.lower()
+                or (
+                    UNSETTLED.search(value)  # ($name: a GraphQL variable, or the shell's.)
+                    and (
+                        named
+                        or GH_QUERY_SUBSTITUTED.search(value)
+                        or not GH_QUERY_START.match(value)
+                    )
+                )
+            ):
+                return GH_API_WRITE
+        return GH_API_WRITE if body else None
     return GH_API_WRITE if fields or body else None
 
 
 def gh_inside(words: list[str], own: frozenset[str]) -> str | None:
     """gh run by a command it follows in a simple command's words (`uv run gh …`, `find … -exec
-    gh …`): a word `gh` followed by one of gh's groups."""
+    gh …`): a word `gh` followed by one of gh's groups; and gh in code a word gives a program
+    (`python3 -c "os.system('gh …')"`, `node -e`, `perl -e`, awk's `system()`, a list of
+    words: `["gh", "repo", …]`), as far as its text says it plainly."""
     for at, word in enumerate(words[1:-1], 1):
         runs = word.rsplit("/", 1)[-1] == "gh" and words[at + 1] in GH_GROUPS
         if runs and (reason := gh_command(words[at + 1 :], own)):
             return reason
+    for word in words[1:]:
+        if not GH_WORD.search(word):
+            continue
+        for found in GH_IN_CODE.finditer(GH_CODE_MARKS.sub(" ", word)):
+            said = found.group(1).split()
+            path, _ = gh_path(said)
+            if path and path[0] in GH_GROUPS and (reason := gh_command(said, own)):
+                return reason
     return None
+
+
+def git_code_words(words: list[str]) -> list[str]:
+    """git's words that may hold a command it runs: all but its name, `git grep`'s, and the
+    text of a message or of what log searches for (GIT_TEXT_LONG, GIT_TEXT_SHORT)."""
+    kept: list[str] = []
+    at, command = 1, None
+    while at < len(words):
+        word = words[at]
+        at += 1
+        if command is None and word in GIT_VALUED:
+            kept += words[at : at + 1]  # (`-c core.pager=…`: its value.)
+            at += 1
+            continue
+        if command is None and not word.startswith("-"):
+            command = word
+            if command == "grep":
+                break
+            continue
+        if word.startswith("--"):
+            name, equals, _ = word.partition("=")
+            if name in GIT_TEXT_LONG:
+                at += not equals
+                continue
+        elif word.startswith("-") and len(word) > 1:
+            letters = word[1:]
+            text = next((i for i, letter in enumerate(letters) if letter in GIT_TEXT_SHORT), None)
+            if text is not None:
+                at += text == len(letters) - 1  # (`-am <message>`; `-m<message>`.)
+                continue
+        kept.append(word)
+    return kept
 
 
 def gh_refusal(command: str, own: frozenset[str], depth: int = 0) -> str | None:
@@ -5736,6 +5827,8 @@ def gh_refusal(command: str, own: frozenset[str], depth: int = 0) -> str | None:
                 return reason
         elif UNSETTLED.search(rest[0]) and rest[1:2] and rest[1] in GH_GROUPS:
             return GH_UNCHECKED  # (`$G repo delete`, `$(echo gh) repo delete`.)
+        elif name == "git" and (reason := gh_inside(["git", *git_code_words(rest)], own)):
+            return reason  # (`git rebase -x 'gh …'`, `git -c core.pager='gh …' log`.)
         elif name not in GH_TEXT and (reason := gh_inside(rest, own)):
             return reason
         _, script = code_of(rest, False, xargs)

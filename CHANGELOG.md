@@ -23,7 +23,10 @@ worker's `gh` only reads.
   `gh run view`, `gh repo clone`, `gh api` reads, …), and `gh pr create` from a branch of the
   worker's own; any other gh command, an extension's or an alias's too, is refused and the
   worker asks you. That includes `gh pr edit` and `gh pr ready` on its own PR, and
-  `gh auth token`.
+  `gh auth token`. gh run another way is read the same: through `sh -c`, `xargs`, `uv run`,
+  `git rebase -x`, `git -c core.pager=…`, or inline code (`python3 -c`, `node -e`, awk's
+  `system()`). `gh api`'s options are read as gh reads them (`-fname=x` is a field, so a
+  POST), and a GraphQL query taken from a file or a variable counts as a write.
 - **A command named in quotes is checked too.** `"g"it push …` or `g\h repo delete` skipped
   the floor's check altogether. Quotes and backslashes are now read through.
 

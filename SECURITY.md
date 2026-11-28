@@ -457,6 +457,10 @@ the checks you approved run.
   that isn't a shell's redirection or a known writer (`python3 -c …`), or an alias only another
   repository has, run in a folder the line names by a variable (`cd "$D" && git p …`).
   Protect your default branch on the server too.
+- The gh check reads gh's words where a line or inline code says them plainly (`gh repo
+  delete`, `["gh", "repo", "delete"]`); gh named by code the line builds at run time
+  (`"g" + "h"`), a script file it runs (`bash s.sh`, `make`, `npm run`), or another program
+  that calls GitHub's API with your token is not read.
 - Unsandboxed commands run as you: they can reach whatever your account can, including
   keychain items that do not ask for a password.
 - The sandbox does not confine Copilot's built-in file edits as strictly as shell commands
