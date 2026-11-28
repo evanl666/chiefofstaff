@@ -12963,7 +12963,10 @@ async def round_agent_smooth(runtime, browser, failures: list[str]):
             dialog = page.locator("dialog.agent-setup")
             await expect(dialog.locator("h2")).to_have_text("Install Claude Code")
             await expect(dialog.locator(".setup-command code")).to_have_text(script)
-            await expect(dialog.locator("footer button")).to_have_text(["Copy command", "Install"])
+            # Not now beside them (QA 0.1.61 U10, self-handle).
+            await expect(dialog.locator("footer button")).to_have_text(
+                ["Not now", "Copy command", "Install"]
+            )
             await ux_shoot(page, "smooth-install-consent", scheme, "dialog.agent-setup")
             if scheme == "dark":
                 await dialog.get_by_role("button", name="Install").click()
