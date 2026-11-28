@@ -123,6 +123,14 @@ async def test_sent_reply_makes_the_drafter_follow_the_conversation(tmp_path):
         "slack:D0ALICE01",
     ]
     assert harness.store.one("SELECT id FROM triggers WHERE key='slack:1712345680.000100'")
+    # A new message there (QA 0.1.61 T2): the Slack session hears the owner's language, for its
+    # next draft's note; the thread's message comes as it was written.
+    harness.store.set("owner_language", "English")
+    said = "Alice: 那个修复合并了吗?"
+    assert await runtime.on_thread("slack", "slack:D0ALICE01", ["slack:1712345690.000100"], said)
+    told = harness.session(slack_id).sent[-1]
+    head = '<message from="slack" type="thread" thread="slack:D0ALICE01" trust="untrusted"'
+    assert f'{head} reply_in="English">\n{said}\n</message>' in told, told
 
 
 async def test_watchdog_reviews_and_intervenes(tmp_path):

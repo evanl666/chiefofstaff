@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import FakeSlackMcp, FakeTokens, Harness, call_tool, slack_tool
+from conftest import FakeSlackMcp, FakeTokens, Harness, call_tool, settle, slack_tool
 
 from chiefofstaff import threads
 from chiefofstaff.habits import slack_entries
@@ -1055,3 +1055,22 @@ async def test_a_reply_in_your_notes_reads_as_such(tmp_path):
     shown = runtime.drafts.shown({"kind": "slack", "target": target})
     assert shown == "your reply in your notes to yourself, in a thread"
     assert runtime.drafts.recipient("D0SELF001", {}) == "your notes to yourself"
+
+
+async def test_the_slack_session_is_told_the_owners_language(tmp_path):
+    """QA 0.1.61 T2 (live, 2 of 2 drafts): an owner who writes only English got Slack draft
+    cards whose note was in Chinese. The Router's message to the Slack session names the
+    owner's language (reply_in), for what it tells the owner (a draft's note); the reply it
+    drafts stays in the language of the Slack conversation (its prompt says which is which)."""
+    harness = Harness(tmp_path, Settings(slack_enabled=True))
+    runtime = await harness.connect()
+    try:
+        harness.store.set("owner_language", "English")
+        slack = harness.store.open_sessions("slack")[0]["id"]
+        text = "Draft a reply to Alice: the fix is on a branch, not merged yet."
+        await call_tool(runtime, "message_session", harness.router_id, session_id=slack, text=text)
+        await settle(runtime)
+        [told] = [m for m in harness.store.messages(slack) if m["kind"] == "router"]
+        assert 'reply_in="English"' in told["meta"]["prompt"], told["meta"]["prompt"]
+    finally:
+        await runtime.stop()

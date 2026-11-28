@@ -620,8 +620,8 @@ class SplitTask(BaseModel):
 
 # What a draft's card says it answers: the owner reads it, not the person the draft is for.
 OWNER_NOTE = (
-    "One line for the owner: what this answers, in the owner's language (Chinese for an owner "
-    "who writes Chinese, even when the reply itself is in English)"
+    "One line for the owner: what this answers, in the owner's language (the reply_in of the "
+    "message that asked for it), whatever language the reply itself is in"
 )
 
 
@@ -2878,7 +2878,10 @@ class Tools:
         to_follow = list(dict.fromkeys(params.follow + pulls))
         if target["role"] != WORKER:
             self.runtime.follow(target["id"], to_follow, asked=params.follow)
-            prompt = wrap("router", "message", params.text)
+            # The Slack session's notes for the owner (a draft's) in the owner's language; the
+            # reply it drafts stays in the conversation's (its prompt says which is which).
+            spoken = self.store.get("owner_language", "") if target["role"] == SLACK else ""
+            prompt = wrap("router", "message", params.text, reply_in=spoken)
             if target["role"] == SLACK and (said := self.owner_said(caller, quoted)):
                 prompt += "\n\n" + wrap("system", "context", said)
             if target["role"] == SLACK and (handed := self.handed_in(to_follow)):

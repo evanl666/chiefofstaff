@@ -24,6 +24,9 @@
 - **A restart no longer moves the Router onto an agent whose limit is used up.** It stays where
   it runs until that limit resets (it used to switch there and back, two fresh Router sessions,
   at each restart).
+- **A Slack draft's note is in your language**, the reply itself in the conversation's: the Slack
+  session is told which language you write in, for what it tells you (a card's "what this
+  answers"), and the reply it drafts stays in the language of the message it answers.
 
 ## 0.1.60 (2026-11-26)
 
