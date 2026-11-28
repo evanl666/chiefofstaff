@@ -31,6 +31,21 @@ worker's `gh` only reads.
   delete` and `GIT push origin HEAD:main` skipped the floor's check altogether. macOS's file
   system ignores case, so `GIT` runs git there; a force push or a push to `main` went through
   that way too. Quotes and backslashes are now read through, and names are read in any case.
+- **A line the floor can't read is refused.** Some lines got past the floor whatever they ran,
+  because it couldn't see what they would run:
+  - a command whose name the shell only makes as it runs;
+  - code piped into a shell;
+  - git configuration that runs a command (hooks, a `!` alias, a pager, an ssh command, a
+    filter);
+  - gh or git copied, linked, or found on a PATH the line sets.
+
+  These are now refused for every worker. A shell fed a heredoc is still allowed: the floor
+  checks the heredoc's lines as the commands they are. Plain settings (`core.pager=cat`,
+  `GIT_EDITOR=true`) still run. One change if you use yolo: a download piped into a shell
+  (`curl … | sh`) is refused too, so a worker saves the script first, then runs it.
+- **Text that only mentions a write runs.** `grep -rn "gh pr merge" .` or an `echo` of a push
+  was refused as if it ran. Text that is only printed or searched is no longer read as a
+  command; written to a file or piped on, it still is.
 
 No message is lost to a restart: what a session was on as Chief of Staff restarted goes to it
 again once it is back, and it says it is reconnecting meanwhile, never that it is thinking.
