@@ -4355,9 +4355,9 @@ class TaskActions:
                 session_id, text, clear_questions=False, tell_router=tell_router
             )
             return {"session_id": session_id}
-        if question.get("went_on"):
-            # The worker went on without it: told which question this answers, on its task (or
-            # on the task that continues it).
+        if question.get("went_on") or question.get("moved_from"):
+            # The worker went on without it, or its work moved to another task: told which
+            # question this answers, on its task (or on the task that continues it).
             return await self.follow_up(
                 task["id"], text, resume=True, answers=question, tell_router=tell_router
             )
@@ -4589,17 +4589,20 @@ class TaskActions:
         if answers:
             asked = " ".join((answers.get("text") or "").split())[:1500]
             moved = answers.get("moved_from") or {}
+            late = answers.get("went_on")
             on = (
                 f"a question asked earlier on task {moved.get('task_id')} “{moved.get('title')}”, "
-                "which this task continues; its worker went on without it"
+                "which this task continues"
+                + ("; its worker went on without it (no answer came in time)" if late else "")
                 if moved
-                else "the question you asked earlier on this task and went on without"
+                else "the question you asked earlier on this task and went on without (no "
+                "answer came in time)"
             )
             prompt += "\n\n" + wrap(
                 "system",
                 "context",
-                f"This is the owner's answer to {on} (no answer came in time): “{asked}”. "
-                "Take it into account from here, and say in your next report what it changes.",
+                f"This is the owner's answer to {on}: “{asked}”. Take it into account from "
+                "here, and say in your next report what it changes.",
             )
         if switched := self.runtime.switched_language(row["id"], spoken):
             # A conversation in one language pulls the answer back into it.

@@ -600,26 +600,29 @@ class Asks:
     def task_ended(self, task: dict):
         """A task ended (accepted, failed, cancelled): the questions its worker went on without
         leave Needs you with it, unless its work goes on: in the task that replaced or
-        superseded it, whenever there is one still open (they go there, to the worker doing it
-        now: answered, that worker hears it), or in its worker, reopened (cancelled as its
-        worker was closed, as a question it waited on stays then)."""
-        ended = [
-            question
-            for question in self.session_questions(task["session_id"])
-            if question.get("went_on") and question.get("task_id") == task["id"]
-        ]
-        if not ended or (
-            task["status"] == "cancelled" and self.store.get(f"closedtask:{task['id']}")
-        ):
+        superseded it, whenever there is one still open (they go there, every question asked
+        on it, to the worker doing it now: answered, that worker hears it), or in its worker,
+        reopened (cancelled as its worker was closed, as a question it waited on stays then)."""
+        if task["status"] == "cancelled" and self.store.get(f"closedtask:{task['id']}"):
             return
         instead = self.runtime.tasks.find(
             self.store.get(f"replacedby:{task['id']}")
             or self.store.get(f"supersededby:{task['id']}")
             or ""
         )
+        going = bool(instead and instead["status"] not in ENDED)
+        # Its work going on elsewhere (Continue with…, a replacement), every question it asked
+        # on it goes there, never answered to a worker no longer at it (QA 0.1.61 Q6).
+        ended = [
+            question
+            for question in self.session_questions(task["session_id"])
+            if question.get("task_id") == task["id"] and (going or question.get("went_on"))
+        ]
+        if not ended:
+            return
         for question in ended:
             self.store.delete(f"ownerq:{question['id']}")
-            if not instead or instead["status"] in ENDED:
+            if not instead or not going:
                 continue
             moved = {key: value for key, value in question.items() if key != "id"} | {
                 "task_id": instead["id"],
@@ -627,8 +630,17 @@ class Asks:
                 or {"task_id": task["id"], "title": task["title"]},
             }
             card = question.get("draft_id") or uuid4().hex[:8]
-            self.store.set(
-                f"ownerq:{instead['session_id']}:{instead['id']}:{card}", json.dumps(moved)
+            ref = f"{instead['session_id']}:{instead['id']}:{card}"
+            self.store.set(f"ownerq:{ref}", json.dumps(moved))
+            subject = self.runtime.ledger.subject_of("question", question["id"])
+            self.runtime.ledger.file(
+                "question",
+                ref,
+                instead["session_id"],
+                instead["id"],
+                moved.get("text") or "",
+                options=moved.get("options") or None,
+                subject=subject["id"] if subject else "",
             )
         self.closed(task["session_id"], ended, "")
         self.runtime.publish_state()
@@ -902,7 +914,7 @@ class Asks:
             if said := self.held_ask(session_id, task):
                 return {"answer": said, "wasFreeform": True}  # No card built without it.
             target["task_id"] = task["id"] if task else ""
-            if said := self.decided_already(session_id, task, question):
+            if said := self.decided_already(session_id, task, question, target["choices"]):
                 return {"answer": f"({said})", "wasFreeform": True}
             self.drop_went_on(session_id, target["task_id"], question[:2000])
 
@@ -922,13 +934,16 @@ class Asks:
         )
         return result if result is not None else {"answer": NO_ANSWER, "wasFreeform": True}
 
-    def decided_already(self, session_id: str, task: dict | None, question: str) -> str:
+    def decided_already(
+        self, session_id: str, task: dict | None, question: str, options: Sequence[str] = ()
+    ) -> str:
         """A question card on a choice the owner decided already (in its request, or for its
         task): their decision is its answer, no card (E152). Once for each decision: asked the
         same again, the owner sees it (the card says what they decided before)."""
         ledger = self.runtime.ledger
         linked = {d["id"] for d in self.runtime.decisions.for_task(task["id"])} if task else set()
-        for match in ledger.match(question, ledger.anchor(session_id, task["id"] if task else "")):
+        anchor = ledger.anchor(session_id, task["id"] if task else "")
+        for match in ledger.match(question, anchor, options=options):
             decision = ledger.decided(match["subject"]) if match["level"] == "same" else None
             if not decision or not (match["joins"] or decision["id"] in linked):
                 continue

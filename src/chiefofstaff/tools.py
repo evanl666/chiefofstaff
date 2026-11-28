@@ -2854,6 +2854,8 @@ class Tools:
                 target["id"], task["id"] if task else "", by="router", text=params.text
             )
             self.runtime.asks.answered(target["id"], "", by="router", text=params.text)
+            # Its decision card too, answered once through the Router (QA 0.1.61 Q1).
+            await self.runtime.decisions.relayed(target["id"], task, params.text)
             if (
                 task
                 and task["status"] == "waiting"
@@ -4227,7 +4229,7 @@ class Tools:
         """The open subject a note of the Router's asks the same as (any worker's ask: the
         Router joins any), or the decision in force on one."""
         ledger = self.runtime.ledger
-        for match in ledger.match(text, ""):
+        for match in ledger.match(text, "", names=ledger.names()):
             if match["level"] != "same":
                 continue
             if ledger.live(match["subject"]["id"]):
@@ -4534,7 +4536,11 @@ class Tools:
             and row["role"] == WORKER
             and params.status in {"question", "blocked"}
             and not peers
-            and (said := self.runtime.asks.decided_already(caller, task, params.summary))
+            and (
+                said := self.runtime.asks.decided_already(
+                    caller, task, params.summary, params.options
+                )
+            )
         ):
             # A choice the owner made already, asked again as a question (E152): their decision.
             raise ValueError(said)
@@ -4935,6 +4941,9 @@ class Tools:
             # stays). Progress keeps it: answered, withdrawn or asked again, it ends (E155). A
             # done report that asks it again keeps it (live D6).
             self.runtime.asks.answered(caller, task["id"] if task else "", by="worker")
+        if done_ask[0] == "card" and task:
+            # Finished without the owner's decision: its card is no longer needed.
+            self.runtime.decisions.withdraw(caller, task, "No longer needed: its task is done.")
         if done_ask[0] == "embedded" and task:
             # What it asks the owner at its end is their question, not lost with the result.
             self.runtime.asks.record_question(caller, done_ask[1], task["id"], choice=done_ask[2])
@@ -5078,23 +5087,29 @@ class Tools:
         choose ("embedded", E152): the kind, the ask, and whether it is a choice. Held once
         (raises), with how to ask; reported again, it is taken as it is. ("", "", False) for
         neither."""
-        asked = [
-            question["text"]
-            for question in self.runtime.asks.session_questions(caller)
-            if question.get("task_id") == task["id"] and not question.get("went_on")
-        ] + [
-            card["target"]["question"]
+        cards = [
+            card
             for card in self.runtime.decisions.open_cards("decision")
             if any(
                 a["session_id"] == caller and a.get("task_id") == task["id"]
                 for a in card["target"]["askers"]
             )
         ]
+        asked = [
+            question["text"]
+            for question in self.runtime.asks.session_questions(caller)
+            if question.get("task_id") == task["id"] and not question.get("went_on")
+        ] + [card["target"]["question"] for card in cards]
         ending = embedded_ask(summary)
         if asked and (
             still_waits(summary) or (ending and any(likeness(ending, text)[0] for text in asked))
         ):
             kind, said, choice = "open", asked[-1], False
+        elif cards:
+            # Done while its own decision card waits (QA 0.1.61 Q1: the card stayed next to the
+            # result, and answered later, a second decision was in force): held once; reported
+            # again, the card is withdrawn.
+            kind, said, choice = "card", cards[-1]["target"]["question"], False
         elif ending:
             kind, said = "embedded", ending
             choice = not still_waits(summary)
@@ -5105,6 +5120,13 @@ class Tools:
         if self.store.get(key) == mark:
             return kind, said, choice
         self.store.set(key, mark)
+        if kind == "card":
+            raise ValueError(
+                f"Not reported: your decision card {cards[-1]['id']} (“{clip(said, 300)}”) still "
+                "waits for the owner. If the task needs their decision, end your turn now: it "
+                'arrives as a type="decision" message. If it is finished without it, call '
+                "report again: the card is withdrawn, no longer needed."
+            )
         if kind == "open":
             raise ValueError(
                 f"Not reported: your ask to the owner on task {task['id']} (“{clip(said, 300)}”) "

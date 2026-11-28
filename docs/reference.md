@@ -959,11 +959,14 @@ Work that does not rely on the decision carries on untouched.
 blocked report, a question card, a note of the Router's, or an ask at the end of a worker's
 report), Chief of Staff files it under its *subject*: the choice it is about. Sameness is Chief
 of Staff's call, not the asking worker's: two asks are the same choice when they share most of
-their telling words (numbers such as *1.11* whole; Chinese by pairs of characters), with no model
-call. Within one of your requests (the workers of a team) or one worker's tasks, asks of the same
+their telling words (numbers such as *1.11* whole; Chinese by pairs of characters) and neither
+asks about something the other doesn't, with no model call. "Which port should the API server
+use?" and "Which port should the metrics server use?" are two choices, as are staging and prod,
+even with the same options: when unsure, it asks. Within one of your requests (the workers of a team) or one worker's tasks, asks of the same
 choice are one card under *Needs you*: *Asked by 2 workers + the Router: one answer reaches them
-all*, with what each asked folded in it (*Not the same* gives one its own card again), and the
-count says one. Across requests nothing joins by itself: the card says *Possibly the same as
+all*, with what each asked folded in it and each worker's own question when it said it in other
+words (*Not the same* gives one its own card again), and the count says one; a team's page
+says it once (*A and B ask you: …*). Across requests nothing joins by itself: the card says *Possibly the same as
 “…”* (and what you decided on it, if you did), and **Merge** makes them one (merged into one you
 decided, it is answered with that decision).
 
@@ -975,16 +978,24 @@ as your decision on that choice (replacing the one before, whose tasks hear the 
 above); words that pick none of the options of a choice you decided before are a note, and the
 decision stays. A question with no options (a file, a token, an account) is answered for every
 worker that asked it, and not kept as a decision. A card of a choice you decided before says so
-quietly: *Decided before: you picked “1.11” at 10:01*.
+quietly: *Decided before: you picked “1.11” at 10:01*. The Router passing on your answer to a
+worker waiting on its card (`answers_question`) answers that card (*Answered through the
+Router*: an option your words name is your decision), and a decision the Router records for its
+task answers a card of that choice; a card still open when its choice was decided another way
+replaces that decision when you answer it: never two in force.
 
 When a worker asks a choice you decided before (in its request, or for its own task in other
-words or among the same options), it gets your decision back, not a card: it asks again only to have you reconsider,
+words or among the same options), it gets your decision back, not a card (and a worker asking
+again what its own open card asks gets that card, whatever it says): it asks again only to have you reconsider,
 saying why, or for another decision it says is one. Another question on a task you decided
 something for is asked as usual. A worker whose open tasks rely on a decision it was not told
 (nothing else said it) reads *Decisions in force for your tasks* with its next message, once. A
 report of *done* that asks you something at its end is held once (the worker is told to ask on a
 card, or to leave the ask out); sent again as it was, its ask is kept as its question under
-*Needs you*, not lost with the result. One that asks again what its open question or blocked
+*Needs you*, not lost with the result. Done while its own decision card is open, it is held
+the same way; reported done again, the card leaves (*No longer needed: its task is done*). A
+worker's open question moves with its work when you continue it on another agent: your answer
+reaches the worker doing it. One that asks again what its open question or blocked
 report asks leaves that ask open. A worker that asks before it has read your answer (it reached the worker while it worked)
 gets that answer instead of a card, and *Handled for you* says so; so does a question it asks
 before reading a newer message of yours or the Router's about its task: it reads that first.
@@ -1005,6 +1016,10 @@ you picked 1.11), it is kept quietly: nobody is told to redo anything, and nothi
 only possibly the same is kept beside it, and the Router is told which it may change. A decision the Router records for tasks already given reaches
 their workers too (a question one of them asked you stays until the Router says the decision
 answers it). What workers confirm about a change stays on its card after *Got it*.
+
+A card keeps a worker's words whole: a long question, why or option effect folds at a word with
+"…", and **More** opens it all; an option's own words are never cut. A question longer than a
+card holds (1,500 characters) is refused with how to say it shorter, never cut silently.
 
 ## How you work: learned, and kept up to date
 

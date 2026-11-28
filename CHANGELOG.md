@@ -110,6 +110,41 @@ Home shows the Router's chat at once, and the page reads less and says it right.
   and two (`@codex @claude`) compare them. A worker whose name starts like an agent's (*Codex
   migration*) is still that worker, and one turned off says so, with your words back in the box.
 
+Decision cards: a card you answered another way leaves, one choice is one card, and two
+choices are never one.
+
+- **An answer you gave in the Router's chat answers the card.** The Router passed your answer on
+  to the worker, but its decision card stayed under *Needs you* beside the finished result, and
+  answering it later put a second decision in force. Now the Router passing on your answer
+  closes the card ("Answered through the Router"), keeping your pick as the decision; a decision
+  the Router records for the worker's task answers its card the same way; and a card still open
+  when its choice was decided another way replaces that decision when you answer it, never adds
+  a second one in force.
+- **A worker that finishes with its card still open asks you or drops it.** Its done report is
+  held once (ask on the card, or report done without the ask); reported done again, its card
+  leaves (*No longer needed: its task is done*).
+- **Its own card is not asked twice.** A worker that asked the same choice again in other words
+  while its card was open got a second card when it said the choice was another one
+  (`distinct=true`); Chief of Staff tells sameness: it gets that card back.
+- **Two choices that share words are two cards.** "Which port should the API server listen on:
+  8080 or 9090?" and "… the metrics server use …" were one card that showed only the first
+  question, and "Deploy the API to prod now?" was told the owner had decided it already because
+  of "Deploy the API to staging now? → Yes". Asks are now the same choice only when neither asks
+  about something the other doesn't, even with the same options; when unsure they are two cards,
+  *Possibly the same as* (*Merge*). A card several workers ask in their own words shows each
+  one's question.
+- **A question moves with its work.** After *Continue with* another agent, the old worker kept
+  its open question and your answer went to it. The question now moves to the worker doing the
+  work, and your answer reaches that one.
+- **A team's page asks once.** One card two parts wait on read as two needs ("needs you too");
+  the brief now says *Order page and Email ask you: …*, and their rows *Asks you, with …
+  (above)*.
+- **Nothing on a card is cut mid-word.** A long question, its why and its options' effects were
+  cut at a fixed length with no "…", losing the choice at the question's end ("Redis or
+  Memcached?"). A question is kept whole (one too long for a card is refused, with how to say it
+  shorter, never cut silently); the card folds long text at a word with "…", and **More** opens
+  it all. An option's own words are never cut.
+
 A new README, a short guide and the full reference; the demo runs every agent.
 
 - **A new README, a short guide, and the full reference.** The README (on PyPI too) shows the

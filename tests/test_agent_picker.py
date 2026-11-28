@@ -1201,3 +1201,36 @@ async def test_a_workers_tokens_show_against_its_limit(tmp_path, claude_on_path)
         assert view["token_limit"] == 50000 and view["tokens"] > 0
     finally:
         await runtime.stop()
+
+
+async def test_a_question_open_when_its_work_continues_on_another_agent_moves_with_it(
+    tmp_path, claude_on_path
+):
+    """QA 0.1.61 Q6: a worker's open question stayed with it when its work went on to another
+    agent (Continue with…), and the owner's answer went to the closed worker. The question
+    moves with the work: one item under Needs you, its answer to the worker doing it now."""
+    from chiefofstaff.digest import needs
+
+    asking = "Call the report tool with arguments " + json.dumps(
+        {"status": "question", "summary": "Port 8080 or 9090?", "options": ["8080", "9090"]}
+    )
+    harness, runtime = await started(tmp_path)
+    try:
+        await saved(runtime, {"claude": {"enabled": True}})
+        made = await spawn_on(harness, runtime, title="Ports", instructions=asking, agent="claude")
+        worker = made["session_id"]
+        await until(lambda: runtime.asks.session_questions(worker), 30)
+        await until(lambda: harness.store.session(worker)["status"] != "working", 30)
+        moved = await runtime.continue_on(worker, "copilot")
+        await settle(runtime)
+        now = moved["session_id"]
+        assert not runtime.asks.session_questions(worker), "never answered to a closed worker"
+        [question] = runtime.asks.session_questions(now)
+        assert needs(runtime).count() == 1
+        before = len(harness.session(now).sent)
+        await runtime.task_actions.answer_question(question["id"], "9090")
+        await settle(runtime)
+        assert any("9090" in sent for sent in harness.session(now).sent[before:])
+        assert not runtime.asks.session_questions(now) and needs(runtime).count() == 0
+    finally:
+        await runtime.stop()

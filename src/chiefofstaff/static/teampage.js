@@ -196,6 +196,11 @@ function modelOf(view) {
     ctx.tasks.set(row.id, { ...row, ...(known || {}), started_at: row.started_at, lead: row.lead, rest: row.rest });
   }
   const st = ts.teamState(team, ctx);
+  // The card or question each part asks the owner: parts asking one card are one need.
+  for (const part of st.parts) {
+    const ask = part.state === "needs" && ts.needKind(part.marker) === "ask" ? askOf(part) : null;
+    part.askKey = ask ? (ask.draft?.id ? `draft:${ask.draft.id}` : `question:${ask.question?.id || part.task}`) : "";
+  }
   const brief = ts.briefOf(team, st, ctx.now);
   const made = madeOf(st, ctx);
   // This request's decisions; one made before it that a part relies on only "also applies".
@@ -350,8 +355,10 @@ function briefCard(model, view) {
     node.setAttribute("aria-label", "What needs you");
     const ask = brief.need === "ask" ? askOf(part) : null;
     const who = el("span", { class: "who", text: part.name });
+    const along = brief.along || [];
+    const asks = along.length ? [" and ", el("span", { class: "who", text: ts.listed(along) }), " ask you"] : [" asks you"];
     if (brief.need === "review") put(say, who, `'s result is ready${part.row?.lead ? `: ${part.row.lead}` : "."}`);
-    else if (brief.need === "ask") put(say, who, ask?.text ? ` asks you: ${firstSentence(ask.text)}` : " asks you something.");
+    else if (brief.need === "ask") put(say, who, ...asks, ask?.text ? `: ${firstSentence(ask.text)}` : " something.");
     else if (part.marker === "failed") put(say, who, " failed.");
     else put(say, who, ` needs you: ${part.phase?.why || ts.needsWords(part.marker, part.name)}.`);
     const waited = brief.need === "review" ? "" : `It has waited ${ts.duration(brief.waited)}. `;
@@ -645,15 +652,18 @@ function planCard(model, view) {
 }
 function partRow(model, view, part) {
   const { st, team, brief } = model;
-  const ask = part.state === "needs" && ts.needKind(part.marker) === "ask" ? askOf(part) : null;
-  const words = ts.partWords(team, st, part, { ask: ask ? firstSentence(ask.text) : "", clock });
+  // Asking the card the brief shows with others: said once, above.
+  const joined = brief.kind === "need" && (brief.along || []).length && part.askKey && part.askKey === brief.part?.askKey;
+  const ask = part.state === "needs" && ts.needKind(part.marker) === "ask" && !joined ? askOf(part) : null;
+  const mates = joined ? [brief.part.name, ...brief.along].filter((name) => name !== part.name) : [];
+  const words = joined ? `Asks you, with ${ts.listed(mates)} (above)` : ts.partWords(team, st, part, { ask: ask ? firstSentence(ask.text) : "", clock });
   const cls = partClass(part);
   const avatar = partAvatar({ ...part, cls: cls + (part.state === "needs" || (part.state === "blocked" && part.held?.minutes >= ts.BLOCKING_MINUTES) ? " is-review" : "") }, { large: true });
   const kind = ts.needKind(part.marker);
   let primary = null;
   if (part.state === "needs" && kind === "review" && !st.done) primary = el("button", { type: "button", class: view.review === part.id ? "secondary" : "", text: "Review", "aria-expanded": String(view.review === part.id), onclick: (event) => { event.stopPropagation(); openReview(part.id); } });
   else if (part.state === "needs" && ask && brief.part?.id !== part.id) primary = el("button", { type: "button", text: "Answer", "aria-expanded": String(view.answering === part.id), onclick: (event) => { event.stopPropagation(); view.answering = view.answering === part.id ? "" : part.id; view.opening = view.answering; renderTeam(); } });
-  else if (part.state === "needs" && brief.part?.id !== part.id) [primary] = stuckActions(part);
+  else if (part.state === "needs" && brief.part?.id !== part.id && !joined) [primary] = stuckActions(part);
   else if (part.state === "blocked" && part.held?.minutes >= ts.BLOCKING_MINUTES && brief.part?.id !== part.id) primary = nudgeButton(part.held, st.parts.find((one) => one.id === part.held.to)?.name || "");
   const outs = (model.made || []).filter((item) => item.part === part.id).slice(0, 3);
   const mark = markOf(workerOf(part.moved_out?.session || part.session));

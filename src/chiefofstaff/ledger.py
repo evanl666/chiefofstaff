@@ -43,10 +43,10 @@ POSSIBLY = "possibly"
 LATIN = re.compile(r"[a-z0-9]+(?:\.[0-9]+)*")
 # Words any question to the owner uses: they tell no choice from another.
 STOP = catalog.STOP | frozenset(
-    "about again all any ask asked asking choose choice decide decided decision get go going "
-    "if instead into is keep kept may might more must need needed needs next no not now ok "
-    "okay one option options pick prefer question shall should so some still than us use want "
-    "wants yes".split()
+    "about again all any ask asked asking call choose choice confirm decide decided decision "
+    "get go going if instead into is keep kept know may might more must need needed needs next "
+    "no not now ok okay one option options pick prefer question shall should so some still "
+    "suggest than think us use want wants yes".split()
 )
 CJK_STOP = frozenset(
     "我们 你们 是否 需要 还是 哪个 哪一 应该 选择 决定 一下 可以 这个 那个 什么 现在 继续 请你 "
@@ -94,9 +94,31 @@ def topic(text: str) -> frozenset[str]:
     return frozenset(found)
 
 
-def likeness(one: str, other: str) -> tuple[str, float]:
+def apart(a: frozenset[str], b: frozenset[str], values: frozenset[str] = frozenset()) -> bool:
+    """Whether two asks' words each name something the other does not (the API's port and the
+    metrics server's, staging and prod, login and signup: QA 0.1.61 Q3, Q4): two choices,
+    however many words they share. Not numbers, nor the options' own words (`values`): those
+    are what is chosen ("serve 1.12 instead?" asks the same choice as "which k?")."""
+
+    def telling(mine: frozenset[str], theirs: frozenset[str]) -> bool:
+        # (Chinese pairs: one whose characters are all in the other's words says nothing new.)
+        chars = {c for word in theirs for c in word}
+        return any(
+            word not in values
+            and len(word) > 1
+            and not any(c.isdigit() for c in word)
+            and not (catalog.CJK.fullmatch(word) and set(word) <= chars)
+            for word in mine - theirs
+        )
+
+    return telling(a, b) and telling(b, a)
+
+
+def likeness(one: str, other: str, values: frozenset[str] = frozenset()) -> tuple[str, float]:
     """Whether two asks are about the same choice: SAME (the same words, or most of the shorter
-    one's telling words in the other), POSSIBLY (several shared), or "" (not)."""
+    one's telling words in the other, and nothing in each the other does not name), POSSIBLY
+    (several shared), or "" (not). When unsure, not the same: the owner sees both (Merge).
+    `values`: the words of the options asked (what is chosen, not what about)."""
     if plain(one) and plain(one) == plain(other):
         return SAME, 1.0
     a, b = topic(one), topic(other)
@@ -106,11 +128,21 @@ def likeness(one: str, other: str) -> tuple[str, float]:
     small, large = sorted((len(a), len(b)))
     held = shared / small
     # Two words a long report happens to share with a short question are not its subject.
-    if held >= 0.6 and (shared >= 3 or large <= 8):
+    if held >= 0.6 and (shared >= 3 or large <= 8) and not apart(a, b, values):
         return SAME, held
     if held >= 0.35:
         return POSSIBLY, held
     return "", 0.0
+
+
+def option_words(options: Sequence[str]) -> frozenset[str]:
+    """The words of the options an ask gives (Rule A, Rule B: rule, a, b)."""
+    found: set[str] = set()
+    for option in options:
+        text = unicodedata.normalize("NFKC", option).casefold()
+        found |= {stem(word) for word in LATIN.findall(text)}
+        found |= topic(option)
+    return frozenset(found)
 
 
 # Words that say nothing of a decision's value. Not "no", "only", "not", "all": they are it
@@ -140,15 +172,16 @@ def same_value(old: str, new: str) -> bool:
     return bool(said) and value_words(answer or old) <= said and said <= value_words(old)
 
 
-def related(one: str, other: str) -> bool:
+def related(one: str, other: str, values: frozenset[str] = frozenset()) -> bool:
     """Whether a question is about what a decision of its own task settled: the same, or half
     the telling words of the shorter shared (R1: "Which tie rule, then?" of "Rule A or rule
-    B?"). An unrelated one on that task is not (owner report 0.1.58: "already decided")."""
-    if likeness(one, other)[0]:
+    B?"), with nothing in each the other does not name (prod is not staging: QA 0.1.61 Q4). An
+    unrelated one on that task is not (owner report 0.1.58: "already decided")."""
+    if likeness(one, other, values)[0] == SAME:
         return True
     a, b = topic(one), topic(other)
     shared = len(a & b)
-    return bool(shared) and shared / min(len(a), len(b)) >= 0.5
+    return bool(shared) and shared / min(len(a), len(b)) >= 0.5 and not apart(a, b, values)
 
 
 def subject_id() -> str:
@@ -251,13 +284,39 @@ class Ledger:
         theirs = self.anchors(subject)
         return not anchor or not theirs or theirs == {anchor}
 
-    def match(self, text: str, anchor: str, exclude: str = "") -> list[dict]:
-        """The subjects an ask is about, best first: {subject, level, joins}."""
+    def values(self, subject: dict) -> frozenset[str]:
+        """The words of the options a subject was asked with (what is chosen on it)."""
+        found: list[str] = []
+        for row in self.store.all(
+            "SELECT options FROM asks WHERE subject_id=? AND options!=''", (subject["id"],)
+        ):
+            found += json.loads(row["options"])
+        return option_words(found)
+
+    def decision_values(self, decision: dict) -> frozenset[str]:
+        """The words of the options a decision was made among (its subject's), and its own."""
+        subject = self.of_decision(decision)
+        found = self.values(subject) if subject else frozenset()
+        return found | option_words([decision["text"].partition(" \u2192 ")[2]])
+
+    def match(
+        self,
+        text: str,
+        anchor: str,
+        exclude: str = "",
+        options: Sequence[str] = (),
+        names: frozenset[str] = frozenset(),
+    ) -> list[dict]:
+        """The subjects an ask is about, best first: {subject, level, joins}. `options`: the
+        choices it gives; `names`: words it may use only to say whom it is about (the Router's
+        note names the worker)."""
         found = []
+        mine = option_words(options) | names
         for subject in self.candidates():
             if subject["id"] == exclude:
                 continue
-            levels = [likeness(text, said) for said in self.texts(subject)]
+            values = mine | self.values(subject)
+            levels = [likeness(text, said, values) for said in self.texts(subject)]
             level, score = max(levels, key=lambda pair: (pair[0] == SAME, pair[1]))
             if level:
                 found.append(
@@ -271,10 +330,19 @@ class Ledger:
         found.sort(key=lambda item: (not item["joins"], item["level"] != SAME, -item["score"]))
         return found
 
-    def same(self, text: str, anchor: str) -> dict | None:
+    def same(self, text: str, anchor: str, options: Sequence[str] = ()) -> dict | None:
         """The subject an ask from `anchor` joins by itself, if one."""
-        found = self.match(text, anchor)
+        found = self.match(text, anchor, options=options)
         return found[0]["subject"] if found and found[0]["joins"] else None
+
+    def names(self) -> frozenset[str]:
+        """The words of open workers' names and their tasks' titles."""
+        found: set[str] = set()
+        for row in self.store.open_sessions():
+            found |= topic(self.runtime.display_title(row))
+        for task in self.runtime.tasks.listed():
+            found |= topic(task["title"])
+        return frozenset(found)
 
     def file(
         self,
@@ -305,7 +373,7 @@ class Ledger:
             return {**found, "text": text, "options": chosen}
         anchor = self.anchor(session_id, task_id)
         if not subject and join:
-            subject = (self.same(text, anchor) or {}).get("id", "")
+            subject = (self.same(text, anchor, options or ()) or {}).get("id", "")
         stamp = now()
         if subject:
             self.store.execute(

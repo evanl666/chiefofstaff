@@ -288,11 +288,15 @@ export function briefOf(team, st, now = Date.now()) {
     let unblocks = "";
     if (after.length && kind === "review" && gated) unblocks = `${listed(after)} ${after.length > 1 ? "start" : "starts"} once you accept it.`;
     else if (after.length) unblocks = `${listed(after)} can't start until ${part.name} is done.`;
-    const others = st.parts.filter((other) => other.state === "needs" && other !== part);
+    // Parts that ask the owner the same card (one choice, joined): one need, asked by them all
+    // (QA 0.1.61 Q10: "needs you too" for the card the brief shows).
+    const same = (other) => Boolean(part.askKey) && other.askKey === part.askKey;
+    const along = st.parts.filter((other) => other !== part && other.state === "needs" && same(other)).map((other) => other.name);
+    const others = st.parts.filter((other) => other.state === "needs" && other !== part && !same(other));
     let also = "";
     if (others.length === 1) also = needKind(others[0].marker) === "review" ? `${others[0].name}'s result is ready too (below).` : `${others[0].name} needs you too (below).`;
     else if (others.length) also = `${others.length} more parts need you (below).`;
-    return { kind: "need", need: kind, part, marker: part.marker || "", waited: need.waited, unblocks, also };
+    return { kind: "need", need: kind, part, marker: part.marker || "", waited: need.waited, unblocks, also, along };
   }
   if (st.held) {
     const after = waitingOn(team, st.held.id, st).map(name);

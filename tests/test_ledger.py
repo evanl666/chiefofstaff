@@ -34,17 +34,41 @@ def held_for(harness, session_id: str) -> str:
 @pytest.mark.parametrize(
     ("one", "other", "level"),
     [
-        ("Which k should the ranker serve?", "Serve k 1.12 instead? It scores better.", "same"),
+        (
+            "Which k should the ranker serve?",
+            "Serve k 1.12 instead? The ranker scores better.",
+            "same",
+        ),
+        # Each names something the other does not: only possibly the same (QA 0.1.61 Q3).
+        ("Which k should the ranker serve?", "Serve k 1.12 instead? It scores better.", "possibly"),
         ("Do we support SMS login in v1?", "Is there SMS login?", "same"),
         (
             "Round invoices to cents or whole units?",
             "Invoice totals: whole units or cents?",
+            "possibly",
+        ),
+        (
+            "Round invoice totals to cents or whole units?",
+            "Invoice totals: cents or units?",
             "same",
         ),
+        # Two choices that share most words (QA 0.1.61 Q3, Q4): never one by itself.
+        (
+            "Which port should the API server listen on: 8080 or 9090?",
+            "Which port should the metrics server use: 8080 or 9090?",
+            "possibly",
+        ),
+        ("Deploy the API to staging now?", "Deploy the API to prod now?", "possibly"),
+        ("How many retries for uploads?", "How many retries for downloads?", "possibly"),
+        ("Which cache DB: Redis or Postgres?", "Which main DB: Redis or Postgres?", "possibly"),
         ("How should invoice totals be rounded?", "Round invoice totals to cents?", "same"),
         ("Serving k 1.12 from the ranker?", "Which k does the ranker serve?", "same"),
         ("夜港：金币要留到下一晚吗？", "金币留到下一晚吗", "same"),  # noqa: RUF001
-        ("Limit login attempts per account?", "Limit signup attempts per account or IP?", "same"),
+        (
+            "Limit login attempts per account?",
+            "Limit signup attempts per account or IP?",
+            "possibly",
+        ),
         ("Deploy the api to staging or prod?", "Which k should the api serve in prod?", "possibly"),
         ("Light the lighthouse at dusk?", "夜港：金币要留到下一晚吗？", ""),  # noqa: RUF001
         ("Which k to serve?", "Fix the flaky login test, then serve the docs with k8s.", ""),
@@ -509,3 +533,207 @@ async def test_a_store_from_before_files_its_open_asks_and_decisions_once(harnes
                     summary="Inter or the system font on the login page?")  # fmt: skip
     [subject] = runtime.snapshot()["subjects"]
     assert subject["asked_by"] == "asked by 2 workers"
+
+
+# QA 0.1.61 (decision fixes): reproduced on 2dcf5fb, live on real Copilot (L5-L8).
+
+PORTS = [{"choice": "8080"}, {"choice": "9090"}]
+TIE = "Which tie-break rule: Rule A or Rule B?"
+
+
+async def asked_in_turn(runtime, harness, title, question, options=()):
+    """A worker at work (its conversation shows its task) that asks a decision card."""
+    worker = await spawn(runtime, harness.router_id, title)
+    session = harness.session(worker["session_id"])
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "ask_decision", worker["session_id"], question=question,
+                    options=list(options))  # fmt: skip
+    [card] = [d for d in harness.store.drafts() if d["kind"] == "decision"]
+    return worker, card
+
+
+async def test_q2_its_own_card_asked_again_with_distinct_is_that_card(harness):
+    """Live L8: its card open, the worker asked the same choice in other words and passed
+    distinct=true itself: two cards for one choice. Chief of Staff tells sameness: that card."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Export")
+    sid = worker["session_id"]
+    formats = [{"choice": "CSV"}, {"choice": "JSON"}]
+    await call_tool(runtime, "ask_decision", sid, question="Should the export be CSV or JSON?",
+                    options=formats)  # fmt: skip
+    [card] = harness.store.drafts()
+    which = "Which file format do you want for the export: CSV or JSON?"
+    again = await call_tool(runtime, "ask_decision", sid, options=formats, distinct=True,
+                            question=which)  # fmt: skip
+    assert again.result_type == "success" and card["id"] in again.text_result_for_llm
+    assert "Asked already" in again.text_result_for_llm
+    assert [d["id"] for d in harness.store.drafts()] == [card["id"]]
+    assert needs(runtime).count() == 1
+    other = await call_tool(runtime, "ask_decision", sid, distinct=True,
+                            question="Gzip the export file?",
+                            options=[{"choice": "Yes"}, {"choice": "No"}])  # fmt: skip
+    assert "Asked the owner" in other.text_result_for_llm, "another choice: a card of its own"
+
+
+async def test_q3_teammates_different_choices_sharing_words_are_two_cards(harness):
+    """Live L6 / UI U3: the API's port and the metrics server's port (one request, the same
+    options) were joined: one card showing only the API question. Two cards; each worker gets
+    its own answer."""
+    runtime = await harness.connect()
+    api = await spawn(runtime, harness.router_id, "API server")
+    metrics = await spawn(runtime, harness.router_id, "Metrics server", why_new="parallel")
+    one_request(harness, api, metrics)
+    api_port = "Which port should the API server listen on: 8080 or 9090?"
+    metrics_port = "Which port should the metrics server use: 8080 or 9090?"
+    await call_tool(runtime, "ask_decision", api["session_id"], options=PORTS, question=api_port)
+    second = await call_tool(runtime, "ask_decision", metrics["session_id"], options=PORTS,
+                             question=metrics_port)  # fmt: skip
+    assert "Asked the owner" in second.text_result_for_llm, second.text_result_for_llm
+    cards = {d["target"]["question"]: d for d in harness.store.drafts()}
+    assert len(cards) == 2
+    for question, answer in (("API server listen", "8080"), ("metrics server use", "9090")):
+        card = next(c for q, c in cards.items() if question in q)
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text=answer))
+    await settle(runtime)
+    assert "8080" in harness.session(api["session_id"]).sent[-1]
+    assert "9090" in harness.session(metrics["session_id"]).sent[-1]
+
+
+async def test_q3_a_joined_card_shows_each_askers_own_question(harness):
+    runtime = await harness.connect()
+    api = await spawn(runtime, harness.router_id, "Login API")
+    form = await spawn(runtime, harness.router_id, "Login form", why_new="parallel")
+    one_request(harness, api, form)
+    await call_tool(runtime, "ask_decision", api["session_id"],
+                    question="Do we support SMS login in v1?")  # fmt: skip
+    await call_tool(runtime, "ask_decision", form["session_id"], question="Is there SMS login?")
+    [card] = harness.store.drafts()
+    assert [a.get("question") for a in card["target"]["askers"]] == [None, "Is there SMS login?"]
+
+
+@pytest.mark.parametrize("teammate", [False, True])
+async def test_q4_prod_is_not_answered_by_the_staging_decision(harness, teammate):
+    """Live L7: answered "Deploy the API to staging now?" Yes, "Deploy the API to prod now?"
+    (the same worker, or a teammate) was told "decided already: go on with it". A card."""
+    runtime = await harness.connect()
+    yes_no = [{"choice": "Yes"}, {"choice": "No"}]
+    stage = asker = await spawn(runtime, harness.router_id, "Staging deploy")
+    if teammate:  # Of the same request.
+        asker = await spawn(runtime, harness.router_id, "Prod deploy", why_new="parallel")
+        one_request(harness, stage, asker)
+    session = harness.session(stage["session_id"])
+    session.emit("user.message", content=session.sent[-1])
+    await settle(runtime)
+    await call_tool(runtime, "ask_decision", stage["session_id"], options=yes_no,
+                    question="Deploy the API to staging now?")  # fmt: skip
+    [card] = harness.store.drafts()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Yes"))
+    await settle(runtime)
+    if not teammate:  # Its next turn.
+        session.emit("user.message", content=session.sent[-1])
+        await settle(runtime)
+    asked = await call_tool(runtime, "ask_decision", asker["session_id"], options=yes_no,
+                            question="Deploy the API to prod now?")  # fmt: skip
+    assert "decided this already" not in asked.text_result_for_llm, asked.text_result_for_llm
+    assert len(harness.store.drafts()) == 1
+
+
+async def test_q1_the_router_passing_the_owners_answer_on_answers_its_card_once(harness):
+    """Live L5 / UI U5: the owner answered in the Router chat, the Router relayed it
+    (answers_question); the card stayed under Needs you beside the result, and answered later,
+    a second decision. The card is answered through the Router, once."""
+    runtime = await harness.connect()
+    rules = [{"choice": "Rule A"}, {"choice": "Rule B"}]
+    worker, card = await asked_in_turn(runtime, harness, "Tie breaker", TIE, rules)
+    await call_tool(runtime, "message_session", harness.router_id,
+                    session_id=worker["session_id"], task="note",
+                    text="The owner says: Rule B.", answers_question=True)  # fmt: skip
+    await settle(runtime)
+    closed = harness.store.draft(card["id"])
+    assert closed["status"] == "answered" and closed["outcome"].startswith("Answered through")
+    [decision] = runtime.decisions.active()
+    assert decision["text"] == "Which tie-break rule: Rule A or Rule B? → Rule B"
+    assert runtime.tasks.get(worker["task_id"])["status"] == "running"
+    with pytest.raises(ValueError, match="already handled"):  # A late click: no second.
+        await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule A"))
+    assert len(runtime.decisions.active()) == 1
+
+
+async def test_q1_the_router_recording_the_answer_for_its_task_answers_its_card(harness):
+    runtime = await harness.connect()
+    rules = [{"choice": "Rule A"}, {"choice": "Rule B"}]
+    worker, card = await asked_in_turn(runtime, harness, "Tie breaker", TIE, rules)
+    await call_tool(runtime, "record_decision", harness.router_id, tasks=[worker["task_id"]],
+                    decision="Which tie-break rule: Rule A or Rule B? → Rule A")  # fmt: skip
+    await settle(runtime)
+    assert harness.store.draft(card["id"])["status"] == "answered"
+    assert needs(runtime).count() == 0
+    assert len(runtime.decisions.active()) == 1
+    assert runtime.tasks.get(worker["task_id"])["status"] == "running"
+
+
+async def test_q1_a_card_answered_after_its_choice_was_decided_replaces_it(harness):
+    """Never two decisions in force for one choice: a card still open when its choice was
+    decided another way, answered then, replaces that decision."""
+    runtime = await harness.connect()
+    rules = [{"choice": "Rule A"}, {"choice": "Rule B"}]
+    worker, card = await asked_in_turn(runtime, harness, "Tie breaker", TIE, rules)
+    decided = await runtime.decisions.record(
+        "Which tie-break rule: Rule A or Rule B? → Rule A", [worker["task_id"]], [], "owner"
+    )
+    subject = runtime.ledger.subject_of("decision", card["id"])
+    runtime.ledger.decide(subject["id"], decided["decision"]["id"])
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Rule B"))
+    await settle(runtime)
+    assert [d["text"] for d in runtime.decisions.active()] == [
+        "Which tie-break rule: Rule A or Rule B? → Rule B"
+    ]
+
+
+async def test_q1_done_while_its_own_card_is_open_is_held_then_withdraws_it(harness):
+    runtime = await harness.connect()
+    rules = [{"choice": "Rule A"}, {"choice": "Rule B"}]
+    worker, card = await asked_in_turn(runtime, harness, "Tie breaker", TIE, rules)
+    sid = worker["session_id"]
+    done = "Added rule B, as recommended."
+    held = await call_tool(runtime, "report", sid, status="done", summary=done)
+    assert held.result_type == "failure" and card["id"] in held.text_result_for_llm
+    assert harness.store.draft(card["id"])["status"] == "pending"
+    await call_tool(runtime, "report", sid, status="done", summary=done)
+    gone = harness.store.draft(card["id"])
+    assert gone["status"] == "expired" and gone["outcome"].startswith("No longer needed")
+    assert needs(runtime).count() == 1, "its result to accept, not the card"
+
+
+async def test_q11_a_long_question_is_kept_whole_and_its_answer_in_the_decision(harness):
+    """A 320-character question was cut mid-word at 300, its choice ("Redis or Memcached?")
+    lost, and nobody told. Kept whole (the card folds it); one too long is refused, saying how;
+    the decision keeps the answer."""
+    runtime = await harness.connect()
+    worker = await spawn(runtime, harness.router_id, "Ranker cache")
+    question = (
+        "Which cache should the ranker use for the nightly batch, given the memory limit on the "
+        "shared node and the latency budget the API team asked for, and the fact that the batch "
+        "now also feeds the morning report, which reads it at 7 AM sharp, so a slow cache "
+        "delays the report and the people reading it? Redis or Memcached?"
+    )
+    options = [{"choice": "Redis"}, {"choice": "Memcached"}]
+    refused = await call_tool(runtime, "ask_decision", worker["session_id"],
+                              question=question * 5, options=options)  # fmt: skip
+    assert refused.result_type == "failure" and "in a line or two" in refused.text_result_for_llm
+    await call_tool(runtime, "ask_decision", worker["session_id"], question=question,
+                    options=options, why="x " * 400)  # fmt: skip
+    [card] = harness.store.drafts()
+    assert card["target"]["question"] == question
+    assert card["target"]["why"] == ("x " * 400).strip()
+    await runtime.drafts.resolve(card["id"], DraftDecision(action="answer", text="Redis"))
+    [decision] = runtime.decisions.active()
+    assert decision["text"] == f"{question} → Redis"
+    longer = await runtime.decisions.record(f"{question * 3} → Memcached", [], [], "owner")
+    said = longer["decision"]["text"]
+    assert said.endswith("… → Memcached") and len(said) <= 500, "its answer kept"
+    long_option = await call_tool(runtime, "ask_decision", worker["session_id"],
+                                  question="Which store for sessions?",
+                                  options=[{"choice": "y" * 250}, {"choice": "Redis"}])  # fmt: skip
+    assert long_option.result_type == "failure" and "a few words" in long_option.text_result_for_llm

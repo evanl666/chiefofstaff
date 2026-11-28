@@ -88,6 +88,13 @@ export function shortPaths(text) {
 const TRAILING = /(?:[.,;:!?'"]|&quot;|&#39;)+$/;
 const unescapeHtml = (text) => text.replace(/&(amp|lt|gt|quot|#39);/g, (_, name) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[name]);
 export const shorten = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
+// Text cut at a word before `max`, marked with "…" (never mid-word: QA 0.1.61 Q11).
+export function clipWords(text, max) {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:.\-–—]+$/, "")}…`;
+}
 // A PR's title as GitHub has it ("owner/repo#n", any case), once Chief of Staff read it.
 export function prTitle(key) {
   return state.snapshot?.pr_titles?.[String(key).toLowerCase()] || "";
