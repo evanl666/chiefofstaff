@@ -155,6 +155,9 @@ Home shows the Router's chat at once, and the page reads less and says it right.
   (or *closed.*) and goes to *Recently finished*, first, however long ago its task finished
   (under *Monitoring* while the task still waits on something else).
 - *Ready to merge*'s *Details* names the PR, with its link.
+- **A Slack draft's note is in your language**, the reply itself in the conversation's: the Slack
+  session is told which language you write in, for what it tells you (a card's "what this
+  answers"), and the reply it drafts stays in the language of the message it answers.
 
 Decision cards: a card you answered another way leaves, one choice is one card, and two
 choices are never one.

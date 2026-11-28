@@ -11862,6 +11862,9 @@ class Runtime:
         delivered = []
         for session_id, task, told, shown in recipients:
             attributes = {"task": task["id"]} if task else {}
+            if (row := self.store.find_session(session_id)) and row["role"] == SLACK:
+                # Its draft's note in the owner's language (its reply in the thread's).
+                attributes["reply_in"] = self.store.get("owner_language", "")
             held = {
                 "prompt": wrap(
                     source, "thread", told, thread=thread, trust=UNTRUSTED, **attributes
