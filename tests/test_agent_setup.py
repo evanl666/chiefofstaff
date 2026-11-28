@@ -365,6 +365,50 @@ async def test_an_agent_turned_off_or_stopped_while_it_starts_is_not_left_runnin
         await runtime.stop()
 
 
+@pytest.mark.parametrize("how", ["signin", "update"])
+async def test_an_agent_made_ready_on_homes_first_run_card_starts_chief_of_staff_at_once(
+    tmp_path, codex_installed, monkeypatch, quick, how
+):
+    """QA 0.1.61 U2: no agent ready (Copilot not installed), Codex signed in (or updated) from
+    Home's card said "✓ Codex is ready" while the card still said none was, and Chief of
+    Staff started on it only at recover's next step, minutes later. Now it starts at once: the
+    run says so meanwhile (starting), and is done once Chief of Staff runs."""
+    from test_without_copilot import not_installed
+
+    _, runs = codex_installed
+    monkeypatch.setattr(runtime_module, "RECONNECT_DELAY", 300.0)  # (recover: not by itself.)
+    monkeypatch.setenv(*(("FAKE_CODEX_SIGNED_OUT", "1") if how == "signin" else
+                         ("FAKE_CODEX_VERSION", "0.160.0")))  # fmt: skip
+    harness = Harness(tmp_path / "data")
+    harness.runtime.backend_factory = not_installed([])
+    runtime = await harness.connect()
+    seen: list[dict] = []
+    publish = runtime.bus.publish
+
+    def published(kind, *data):
+        if kind == "agent_setup":
+            seen.append(data[0])
+        publish(kind, *data)
+
+    runtime.bus.publish = published  # type: ignore[method-assign]
+    try:
+        assert (runtime.status["state"], runtime.status.get("waits")) == ("error", True)
+        if how == "signin":
+            await runtime.setups.sign_in("codex")
+            await until(lambda: runtime.setups.view()["codex"].get("url"))
+            approve()
+        else:
+            await runtime.setups.update("codex")
+        await until(lambda: runtime.setups.view()["codex"]["state"] != "running", 30)
+        assert runtime.setups.view()["codex"]["state"] == "done"
+        assert runtime.ready(), "it runs as the run says Codex is ready"
+        assert runtime.agent(harness.router_id) == "codex"
+        assert any(view.get("starting") for view in seen), "said meanwhile"
+        assert ran(runs).count(how if how == "update" else "login") == 1
+    finally:
+        await runtime.stop()
+
+
 async def test_a_sign_in_still_running_ends_as_chief_of_staff_stops(
     tmp_path, codex_installed, monkeypatch, quick
 ):

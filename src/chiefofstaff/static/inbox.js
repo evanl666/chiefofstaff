@@ -12,7 +12,7 @@ import { artifactItems } from "./artifacts.js";
 import { preparedItems } from "./prepared.js";
 import { duck } from "./mascot.js";
 import { agentName } from "./agentpick.js";
-import { setupAction, setupWords, statusFor } from "./agentsetup.js";
+import { setupAction, setupKind, setupWords, statusFor } from "./agentsetup.js";
 import { heldItem, heldQuestions, peerWaiting, teamsSection } from "./team.js";
 import { folding, subjectVersion } from "./subjects.js";
 // What waits for the owner: cards to approve or answer, and the tasks the board puts under
@@ -765,9 +765,28 @@ const TERMINAL = {
   codex: ["curl -fsSL https://chatgpt.com/codex/install.sh | sh", "codex login"],
   claude: ["curl -fsSL https://claude.ai/install.sh | bash", "claude auth login"],
 };
+// What each needs, in a terminal: its update where it is too old, its sign-in where it is
+// installed and signed out, its install then sign-in where it is not installed; nothing for one
+// with nothing of the owner's to run (ready, being set up by Chief of Staff, being looked at).
+function terminalSteps(name) {
+  const status = statusFor(name);
+  const [install, login] = TERMINAL[name];
+  if (setupKind(status) === "update") return [el("code", { text: status.update.command })];
+  if (status?.status === "signin") return [el("code", { text: login })];
+  if (!status || status.status === "missing") return [el("code", { text: install }), ", then ", el("code", { text: login })];
+  return null;
+}
 function inTerminalFold(names) {
-  const lines = names.map((name) => el("li", {}, `${agentName(name)}: `, el("code", { text: TERMINAL[name][0] }), ", then ", el("code", { text: TERMINAL[name][1] })));
-  return el("details", { class: "setup-manual" }, el("summary", { text: "Or in a terminal" }), el("ul", {}, ...lines));
+  const lines = names.map((name) => [name, terminalSteps(name)]).filter(([, steps]) => steps);
+  if (!lines.length) return "";
+  return el("details", { class: "setup-manual" }, el("summary", { text: "Or in a terminal" }), el("ul", {}, ...lines.map(([name, steps]) => el("li", {}, `${agentName(name)}: `, ...steps))));
+}
+// The card's lead, as what they need: install (none is installed), else getting one ready.
+function setupLead(names, one) {
+  const kinds = names.map((name) => setupKind(statusFor(name)) || statusFor(name)?.status || "install");
+  if (kinds.every((kind) => ["install", "missing"].includes(kind))) return one ? "Install it and sign in:" : "Install one and sign in:";
+  if (one && kinds[0] === "signin") return "Sign in:";
+  return one ? "Get it ready:" : "Get one of them ready:";
 }
 // (On Windows, Chief of Staff runs on Copilot only.)
 const offered = () => (state.snapshot.runtime.windows ? ["copilot"] : SETUP_AGENTS);
@@ -822,7 +841,7 @@ function setupCard() {
           el("div", { class: "head" }, el("span", { class: "label", text: "Set up a coding agent" })),
           el("p", { text: "Chief of Staff runs your work in GitHub Copilot, Codex or Claude Code sessions, and none of them is ready yet:" }),
           el("p", { class: "muted", text: snap.runtime.error }),
-          el("p", { text: `Install one and sign in: Chief of Staff runs each step for you. ${then}` }),
+          el("p", { text: `${setupLead(offered())} Chief of Staff runs each step for you. ${then}` }),
           el("ul", { class: "setup-agents" }, ...offered().map(agentStep)),
           inTerminalFold(offered()),
           el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),
@@ -836,7 +855,7 @@ function setupCard() {
           snap.runtime.windows
             ? el("p", { class: "muted", text: "On Windows, Chief of Staff runs on GitHub Copilot for now: Codex and Claude Code need macOS or Linux." })
             : el("p", { class: "muted", text: "Codex or Claude Code can run it too: turn one on in Settings → Agents & models." }),
-          el("p", { text: `Install it and sign in: Chief of Staff runs each step for you. ${then}` }),
+          el("p", { text: `${setupLead(["copilot"], true)} Chief of Staff runs each step for you. ${then}` }),
           el("ul", { class: "setup-agents" }, agentStep("copilot")),
           inTerminalFold(["copilot"]),
           el("div", { class: "actions" }, el("span", { class: "muted", text: "Or look around first: chiefofstaff --demo" }), retry),

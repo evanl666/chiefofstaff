@@ -67,8 +67,11 @@ Staff.
   do. *Install* shows Copilot's official installer (`curl -fsSL https://gh.io/copilot-install |
   bash`; npm or Homebrew under *Other ways*) and runs it, then goes on to *Sign in*, which shows
   Copilot's sign-in page and one-time code; once you've entered it, Chief of Staff starts on Copilot
-  by itself. Home's card lists each agent with what it needs and its button, the commands folded
-  under *Or in a terminal*. Copilot turned off and not installed now says *Not installed* with
+  by itself. Home's card lists each agent with what it needs and its button, the commands for what
+  each needs (its install, sign-in or update) folded under *Or in a terminal*. An agent signed
+  in, installed or updated there while none could run starts Chief of Staff at once: the dialog
+  says "Chief of Staff is starting on it…" until it runs, then that the agent is ready. Install's
+  dialog has *Not now*. Copilot turned off and not installed now says *Not installed* with
   *Install*, not *Ready · off*.
 - **Update an agent older than the versions tested in one click.** Codex or Claude Code too old to
   run, and Copilot older than tested (the sidebar's line and its row), have *Update*: it shows the
@@ -76,11 +79,11 @@ Staff.
   agent for everything on your computer, runs it once you say so, with its output, and the agent
   turns *Ready* without a restart (Copilot's new version from its next start). If it fails it says
   why, with *Try again*, the command under *Details*; it is never tried again by itself.
-- **Trust the sandbox's certificate.** Settings → Workers → Sandbox no longer leaves you to run
-  `copilot sandbox ca create && copilot sandbox ca trust`: *Trust the sandbox's certificate*, under
-  the line that names them, shows those commands, asks first (macOS asks for your password to add
-  it to your login keychain), runs them, and the line goes once `gh` works inside the sandbox.
-  Claude Code's and Codex's sandboxes need no certificate.
+- **Trust the sandbox's certificate.** Settings → General → Workers → Sandbox no longer leaves you
+  to run `copilot sandbox ca create && copilot sandbox ca trust`: *Trust the sandbox's
+  certificate*, under the line that names them, shows those commands, asks first (macOS asks for
+  your password to add it to your login keychain), runs them, and the line goes once `gh` works
+  inside the sandbox. Claude Code's and Codex's sandboxes need no certificate.
 - **Sign in to an MCP server a Codex or Claude worker needs, on its card.** Its card under *Needs
   you* has *Sign in*, which runs `codex mcp login <server>` or `claude mcp login <server>` for you,
   shows the server's page to open, and answers the card once you've signed in; a Claude worker's
@@ -90,6 +93,9 @@ Staff.
   environment of its own, Chief of Staff updates itself (`pipx upgrade chiefofstaff`, or that
   environment's `uv pip` or `pip`) and starts the new version in its place, as `uv tool` and `uvx`
   installs did. A system's Python, and Windows, still show the command.
+- **Copilot signed out no longer breaks the page's list of models.** It lists none (as while
+  Chief of Staff runs without Copilot) instead of an error, and the terminal no longer prints a
+  traceback for it.
 - **Nothing left running when Chief of Staff stops.** A sign-in, install or update still under way
   as you stop Chief of Staff ends with it, as *Cancel* does: a sign-in no longer keeps waiting on
   its local port.

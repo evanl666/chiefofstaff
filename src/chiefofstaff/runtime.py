@@ -7345,8 +7345,11 @@ class Runtime:
                 await session.disconnect()
 
     async def available_models(self) -> list[dict]:
-        """Copilot's models (none while Chief of Staff runs without Copilot)."""
+        """Copilot's models (none while Chief of Staff runs without Copilot, nor while Copilot
+        can't run: signed out, its CLI there all the same, it lists none and says why)."""
         if self.backend is None and self.copilot_down():
+            return []
+        if self.copilot_problem and self.copilot_problem != COPILOT_STARTING:
             return []
         cached_at, models = self.models_cache
         if models and time.monotonic() - cached_at < 600:
