@@ -41,9 +41,10 @@ No `uv`? `pipx run chiefofstaff --demo` works too. The browser opens by itself.
 ## What it does
 
 1. **Learns to work like you, and from its own mistakes.** It picks up how you write (your Slack
-   messages, PR reviews, commits) and what you keep asking for; habits wait for your OK. When a
-   worker fixes a failing test, it proposes a check that fails on the mistake and passes on the
-   fix: proved on both, so that mistake is caught next time.
+   messages, PR reviews, commits) and what you keep asking for: a habit you said three times or
+   more is usually kept at once (one click undoes it), the rest wait for your OK. When a worker
+   fixes a failing test, it proposes a check that fails on the mistake and passes on the fix:
+   proved on both, so that mistake is caught next time.
 2. **A team whose agents talk to each other.** One request becomes parts, each worker on its own agent and
    worktree. They tell and ask each other directly, wait on each other's results and share your
    decisions; a live team page shows the plan. Or run one task on two agents and compare.
@@ -105,7 +106,7 @@ delivers each message with who sent it, so a Slack message can't pass itself off
 | --- | --- | --- |
 | Works in its own folder and git worktree; your checkouts stay untouched | Sends a Slack reply or posts a PR review in your name | Comment on, review, merge or close a PR as you, or write to issues |
 | Runs tests and builds; pushes its own `chief/…` branches and opens PRs | Merges a PR (one click on its card) | Push to `main` or `master` |
-| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check, a habit or your profile it learned | Force-push a branch that isn't its own |
+| Reads what you let it: your code, Slack, the tools your agents have | Turns on a check or your profile it learned, or a habit you said fewer than three times | Force-push a branch that isn't its own |
 | Asks you instead of guessing | With *Ask first* on: writes outside its folders, `sudo`, any force push | Get your Slack token (no agent ever does) |
 
 Everything runs on your machine; your data stays in your data folder. No account, no telemetry:

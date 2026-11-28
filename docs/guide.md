@@ -180,7 +180,8 @@ A finished result is a card under *Needs you*, marked *New* until you open it.
 
 - **View report** opens it whole, with its receipts.
 - **Accept** finishes the task. **Request changes** sends it back with what to change; its next
-  report is a new result to review. **Follow up** asks more and keeps the result as it is.
+  report is a new result to review. **Follow up** asks more: its worker reports the whole result
+  again, updated, and that replaces the one before.
 - Click the changes (*+12 −3 in 2 files*) to read the diff; click a line to comment, and *Send to
   the worker* sends all your comments as one follow-up.
 - **Create PR** (in **⋯**) pushes the worker's branch and opens a pull request with your `gh`.
@@ -198,10 +199,12 @@ Work is followed until it is really done:
   the Router is not woken.
 - **Check-backs.** A worker waiting on a long run (a training job, a deploy) sets a time to look
   again; its row says when (*↻ in 12 min*) and what it checks.
-- **The Watchdog.** Every minute a cheap check (no model) looks for workers with no activity for
-  15 minutes, the same step repeated, or a turn that ended without a report. The Watchdog session
-  reviews each one and nudges it, interrupts a hung step, or tells the Router. A worker making
-  progress is never disturbed, however long it takes.
+- **The Watchdog.** Every minute a cheap check (no model) looks for workers with no sign of work
+  for 15 minutes, the same step repeated, the same instructions for 45 minutes, or a turn that
+  ended without a report. A model call counts as work while it is open, and a command while its
+  output still grows: a model call that never answers is caught at the 45-minute mark, not at 15.
+  The Watchdog session reviews each one and nudges it, interrupts a hung step, or tells the
+  Router. A worker making progress is never disturbed, however long it takes.
 - **Overdue.** A task with no activity for four hours (*Overdue after*) gets its worker asked
   where it stands; no answer within the hour brings it to *Needs you*.
 
@@ -274,8 +277,8 @@ Watches](reference.md#watches-what-to-look-out-for).
 Turn on Settings → Connections → *When you're away* and say how to reach you ("DM me on Slack
 through our team's bot plugin", or "send it to my own Slack DM"). After some minutes without
 keyboard or mouse, what needs you is sent there once, as a short list, each item with a code of
-its own. Answer where you got it: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2,
-"K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task. A code works once,
+its own. Answer where you got it: "K3XQ7 send" sends a draft, "K3XQ7 2" picks option 2 of a
+decision (or folder 2 of a folder question), "K3XQ7 use port 9090" answers a question, "K3XQ7 retry" retries a failed task. A code works once,
 and only for what it came with; anything else you write there is never taken as a command. *Send
 a test* tries the way you gave. More: [Reference → When you are
 away](reference.md#when-you-are-away).
@@ -315,7 +318,10 @@ More: [Reference → Your other sessions](reference.md#your-other-sessions).
   your Slack messages, PR reviews, commit messages, what you asked your own Copilot sessions, what
   you told the Router. Only your own words. Your writing style applies to drafts at once.
 - **How you work.** Instructions you keep giving ("run a small smoke job first") become
-  **habits**, which wait for your OK under *Your OK*.
+  **habits**. One your own words backed three times or more, and not about secrets, money or what
+  goes out, is kept at once and listed under *Handled for you* with *Undo*; the others wait for
+  your OK under *Your OK*. Once you undo or drop more than one in five of those kept at once,
+  they all wait for your OK again.
 - **Your profile.** Settings → You → *Build from my work* distills a short profile from your
   projects and activity; sessions use it once you approve it.
 - **Checks learned from mistakes.** When a worker's failing test passes after its fix, a helper
